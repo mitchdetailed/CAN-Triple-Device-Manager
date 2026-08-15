@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Updating Firmware</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Updating Firmware</h1>
+
+<p><b>Online&nbsp;→&nbsp;Update Firmware…</b> installs new firmware on a
+connected device over the serial link. No debugger, no dismantling the
+installation.</p>
+
+<h2>What happens, and why it is safe</h2>
+
+<p>The image is not written over the running firmware. It is sent to a spare
+area of the device's flash — the <i>staging</i> area — while the device carries
+on running normally, still handling CAN traffic throughout. Only when the whole
+image has arrived and the device has checked it does it restart and install.</p>
+
+<p>That ordering is what makes an interrupted update harmless. If the cable is
+pulled, the program is closed, or the image turns out to be corrupt, the device
+is still running exactly the firmware it started with. The worst outcome is a
+wasted few seconds.</p>
+
+<p>Even a power cut during the install itself is survivable: the staging copy is
+kept intact until the new firmware is verified in place, so the device simply
+finishes the job the next time it powers up. It will retry the install up to
+three times; a unit interrupted that many times in a row needs an ST-Link.</p>
+
+<h2>Doing it</h2>
+
+<ol>
+<li>Connect to the device as usual (<b>Tools&nbsp;→&nbsp;Connection
+Settings…</b>).</li>
+<li>Open <b>Online&nbsp;→&nbsp;Update Firmware…</b>. The <b>Device</b> panel
+shows what is currently running.</li>
+<li><b>Browse…</b> and pick the <code>.ctf</code> file you were supplied. The
+program checks it immediately, using the same test the device itself
+applies — a damaged or wrong-product file is refused here, before anything is
+sent.</li>
+<li>Read the warnings, if any (see below).</li>
+<li>Leave <b>Save a copy of the device's configuration</b> ticked.</li>
+<li><b>Update Firmware</b>.</li>
+</ol>
+
+<p>A 55&nbsp;KB image takes roughly six seconds to send, and the device is back
+about two and a half seconds after it restarts. The progress bar sits still for
+a moment at the start while the staging area is prepared — that is erasing, not
+a hang.</p>
+
+<h2>The configuration backup</h2>
+
+<p>Some firmware updates change the format the configuration is stored in. When
+that happens the device's saved configuration cannot be read by the new firmware
+and the unit starts up with nothing configured. <b>The configuration cannot be
+recovered from the device afterwards</b> — reading it out beforehand is the only
+opportunity.</p>
+
+<p>So the update reads the configuration out first and saves it as a dated
+<code>.ct3</code> file in:</p>
+
+<p><code>Documents\CAN Triple Device Manager\Firmware Update Backups\</code></p>
+
+<p>If the device does come back empty, the program offers to send the backup
+straight back. On a password-protected device you will be asked for the Send
+Configuration password again at that point — the restart clears the device's
+memory of it, which is expected.</p>
+
+<p>If the backup <i>fails</i>, the update does not start. Continuing would
+destroy the very thing the backup was protecting.</p>
+
+<h2>Warnings you may see</h2>
+
+<table>
+<tr><th>Warning</th><th>What it means</th></tr>
+
+<tr><td>This update changes the stored-configuration format</td>
+<td>The device will start up with no configuration. Keep the backup ticked; the
+program will offer to restore it afterwards.</td></tr>
+
+<tr><td>This image is OLDER than the firmware the device is running</td>
+<td>Going backwards is allowed, but rarely intended. Check you picked the right
+file.</td></tr>
+
+<tr><td>The device is already running version …</td>
+<td>Harmless, but it will not change anything.</td></tr>
+
+<tr><td>This device has no bootloader</td>
+<td>The unit is running firmware from before over-the-wire updates existed. It
+needs a one-time update using an ST-Link debugger; after that it can be updated
+from here like any other. <b>Update Firmware</b> stays disabled until then.</td></tr>
+
+<tr><td>This image needs bootloader version …</td>
+<td>The file is newer than this unit's bootloader can install. You need either
+an older image or a bootloader update over ST-Link.</td></tr>
+</table>
+
+<h2>If something goes wrong</h2>
+
+<p>Reopen <b>Online&nbsp;→&nbsp;Update Firmware…</b> — the <b>Device</b> panel
+reports what happened on the last attempt, including anything that failed while
+nothing was connected to hear about it.</p>
+
+<table>
+<tr><th>Message</th><th>What to do</th></tr>
+
+<tr><td>The device refused the image</td>
+<td>The file did not arrive intact. Try again; if it keeps happening, the file
+itself is probably damaged — get a fresh copy.</td></tr>
+
+<tr><td>Last install attempt failed: checksum does not match</td>
+<td>Same cause, caught after the restart. The previous firmware is still running
+and unharmed.</td></tr>
+
+<tr><td>The device did not come back within 25 seconds</td>
+<td>Wait a little longer, then reconnect and reopen this dialog. The install
+either finished or was never started; either way the device is running valid
+firmware.</td></tr>
+
+<tr><td>The device is password protected</td>
+<td>The update needs the Send Configuration password. On a unit that also guards
+"Get a Configuration", prove that password first from any Online command — the
+dialog cannot read the device's firmware status or take a configuration backup
+without it, and the Update button stays disabled.</td></tr>
+</table>
+
+<p>A device whose front LED is flashing rapidly and which does not answer at all
+has no valid firmware to run and needs an ST-Link. This should not happen from a
+failed update — the running firmware is never touched until a replacement has
+been fully verified — but it is what a physically damaged unit looks like.</p>
+
+<h2>See also</h2>
+
+<ul>
+<li><a href="troubleshooting.html">Troubleshooting</a></li>
+<li><a href="files.html">Configuration files</a></li>
+</ul>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

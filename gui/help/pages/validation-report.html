@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Validation &amp; the Config Summary</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Validation &amp; the Config Summary</h1>
+
+<p>The firmware validates almost nothing, so the application is the safety
+layer. Two File-menu commands report on the open document: <b>Check
+Channels</b> runs the validation rules and lists every finding with a
+severity, and <b>Config Summary…</b> produces a printable MoTeC-style Channel
+Summary Report of everything the configuration defines.</p>
+
+<h2>Check Channels</h2>
+
+<p>To validate the configuration, choose File → Check Channels. The report
+lists one row per finding with columns <b>Severity</b>, <b>Location</b> and
+<b>Message</b>, sorted errors first, then warnings, then info. A line above
+the list states which document state was checked — the check always runs on
+the <i>current in-memory</i> configuration, saved or not, and shows the time
+it ran. The summary underneath reads "No problems found." or
+"<i>N</i> errors, <i>M</i> warnings."</p>
+
+<ul>
+<li><b>Check Again</b> — re-runs the validation (useful after editing in
+another window).</li>
+<li><b>Remove Unused Channels…</b> — offers to delete every catalogue channel
+that nothing generates, uses or references (typically left behind after
+removing a message or clearing out a DBC import). The confirmation shows the
+full list under Show Details; nothing else in the configuration changes.</li>
+</ul>
+
+<p>The same validation runs automatically when you send: Online → Send
+Configuration refuses to run while any Error exists, and opens Check Channels
+to show why. See <a href="online.html">Online: Send, Get &amp; Flash</a>.</p>
+
+<h2>The three severities</h2>
+
+<p>The ladder is a policy decision, not decoration — Send is gated on the top
+rung only.</p>
+
+<table>
+<tr><th>Severity</th><th>Meaning</th><th>Blocks Send</th></tr>
+<tr><td>Error</td><td>The device cannot be given this configuration, or a row
+was left half-finished.</td><td>Yes</td></tr>
+<tr><td>Warning</td><td>The configuration is buildable but a specific
+behaviour is surprising.</td><td>No</td></tr>
+<tr><td>Info</td><td>Worth knowing, never a problem.</td><td>No</td></tr>
+</table>
+
+<h3>Errors — examples</h3>
+
+<ul>
+<li>A CAN ID beyond the standard (11-bit) or extended (29-bit) range.</li>
+<li>A message length outside 0–8 bytes (classic CAN) or outside
+0–8, 12, 16, 20, 24, 32, 48, 64 bytes (CAN FD).</li>
+<li>A duplicate receive CAN ID on one bus — only the first message would
+match.</li>
+<li>A signal that does not fit its frame, or a row with no channel
+selected.</li>
+<li>A message relay that forwards to no bus.</li>
+<li>A Transmit CRC8 message with no CRC channel selected, or a CRC byte
+location outside the message; more than 20 Transmit CRC8 messages across the
+buses — the device runs at most 20 CRC8 rules.</li>
+<li>A calculation with no output channel, or an input set to "channel" with no
+channel chosen.</li>
+<li>A transmit rate outside 1–200 Hz; an integrator rate beyond what the
+engine evaluates.</li>
+<li>A lookup table whose outputs do not match its sites, or a blank table
+axis.</li>
+<li>More than 20 counters and integrators with Preserve value enabled — the
+device retains at most 20 across power cycles and would silently drop the
+excess.</li>
+</ul>
+
+<h3>Warnings — examples</h3>
+
+<p>The channel-level warning that matters most is <b>two things writing the
+same channel</b>. The device has one value slot per channel, so two writers
+overwrite each other and whichever runs last wins. Every writer counts —
+receive rows, math, conditions, counters, timers, integrators, constants,
+table outputs and the channel a Transmit CRC8 message publishes its checksum
+to — an inactive row counts as no writer at all, and one warning is
+raised per channel naming all of its writers. See
+<a href="math-channels.html">Math Channels</a>,
+<a href="conditions.html">Conditions</a>,
+<a href="constants.html">Constants</a> and
+<a href="tables.html">Lookup Tables</a>.</p>
+
+<p>Other warnings include: messages on a bus whose Mode is Off; routing or
+relaying to a bus whose mode is Off; a route or relay mask that includes its
+own bus (ignored by the device); a DBC factor of zero; two channels
+overlapping in a frame; a channel occupying the byte a Transmit CRC8 message
+stamps its checksum into (the stamp runs last and overwrites it); a CRC element
+reading at or past the message length, or reading the CRC's own byte; a
+counter whose maximum does not exceed its minimum; a
+timer with neither a start nor a stop channel; an integrator with no reset
+channel; table axis sites that are not strictly ascending.</p>
+
+<h3>Info — examples</h3>
+
+<p>Referencing a channel — transmitting it, feeding it to a calculation,
+driving a table axis — <i>reads</i> the value and never alters it, so it is
+never an Error or a Warning no matter how many sites do it. The one thing
+worth saying is that a channel nothing writes <i>yet</i> reads its default
+value until a receive row or a calculation writes it — an Info, because
+building a configuration out of order is normal. Other Info entries: unused
+catalogue channels (removable via Remove Unused Channels…), the
+flash-wear note for preserved integrators (see
+<a href="integrators.html">Integrators</a>), and the "Device usage" capacity
+line, which reports how much of each device table the configuration
+occupies.</p>
+
+<h2>Marked messages in the report</h2>
+
+<p>Only the two <em>concealing</em> levels change what the report says. A
+message marked <b>Read Only</b> reports in full — every finding, its CAN ID, its
+bit positions — because Read Only conceals nothing from anybody; see
+<a href="communications.html#marking">Marking a message</a>.</p>
+
+<p>A message marked <b>Hidden</b> or <b>Protect Communication</b> withholds its
+detail from a viewer who has not supplied the password it needs. Its validation
+findings are collapsed into a single entry that keeps the <b>severity</b> — an
+Error on a concealed message still blocks Send, because you must know the
+configuration cannot be used even when you cannot be told why — but drops the
+detail. The entry says how many problems the message reports and tells you to
+open it in Connections → Communications with its own <b>Message Password</b> —
+not File → Reveal Protected Comms, which is the document-wide Edit Protected
+Comms password, opens no Hidden message at all, and is only one of the two things
+a Protect Communication message asks for. Likewise, a CAN ID clash with a
+concealed message is
+reported without naming it or printing its ID; a clash with a Read Only message
+names it and prints the ID like any other.</p>
+
+<h2>Config Summary…</h2>
+
+<p>To produce a report of the whole configuration, choose File → Config
+Summary…. The window shows a column-aligned Channel Summary Report in the
+style of the MoTeC tools, with these sections:</p>
+
+<ul>
+<li><b>Summary Information</b> — file name, title, date, application version,
+and whether the document has unsaved changes.</li>
+<li><b>Configuration Comments</b> — the document's comment text.</li>
+<li><b>CAN Bus Setup</b> — per-bus mode, bit rate, FD data rate and
+termination.</li>
+<li><b>Used Channels</b> — every channel the configuration touches, in first-use
+order.</li>
+<li><b>Channels By Function</b> — Communications first (each section with its
+type, ID, length, alignment, timing, routing and its per-row bit/length/
+type/factor/offset detail), then Calculations (math, conditions, counters,
+timers, integrators, constants and tables, each with what it uses and what it
+generates).</li>
+<li><b>Incomplete Channels</b> — channels something consumes but nothing
+generates, with the list of their users.</li>
+<li><b>Unused Channels</b> — catalogue channels nothing references.</li>
+</ul>
+
+<p>Buttons: <b>Print…</b>, <b>Save PDF…</b> and <b>Save Text…</b> (the
+suggested file name is "<i>&lt;configuration name&gt;</i> Channel Summary",
+next to the saved file when there is one).</p>
+
+<p class="note">The report obeys the same rules as the rest of the application:
+a <b>concealed</b> message contributes its name and its channel names — the
+outputs a customer needs — and marks every row "(hidden)" or "(protected)"
+instead of printing bit positions, IDs, lengths or multiplexor detail. A
+<b>Read Only</b> message prints in full, like any unmarked one. The report is the
+easiest way to walk off with a protocol, so it withholds exactly what the dialogs
+withhold and nothing more.</p>
+
+<h2>Related pages</h2>
+
+<ul>
+<li><a href="online.html">Online: Send, Get &amp; Flash</a> — where Errors
+block and Warnings are shown.</li>
+<li><a href="communications.html">Communications: Messages &amp; Sections</a> —
+the message and channel rules being checked.</li>
+<li><a href="monitor.html">Monitoring Live Values</a> — checking behaviour on
+the device once it passes.</li>
+<li><a href="troubleshooting.html">Troubleshooting</a> — what the two-writers
+warning and other findings look like in practice.</li>
+</ul>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DBC Import</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>DBC Import</h1>
+
+<p>To import messages and signals from an industry-standard .dbc file, open
+<b>Connections &gt; Communications…</b>, pick the bus tab the traffic arrives on,
+and click <b>Import DBC…</b>. After choosing a file (the picker filters on
+"DBC files (*.dbc)"), the <b>Import DBC — <i>filename</i></b> dialog shows every
+message and signal the parser found. Files are decoded as UTF-8, falling back to
+Latin-1 when that produces replacement characters.</p>
+
+<h2>The import dialog</h2>
+
+<ul>
+<li><b>Import into :</b> the target bus — preset to the tab you clicked from,
+changeable here.</li>
+<li><b>Filter :</b> type to filter messages and signals by name.</li>
+<li>The tree has columns <b>Message / Signal</b>, <b>Channel Type</b>,
+<b>Details</b> and <b>Unit</b>. Tick the signals to import; ticking a message row
+ticks all of its signals, and a partially ticked message shows a tristate
+check.</li>
+<li><b>Messages are listed by arbitration id, lowest first</b>, whatever order
+they appear in the file — a DBC has no required message order, and the tool that
+wrote it may have used none you would recognise. Sorting them makes the list
+match a spec sheet and puts related ids together. The sections the import
+creates are made in that same order. Note that the id sorted on is the
+arbitration id itself, so an extended-frame message sorts by its 29-bit id and
+not after every standard one.</li>
+<li>Two columns are editable on signal rows before importing: the name in
+<b>Message / Signal</b> (this becomes the channel name, capped at 31 bytes) and
+<b>Channel Type</b> (the physical quantity, pre-guessed from the DBC
+unit).</li>
+<li><b>Select All</b> / <b>Select None</b> tick or clear everything; the label
+beside them counts "<i>N channel(s) in M message(s) selected</i>".</li>
+<li><b>Parser notes :</b> lists anything the parser had to work around in the
+file itself.</li>
+<li><b>Import</b> is enabled once at least one signal is ticked.</li>
+</ul>
+
+<h2>What an import creates</h2>
+
+<p>Each message with at least one ticked signal becomes a <b>Receive Message</b>
+section on the target bus, and each ticked signal becomes a channel row plus a
+User Channel in the catalogue. The section takes the message's CAN ID, extended
+flag and DLC; a DLC over 8 bytes marks the section CAN FD. Sections are appended
+to the bus — import never overwrites existing sections, and channel names are
+never allowed to clobber existing channels.</p>
+
+<p>If any signal had to be renamed or skipped, a summary box reports
+"Imported N message(s) with M note(s)" — the full list is under
+<b>Show Details</b>.</p>
+
+<h3>Channel names</h3>
+
+<p>The device stores a 31-byte channel label. A longer DBC signal name is clipped
+to that budget (never splitting a multi-byte UTF-8 character), and a name already
+in use gains a numeric suffix ("&nbsp;2", "&nbsp;3", …) that fits inside the same
+budget. Every rename is listed in the import notes.</p>
+
+<h3>Bit positions and byte order</h3>
+
+<p>DBC stores a signal's start bit as its <b>LSB for Intel</b> (@1) but its
+<b>MSB for Motorola</b> (@0); the importer converts Motorola start bits to the
+LSB convention the device uses, so the numbers you see in the section editor are
+Start Bit values (see the frame layout map in
+<a href="communications.html">Communications</a>).</p>
+
+<p class="warn">One section carries one byte order. The section's Alignment is
+taken from the first selected signal; any selected signal with the other byte
+order is skipped, with a note ("byte order differs from the rest of the message —
+skipped"). Split mixed-endianness messages by importing twice with different
+selections if you need both halves.</p>
+
+<h3>Data types, scaling and ranges</h3>
+
+<p>Each imported channel keeps the DBC scaling exactly — physical = raw × factor
++ offset — and its definition is derived as follows:</p>
+
+<ul>
+<li><b>Decimal places</b> come from the factor (0.1 → 1 dp, 0.05 → 2 dp,
+1 → 0 dp).</li>
+<li><b>Range</b>: the DBC's declared [min|max] wins when it is a real span
+(max &gt; min); otherwise the range is everything the field can physically
+encode, pushed through factor and offset.</li>
+<li><b>Data type</b> is the smallest storage type that holds that physical range
+at that precision — chosen from the range and decimals, never from the raw bit
+width, and falling back to float when no integer type reaches. Signedness
+follows the physical range, so an unsigned raw field with offset &#8722;40
+becomes a signed channel. See <a href="channels.html">Channels</a> for the type
+table.</li>
+<li>An <b>IEEE754</b> signal becomes a 32-bit float row and a float channel; a
+1-bit flag with no decimals becomes a boolean.</li>
+<li>Ranges wider than the dialogs' displayed ±1e9 float span are kept intact —
+that span is a display convention, and the range is the device's clamp.</li>
+</ul>
+
+<h3>Multiplexed messages</h3>
+
+<p>A DBC message with a multiplexor imports as a <b>compound</b> section: each
+multiplexor value becomes an identifier (byte offset, ID and ID mask derived from
+the multiplexor field), and that value's signals become the identifier's rows.
+Signals that are not multiplexed — including the multiplexor itself, if ticked —
+apply to every variant, so they are replicated into each identifier (a compound
+section has no shared always-present set). Identifiers are emitted in ascending
+multiplexor-value order.</p>
+
+<p class="warn">The device matches selectors through a 16-bit window, so a
+multiplexor field must be 1–16 bits wide, and a Motorola multiplexor must not
+span multiple bytes. A multiplexor value that cannot be expressed is skipped with
+a note and its channels are not imported; a message whose multiplexed signals all
+fail imports as a plain message carrying only the non-multiplexed
+channels.</p>
+
+<h2>After the import</h2>
+
+<p>Communications Setup switches to the target bus tab with the new sections
+appended and selected. The "N of M device messages used" count spans all three
+buses, so a large import on one bus consumes budget visible on the others.
+Review the result in the section editor — the frame layout map makes overlaps
+obvious — and run <a href="validation-report.html">validation</a> before
+sending.</p>
+
+<p>See also: <a href="communications.html">Communications: Messages &amp;
+Sections</a> · <a href="channels.html">Channels</a> ·
+<a href="online.html">Online: Send, Get &amp; Flash</a></p>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program
+and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

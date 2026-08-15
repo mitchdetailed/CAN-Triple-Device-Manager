@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Channels</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Channels</h1>
+
+<p>A channel is a named value the device holds — "Engine RPM", "Coolant Temp" —
+with a data type, resolution, range and units. Channels are <i>written</i> by
+receive message rows and by calculations
+(<a href="math-channels.html">math</a>, <a href="conditions.html">conditions</a>,
+<a href="constants.html">constants</a>, <a href="tables.html">tables</a>,
+<a href="counters.html">counters</a>, <a href="timers.html">timers</a>,
+<a href="integrators.html">integrators</a>), and <i>read</i> by transmit message
+rows, calculation inputs and the
+<a href="monitor.html">channel monitor</a>. A channel received in one message can
+be re-transmitted in another.</p>
+
+<p>Almost every channel is one you create. The exception is the <b>device
+channels</b> below, which the CAN Triple produces about itself and which are
+always available.</p>
+
+<h2>Device channels</h2>
+
+<p>These come from the firmware rather than from your configuration. They need
+no setup, appear in every document under the <b>Device Channels</b> category,
+and are used exactly like any other channel — as a maths input, a condition
+input, or a channel in a transmit message.</p>
+
+<table>
+<tr><th>Channel</th><th>Type</th><th>Meaning</th></tr>
+<tr><td>Device OnTime</td><td>u32, 2&nbsp;dp, seconds</td>
+<td>How long the device has been powered up and running, in seconds, resolving
+to 0.01&nbsp;s.</td></tr>
+</table>
+
+<h3>CAN diagnostics</h3>
+
+<p>Ten more channels exist for each bus, named <b>Device CAN1 …</b>,
+<b>Device CAN2 …</b> and <b>Device CAN3 …</b>. They report what the CAN
+controller itself sees, which is how you tell a wiring or termination fault from
+a configuration mistake — a bus that is mis-wired shows climbing error counters
+while a bus that is merely mis-configured does not.</p>
+
+<table>
+<tr><th>Channel</th><th>Type</th><th>Meaning</th></tr>
+<tr><td>Device CAN<i>n</i> Rx Errors</td><td>u8, 0–127</td>
+<td>The controller's receive error counter. Climbs on reception errors and falls
+on good frames, so a steady non-zero reading means faults are still arriving.</td></tr>
+<tr><td>Device CAN<i>n</i> Tx Errors</td><td>u8, 0–255</td>
+<td>The transmit error counter. The usual sign of a bus with no other node
+listening, no termination, or the wrong bit rate.</td></tr>
+<tr><td>Device CAN<i>n</i> Warning</td><td>Boolean, Ok/Error</td>
+<td>Set once either counter reaches 96 — the standard's early warning that a bus
+is degrading while still working.</td></tr>
+<tr><td>Device CAN<i>n</i> Error Passive</td><td>Boolean, Ok/Error</td>
+<td>Set while the node has backed off to error-passive: it still communicates,
+but it can no longer flag other nodes' errors.</td></tr>
+<tr><td>Device CAN<i>n</i> Bus Off</td><td>Boolean, Ok/Error</td>
+<td>Set while the node has taken itself off the bus entirely after the transmit
+counter passed 255. Nothing is sent or received on that bus.</td></tr>
+<tr><td>Device CAN<i>n</i> Error Frames</td><td>u32</td>
+<td>How many protocol errors the controller has logged since power-up. A total,
+so it only ever climbs — watch the <i>rate</i> of change, not the number.</td></tr>
+<tr><td>Device CAN<i>n</i> Rx Count</td><td>u32</td>
+<td>Frames received on the bus since power-up.</td></tr>
+<tr><td>Device CAN<i>n</i> Tx Count</td><td>u32</td>
+<td>Frames transmitted on the bus since power-up.</td></tr>
+<tr><td>Device CAN<i>n</i> Bus Load</td><td>u16, 1&nbsp;dp, %</td>
+<td>Estimated bus utilisation over the last second. See the note below.</td></tr>
+<tr><td>Device CAN<i>n</i> Bus Off Recoveries</td><td>u32</td>
+<td>How many times the device has restarted this bus after a bus-off since
+power-up. See <b>Recovery from bus-off</b> below.</td></tr>
+</table>
+
+<p>The three state channels are separate booleans rather than one number
+because they are not exclusive: a bus-off node is also error-passive and also
+in warning, and all three read true at once. Test whichever one you care
+about.</p>
+
+<h3>Recovery from bus-off</h3>
+
+<p>Bus-off is the CAN controller taking itself off the bus after its transmit
+error counter passes 255 — the protocol's way of stopping a faulty node from
+disrupting everyone else. The controller will not rejoin on its own.</p>
+
+<p>The device brings it back automatically. It shuts the bus down, waits one
+second, and starts it again with the settings your configuration asked for. If
+the fault is still there the bus drops straight back into bus-off, and the
+device repeats — down, one second, up — for as long as it takes. Once the fault
+clears, the next attempt sticks and the bus carries on.</p>
+
+<p>A bus you deliberately switched <b>Off</b> in the configuration is never
+restarted, and switching a bus Off while it is retrying stops the retries.</p>
+
+<p class="warn">Restarting a bus resets the CAN controller, and that clears
+<b>Rx Errors</b> and <b>Tx Errors</b> back to zero. On a bus that is retrying,
+read those two as "how bad is the current attempt", not as a history of the
+fault. The two counts that survive a restart are <b>Error Frames</b> and
+<b>Bus Off Recoveries</b> — those are kept by the device itself, and only a
+reset or a power cycle clears them.</p>
+
+<p><b>Device CAN<i>n</i> Bus Off Recoveries</b> counts how many times the device
+has <i>restarted</i> the bus after a bus-off. It counts the attempt, not the
+outcome — on a bus that is still broken the restart is undone in a few
+milliseconds, far too fast to see, and a counter that only recorded lasting
+successes would sit at zero on exactly the bus you are trying to diagnose.
+Whether a restart lasted is what <b>Bus Off</b> beside it tells you:</p>
+
+<table>
+<tr><th>Bus Off</th><th>Recoveries</th><th>What it means</th></tr>
+<tr><td>0</td><td>0</td><td>Healthy — this bus has never gone bus-off.</td></tr>
+<tr><td>0</td><td>steady, non-zero</td><td>Healthy <i>now</i>. It went down that
+many times earlier — worth knowing if you are chasing something
+intermittent.</td></tr>
+<tr><td>1</td><td>climbing about once a second</td><td><b>The fault is still
+there.</b> Every restart fails immediately, so the bus never reads healthy —
+this counter is the only sign the device is still trying. Check wiring,
+termination and bit rate.</td></tr>
+<tr><td>0</td><td>climbing occasionally</td><td><b>Intermittent.</b> The bus
+comes back and works for a while before failing again. <b>Bus Off</b> alone will
+not show this — it reads 0 whenever you happen to look — so this counter is the
+only sign.</td></tr>
+<tr><td>1</td><td>0</td><td>Just went down and the first restart has not
+happened yet. If it stays like this for more than a second or two, the bus is
+failing to start at all — which is a different fault from a bus that keeps
+dropping.</td></tr>
+</table>
+
+<p>The count is a total since power-up. Sending or clearing a configuration
+does not reset it.</p>
+
+<p class="warn"><b>Bus Load is an estimate.</b> The CAN controller counts frames,
+not bits, so the firmware works out how long each frame occupied the bus from its
+ID width and length, and adds an average allowance for the stuff bits the
+protocol inserts. The real number depends on the data being carried and cannot be
+measured exactly. Expect agreement with a dedicated bus analyser to within a few
+percent — good enough to see a bus filling up, not a figure to design a message
+schedule against. It also reads 0 on a bus that is switched off, which is the
+same reading an idle bus gives: use the three state channels, not this one, to
+tell whether a bus is alive.</p>
+
+<h3>MCU health</h3>
+
+<p>Five more channels report what the processor sees about itself. The
+temperature and voltage come from the microcontroller's internal sensors,
+sampled ten times a second with the factory calibration applied.</p>
+
+<table>
+<tr><th>Channel</th><th>Type</th><th>Meaning</th></tr>
+<tr><td>Device MCU Temperature</td><td>s16, 1&nbsp;dp, °C</td>
+<td>The processor die temperature right now. See the accuracy note
+below.</td></tr>
+<tr><td>Device MCU VDDA</td><td>s32, 3&nbsp;dp, V</td>
+<td>The analogue supply voltage right now, measured against the
+factory-calibrated internal reference. Nominally 3.3&nbsp;V.</td></tr>
+<tr><td>Device MCU VDDA Minimum</td><td>s32, 3&nbsp;dp, V</td>
+<td>The lowest supply voltage seen since power-up — a sag detector for flaky
+wiring and failing regulators, which dip far too briefly to catch by
+watching.</td></tr>
+<tr><td>Device MCU Temperature Maximum</td><td>s16, 1&nbsp;dp, °C</td>
+<td>The highest die temperature seen since power-up.</td></tr>
+<tr><td>Device Last Reset Reason</td><td>u8, 0–7</td>
+<td>Why the device last reset, read once at boot and latched — see the table
+below.</td></tr>
+</table>
+
+<p>The Minimum and Maximum are excursions <b>since power-up</b>, and they
+survive sending or clearing a configuration — like the error and frame totals,
+they answer "what has this unit been through", which is exactly the question a
+mid-diagnosis reconfigure must not erase. Only a reset or a power cycle starts
+them over.</p>
+
+<p class="warn"><b>The temperature's tenth of a degree is resolution, not
+accuracy.</b> The die sensor is a ±2&nbsp;°C class device even with its factory
+calibration, so read the decimal as "which way is it moving", not as a
+calibrated thermometer. It also measures the <i>die</i>, which runs warmer than
+the board around it.</p>
+
+<p><b>Device Last Reset Reason</b> is an enumerated value. Wherever live values
+are shown it displays as the name with the number — "Power On (1)"; a number
+outside this table (a newer firmware's new reason) displays bare:</p>
+
+<table>
+<tr><th>Value</th><th>Reason</th><th>Meaning</th></tr>
+<tr><td>0</td><td>Unknown</td><td>The reset flags matched nothing the firmware
+recognises.</td></tr>
+<tr><td>1</td><td>Power On</td><td>A true cold start — power was
+applied.</td></tr>
+<tr><td>2</td><td>Brownout</td><td>The supply dipped low enough to reset the
+processor without fully draining it. A unit that "reboots by itself" with this
+reason has a power problem, not a firmware problem — read <b>Device MCU VDDA
+Minimum</b> next.</td></tr>
+<tr><td>3</td><td>External NRST</td><td>The hardware reset pin was
+pulled.</td></tr>
+<tr><td>4</td><td>Software Reset</td><td>The firmware restarted itself —
+<b>Online → Reset Device</b>, the reboot after a firmware update, or a fault
+handler.</td></tr>
+<tr><td>5</td><td>Independent Watchdog</td><td>The firmware stopped answering
+the independent watchdog and was restarted by it.</td></tr>
+<tr><td>6</td><td>Window Watchdog</td><td>The window watchdog fired.</td></tr>
+<tr><td>7</td><td>Low Power Reset</td><td>Reset on leaving a low-power
+state.</td></tr>
+</table>
+
+<p>A device channel cannot be edited or deleted: its type, resolution and range
+are fixed by the firmware, so the Channel Editor opens it read-only.</p>
+
+<p>You do not have to do anything to use one. Every device channel is sent to
+the device with every configuration, whether or not anything in your document
+reads it, so all of them appear in <b>Monitor Channels</b> as soon as you send a
+configuration and connect. That is the point: when a bus starts misbehaving you
+want the error counters in front of you, not a rebuild-and-resend cycle first.</p>
+
+<p>Because the device writes it, nothing else should. Pointing a calculation's
+output at a device channel raises the usual two-writers warning, and the device
+wins: it republishes the value on every 100&nbsp;Hz evaluation, so the
+calculation would appear to do nothing.</p>
+
+<p><b>Device OnTime</b> counts the <i>device</i> being on, not the
+configuration being loaded. Sending a new configuration, or clearing one, does
+not restart it; only a reset or a power cycle does. The same is true of the
+running totals — <b>Error Frames</b>, <b>Rx Count</b>, <b>Tx Count</b> and
+<b>Bus Off Recoveries</b> — so a counter you are watching climb is not zeroed by
+sending a configuration while you watch it.</p>
+
+<p class="warn">The device carries every channel value as a 32-bit float, and
+the seconds it holds stop resolving 0.01 above <b>131,072</b> — roughly
+36&nbsp;hours of uptime. Past that the hundredths coarsen, and later the tenths
+do too. The clock behind the reading is exact and does not drift; the loss is in
+the value slot. For a long-running unit, treat the seconds as reliable and the
+fraction as decorative. The same limit applies to the frame counts, which
+coarsen past about 16.7&nbsp;million frames. It does <i>not</i> apply to the
+error counters, the state flags, Bus Load or the MCU health channels: those
+stay small enough that a 32-bit float holds them exactly, however long the unit
+runs.</p>
+
+<h2>The Channel Editor</h2>
+
+<p><b>Tools &gt; Channel Editor…</b> lists every channel in the document in one
+sortable table with columns <b>Channel</b>, <b>Data Type</b>, <b>Dec</b>,
+<b>Resolution</b>, <b>Minimum</b>, <b>Maximum</b>, <b>Unit</b>,
+<b>Default on Timeout</b> and <b>Source</b>.</p>
+
+<ul>
+<li><b>Search :</b> filters as you type — any part of the name, or a regular
+expression (^Cruise, Speed$, set|limit).</li>
+<li><b>Default on Timeout</b> shows the value a channel reverts to when its
+receive message times out — filled in only when that message declares a Receive
+Timeout <i>and</i> has "Default value on timeout" enabled (see
+<a href="communications.html">Communications</a>).</li>
+<li><b>Source</b> names what generates the channel: the comms section that
+carries it ("CAN1 · Dash") or publishes its checksum to it ("CAN1 · Dash
+CRC8" — see <a href="communications.html#crc8">Transmit CRC8</a>), or Math,
+Condition, Counter, Timer, Integrator,
+Constant, Table 2x16, Table 8x8 — or "unused".</li>
+<li><b>New…</b> creates a channel; <b>Edit…</b> opens the selected one.
+Double-clicking a row also opens it.</li>
+</ul>
+
+<p class="warn">A row drawn in the warning colour has a data type too small for
+its own range — the device clamps every reading to what the type can represent,
+so such a channel reads as stuck at its ceiling. The Data Type column shows the
+suggested replacement (e.g. "u16  &#9888; &#8594; u32") and the summary line
+counts the affected channels. Fix it by editing the channel's type.</p>
+
+<p>A channel carried by a marked message shows a padlock &#128274; and is greyed.
+That is <em>every</em> level — <b>Read Only</b>, <b>Hidden</b> and <b>Protect
+Communication</b> alike — because the lock is about editing, not about secrecy:
+changing a channel's data type, resolution, decimal places, range or units
+silently changes what its message decodes to. Its definition is read-only, the
+Edit… button becomes <b>View…</b>, and the dialog opens with every value visible
+and nothing writable. Supplying the message's password does not unlock it: that
+buys the right to untick the marking, and unticking is what allows editing. See
+<a href="communications.html#marking">Marking a message</a>.</p>
+
+<p>Channel names stay visible at every level on purpose: the protocol is the
+secret, not the outputs, so you can still feed the channel into your own math,
+conditions and transmit messages.</p>
+
+<h2>Edit Custom Channel</h2>
+
+<p>The <b>Edit Custom Channel</b> dialog defines a channel:</p>
+
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><b>Channel Name:</b></td><td>Up to 31 characters — the device stores a
+32-byte label, and the dialog checks the UTF-8 byte count, which a non-ASCII name
+can exceed within the character cap (one accented or CJK character is 2-4 bytes,
+so 31 characters is not always 31 bytes). Names must be unique (case-insensitive).
+Renaming an existing channel rewrites every reference to it — comms rows, math,
+conditions.</td></tr>
+<tr><td><b>Data Type:</b></td><td>The storage type — see the table below. Blank
+for channels created before data types existed; a type must be chosen before OK
+accepts.</td></tr>
+<tr><td><b>Decimal Places:</b></td><td>0–8, capped per data type.</td></tr>
+<tr><td><b>Base Resolution:</b></td><td>Derived, read-only: 10<sup>&#8722;Decimal
+Places</sup>.</td></tr>
+<tr><td><b>Units Type:</b></td><td>The physical quantity (Temperature, Speed,
+Voltage, …), which decides the units on offer.</td></tr>
+<tr><td><b>Display Units:</b></td><td>The unit shown wherever the channel
+appears.</td></tr>
+<tr><td><b>Range Minimum:</b> / <b>Range Maximum:</b></td><td>Derived, read-only:
+what the chosen type spans at the chosen precision. This range is also the
+<b>device's clamp</b> — every reading is limited to it.</td></tr>
+</table>
+
+<h2>Storage types</h2>
+
+<p>An integer channel holds its physical value as a scaled integer, so its reach
+is the raw range × 10<sup>&#8722;decimals</sup>. This table is the quick
+reference — for the full treatment (worked type-selection examples, the
+precision/span trade, and what decimal places do and don't affect), see
+<a href="datatypes.html">Data Types &amp; Decimal Places</a>:</p>
+
+<table>
+<tr><th>Type</th><th>Raw range</th><th>Max decimals</th><th>Span at max
+decimals</th></tr>
+<tr><td>boolean</td><td>0 … 1</td><td>0</td><td>0 … 1</td></tr>
+<tr><td>u8</td><td>0 … 255</td><td>2</td><td>0 … 2.55</td></tr>
+<tr><td>u16</td><td>0 … 65535</td><td>4</td><td>0 … 6.5535</td></tr>
+<tr><td>u32</td><td>0 … 4294967295</td><td>8</td><td>0 … 42.94967295</td></tr>
+<tr><td>s8</td><td>&#8722;128 … 127</td><td>2</td><td>&#8722;1.28 … 1.27</td></tr>
+<tr><td>s16</td><td>&#8722;32768 … 32767</td><td>4</td><td>&#8722;3.2768 …
+3.2767</td></tr>
+<tr><td>s32</td><td>&#8722;2147483648 … 2147483647</td><td>8</td><td>&#8722;21.47…
+… 21.47…</td></tr>
+<tr><td>float</td><td>±1e9 shown</td><td>8</td><td>display convention — see
+note</td></tr>
+</table>
+
+<p class="note">Pick the type from the channel's <b>physical range and
+decimals</b>, never from a signal's raw bit width. A 16-bit field at 0.036 km/h
+per bit spans 0…2359.26 at 3 decimal places — u16 only reaches 65.535, so the
+right type is u32. Signedness follows the physical range too: an unsigned field
+with offset &#8722;40 needs a signed channel. <a href="dbc-import.html">DBC
+Import</a> applies these rules automatically.</p>
+
+<p class="note">A float channel's ±1e9 span is a display convention, not a
+storage limit — the range reaches the device as float32. A channel imported with
+a wider range (J1939 High Resolution Total Vehicle Distance really spans
+0…2.1e10) keeps it: Edit Custom Channel preserves a range wider than the type's
+displayed span unless you actually change the Data Type or Decimal Places, so
+opening a channel to fix a typo cannot silently clamp it.</p>
+
+<h2>Comms channel rows</h2>
+
+<p>Within the section editor's Channels tab (see
+<a href="communications.html">Communications</a>), <b>Add…</b> and <b>Change…</b>
+open the <b>Add Comms Channel</b> / <b>Change Comms Channel</b> dialog, which
+places one channel in the frame:</p>
+
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><b>Channel :</b></td><td>The channel this row reads (transmit) or writes
+(receive). Set via <b>Select…</b>.</td></tr>
+<tr><td><b>Default Value :</b></td><td>The physical value written to the channel
+when the message's receive timeout fires. Enabled once a channel is selected; its
+precision follows the channel's own Decimal Places.</td></tr>
+<tr><td><b>Start Bit :</b></td><td>0–511. The bit index of the signal's
+<b>least</b> significant bit: bit S = byte S/8, bit S%8; bits count 0–7
+right-to-left within a byte, bytes left-to-right from 0. Word Swap fields
+continue into higher bytes; Normal (big-endian) fields continue into lower
+bytes.</td></tr>
+<tr><td><b>Bit Length :</b></td><td>1–64. Locked to 32 for IEEE754.</td></tr>
+<tr><td colspan="2"><i>On a new row both bit fields start empty and OK stays
+off until real numbers are entered — a prefilled bit position looks chosen and
+decodes the wrong bits without anything to object to. Changing an existing row
+keeps its values.</i></td></tr>
+<tr><td><b>DBC Type :</b></td><td><b>Unsigned</b>, <b>Signed</b> or
+<b>IEEE754</b> (32-bit float).</td></tr>
+<tr><td><b>DBC Factor :</b> / <b>DBC Offset :</b></td><td>The scaling:
+<b>Physical = raw × Factor + Offset</b>, previewed live under the
+fields.</td></tr>
+</table>
+
+<p>The dialog validates the row as you type — a field that does not fit the frame
+blocks OK with the reason — and shows one informational line:</p>
+
+<ul>
+<li>A <b>transmit</b> row naming a channel nothing writes yet transmits its
+default value until a receive row or a calculation writes it — information, not
+an error.</li>
+<li>A <b>receive</b> row naming a channel that is already written elsewhere is a
+genuine conflict: both writers overwrite each other's values.</li>
+</ul>
+
+<h2>Selecting channels</h2>
+
+<p><b>Select…</b> opens <b>Select Input Channel</b> or
+<b>Select Output Channel</b>, depending on whether the field reads or writes.
+The picker searches by any part of the name or a regular expression, marks
+channels that have no generator yet or that are already written elsewhere, and
+its <b>New…</b> and <b>Edit…</b> buttons open Edit Custom Channel without leaving
+the picker. The same picker is used for math, condition, counter, timer,
+integrator and table inputs and outputs.</p>
+
+<p><b>New… picks the channel it creates.</b> Defining a channel from inside
+the picker <em>is</em> the choice — you opened the picker to pick one and there
+was none to pick — so the picker closes and hands the new channel back to the
+field you started from. <b>Edit…</b> does not: editing a channel is not choosing
+it, so the picker stays open with the edited channel highlighted, renamed or
+not.</p>
+
+<p>See also: <a href="communications.html">Communications: Messages &amp;
+Sections</a> · <a href="dbc-import.html">DBC Import</a> ·
+<a href="math-channels.html">Math Channels</a> ·
+<a href="monitor.html">Monitoring Live Values</a> ·
+<a href="validation-report.html">Validation &amp; the Config Summary</a></p>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program
+and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

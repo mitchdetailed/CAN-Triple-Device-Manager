@@ -1,0 +1,528 @@
+#include "access_keys.h"
+
+#include "config_lock.h"
+
+#include <QCryptographicHash>
+#include <QJsonArray>
+#include <QMessageAuthenticationCode>
+#include <QObject>
+#include <QPasswordDigestor>
+#include <QRandomGenerator>
+#include <QtEndian>
+
+namespace ct {
+
+namespace {
+
+// The salt for the 4-byte device key. Fixed, application-wide, and never
+// rotated — which is the opposite of the usual advice, so it is worth saying
+// plainly why.
+//
+// The device stores the KEY, not the password, and it has no room for a salt.
+// For one .ct3s to update a hundred units, the same password must fold to the
+// same four bytes on every one of them; a per-user or per-file salt would make
+// "the Edit Protected Comms password" mean a different key on each machine that
+// typed it, and the fleet story falls apart. So the salt is a constant of the
+// protocol, exactly like kAccessKeyIterations.
+//
+// The cost is the one a fixed salt always carries: a table built once serves
+// every installation of this app. kAccessKeyIterations is what makes building
+// that table expensive, and the 2^32 key space the four bytes impose is the
+// lower ceiling anyway — see the header, which does not pretend otherwise.
+//
+// The bytes themselves are arbitrary. They are not a secret and never were:
+// this file is shipped, and the firmware header points at it by name.
+constexpr unsigned char kAccessKeySalt[kAccessVerifierSaltBytes] = {
+    0x9d, 0x4c, 0x1f, 0xa7, 0x63, 0x0e, 0xb8, 0x52,
+    0x27, 0xd1, 0x6a, 0xf4, 0x08, 0x9b, 0x3e, 0xc5,
+};
+
+QByteArray accessKeySalt()
+{
+    return QByteArray(reinterpret_cast<const char *>(kAccessKeySalt), int(sizeof(kAccessKeySalt)));
+}
+
+// `n` must be a multiple of 4; every caller here passes kAccessVerifierSaltBytes.
+QByteArray randomBytes(int n)
+{
+    QByteArray out(n, Qt::Uninitialized);
+    // The system CSPRNG, not the default (deterministically seeded) generator.
+    // A verifier salt that another process can predict is no salt at all, and
+    // the default generator is reproducible by design.
+    QRandomGenerator::system()->generate(reinterpret_cast<quint32 *>(out.data()),
+                                         reinterpret_cast<quint32 *>(out.data() + n));
+    return out;
+}
+
+// The enum arrives from JSON and from the wire, so it is not automatically one
+// of the three values the type names.
+bool validFunction(AccessFunction fn)
+{
+    return int(fn) >= 0 && int(fn) < kAccessFunctionCount;
+}
+
+} // namespace
+
+const AccessFunction *allAccessFunctions()
+{
+    static const AccessFunction fns[kAccessFunctionCount] = {
+        AccessFunction::SendConfiguration,
+        AccessFunction::GetConfiguration,
+        AccessFunction::EditProtectedComms,
+    };
+    return fns;
+}
+
+QString accessFunctionLabel(AccessFunction fn)
+{
+    switch (fn) {
+    case AccessFunction::SendConfiguration:
+        return QObject::tr("Send a Configuration");
+    case AccessFunction::GetConfiguration:
+        return QObject::tr("Get a Configuration");
+    case AccessFunction::EditProtectedComms:
+        return QObject::tr("Edit Protected Comms");
+    }
+    return {};
+}
+
+QString accessFunctionDescription(AccessFunction fn)
+{
+    // Each one says what is PREVENTED, not what the password is. A user setting
+    // a lock is deciding what to take away from whoever holds the device next,
+    // and phrasing it any other way makes them guess.
+    switch (fn) {
+    case AccessFunction::SendConfiguration:
+        return QObject::tr("Prevents a configuration being sent to the device without this "
+                           "password.");
+    case AccessFunction::GetConfiguration:
+        return QObject::tr("Prevents a configuration being read back off the device without "
+                           "this password.");
+    case AccessFunction::EditProtectedComms:
+        // Names what it actually gates now: not "editing", which is unlocked by
+        // unticking a marking rather than by any password, but the MOVE itself.
+        // On the device this is the one thing it is for — a Protect Communication
+        // marking is not applied or lowered until a unit confirms this password,
+        // and that round trip is what makes that tier stronger than Hidden.
+        //
+        // NECESSARY, NOT SUFFICIENT, and not a master key over anything. Since
+        // 2.3.1 a Protect Communication message carries its own Message Password
+        // as well and needs both halves; Hidden and Read Only answer to each
+        // section's own password and to this one never. This comment used to
+        // claim a master over all three, which is the substitution the model
+        // refuses — isSectionRevealed, maySectionLower, proofsRequiredFor and the
+        // section editor's tier ladder all decline it, and a comment describing
+        // code we deleted is worse than no comment.
+        return QObject::tr("Prevents proprietary CAN messages being unprotected without this "
+                           "password. The device confirms it before this application will move "
+                           "a message's Protect Communication marking — alongside that "
+                           "message's own Message Password, which this one never replaces.");
+    }
+    return {};
+}
+
+QString accessFunctionKey(AccessFunction fn)
+{
+    // Written into files and settings, so these strings are frozen: renaming one
+    // orphans the verifier in every .ct3 already saved.
+    switch (fn) {
+    case AccessFunction::SendConfiguration:
+        return QStringLiteral("sendConfiguration");
+    case AccessFunction::GetConfiguration:
+        return QStringLiteral("getConfiguration");
+    case AccessFunction::EditProtectedComms:
+        return QStringLiteral("editProtectedComms");
+    }
+    return {};
+}
+
+QString passwordProblem(const QString &password)
+{
+    if (password.isEmpty())
+        return QString(); // "no password" — always allowed, see the header
+    if (password.length() < kMinPasswordLength)
+        return QObject::tr("A password must be at least %1 characters. Leave the box empty "
+                           "if you want no password at all.")
+            .arg(kMinPasswordLength);
+    return QString();
+}
+
+AccessKey deriveAccessKey(const QString &password)
+{
+    // An empty password is how every caller says "no password here", so it must
+    // not stretch into a real key — otherwise clearing a lock would set one.
+    if (password.isEmpty())
+        return kNoAccessKey;
+    // Not enforced here on purpose: this function is also how an EXISTING
+    // password is turned into a key to prove it, and a device provisioned before
+    // the minimum existed may hold a shorter one. Refusing it here would lock
+    // that unit out of the tool that could change it. The rule belongs at the
+    // points where a password is CHOSEN — see passwordProblem().
+
+    // toUtf8() rather than any local encoding: the same password typed on a
+    // machine with a different locale has to reach the same four bytes, or a
+    // fleet built in one office cannot be updated from another.
+    const QByteArray material =
+        QPasswordDigestor::deriveKeyPbkdf2(QCryptographicHash::Sha256, password.toUtf8(),
+                                           accessKeySalt(), kAccessKeyIterations, kAccessKeyBytes);
+
+    AccessKey key = kNoAccessKey;
+    if (material.size() == kAccessKeyBytes)
+        key = qFromBigEndian<quint32>(material.constData());
+
+    // Zero means "no password" everywhere else in this file, so a non-empty
+    // password must never fold to it. A password that silently reads as no
+    // password is a trapdoor: the dialog would report the function locked while
+    // the device was left open. Roughly one derivation in four billion lands on
+    // zero honestly; a derivation that failed outright lands there too, which is
+    // why the nudge covers the whole path rather than only the arithmetic case.
+    // Colliding one password onto key 1 costs nothing — the key space was never
+    // the strong part, and a wrong key only ever fails a challenge.
+    return key == kNoAccessKey ? AccessKey(1) : key;
+}
+
+QByteArray accessKeyBytes(AccessKey key)
+{
+    QByteArray out(kAccessKeyBytes, Qt::Uninitialized);
+    // Big-endian so the key reads the same way in the firmware's AccessKeyRecord,
+    // in a hex dump of flash and in this app. The wire is little-endian for
+    // integers, but these four bytes are a byte STRING, not a number, and the
+    // HMAC both ends compute is over the bytes in this order.
+    qToBigEndian<quint32>(key, out.data());
+    return out;
+}
+
+AccessKey accessKeyFromBytes(const QByteArray &bytes)
+{
+    if (bytes.size() != kAccessKeyBytes)
+        return kNoAccessKey;
+    return qFromBigEndian<quint32>(bytes.constData());
+}
+
+QByteArray accessResponse(AccessKey key, const QByteArray &challenge)
+{
+    // Both guards return empty rather than a well-formed answer. A caller that
+    // holds no key must not be able to put a plausible-looking response on the
+    // wire by accident; an empty result is a mistake it cannot help but notice.
+    if (key == kNoAccessKey || challenge.size() != kAccessChallengeBytes)
+        return {};
+    return QMessageAuthenticationCode::hash(challenge, accessKeyBytes(key),
+                                            QCryptographicHash::Sha256);
+}
+
+AccessKey AccessKeySet::key(AccessFunction fn) const
+{
+    return validFunction(fn) ? keys[int(fn)] : kNoAccessKey;
+}
+
+void AccessKeySet::setKey(AccessFunction fn, AccessKey key)
+{
+    if (validFunction(fn))
+        keys[int(fn)] = key;
+}
+
+bool AccessKeySet::isSet(AccessFunction fn) const
+{
+    return key(fn) != kNoAccessKey;
+}
+
+bool AccessKeySet::any() const
+{
+    for (int i = 0; i < kAccessFunctionCount; ++i) {
+        if (keys[i] != kNoAccessKey)
+            return true;
+    }
+    return false;
+}
+
+quint8 AccessKeySet::mask() const
+{
+    // Bit i is AccessFunction i, which is what makes this directly comparable
+    // with the device's AccessKeyRecord::set_mask.
+    quint8 m = 0;
+    for (int i = 0; i < kAccessFunctionCount; ++i) {
+        if (keys[i] != kNoAccessKey)
+            m = quint8(m | (1u << i));
+    }
+    return m;
+}
+
+void AccessKeySet::clear()
+{
+    for (int i = 0; i < kAccessFunctionCount; ++i)
+        keys[i] = kNoAccessKey;
+}
+
+bool AccessVerifier::isValid() const
+{
+    // The upper bound is a DoS guard, not a correctness one: verify() runs the
+    // KDF for `iterations` rounds, and a hostile file naming billions would hang
+    // the prompt for an hour. isValid() is verify()'s gate, so rejecting the
+    // absurd count here means the expensive derivation never starts — the file
+    // reads as a malformed lock, i.e. wrong password. See kMaxKdfIterations.
+    return salt.size() == kAccessVerifierSaltBytes && verifier.size() == kAccessVerifierBytes
+           && iterations > 0 && iterations <= kMaxKdfIterations;
+}
+
+bool AccessVerifier::verify(const QString &password) const
+{
+    // Structure first: a file can carry a truncated or hand-edited verifier, and
+    // "malformed" must read as "wrong", never as "no lock to check".
+    if (!isValid())
+        return false;
+    const QByteArray candidate =
+        QPasswordDigestor::deriveKeyPbkdf2(QCryptographicHash::Sha256, password.toUtf8(), salt,
+                                           iterations, kAccessVerifierBytes);
+    return constantTimeEquals(verifier, candidate);
+}
+
+AccessVerifier AccessVerifier::make(const QString &password)
+{
+    AccessVerifier v;
+    // An empty password means "no password", the same as it does in
+    // deriveAccessKey. Returning an unset verifier here is what makes
+    // `setVerifier(fn, make(text))` do the right thing when the field is blank,
+    // instead of locking the document behind the empty string.
+    if (password.isEmpty())
+        return v;
+
+    v.salt = randomBytes(kAccessVerifierSaltBytes);
+    v.iterations = kAccessVerifierIterations;
+    // Per-file random salt, unlike the device key's fixed one: this value only
+    // ever answers "was that the right password" on this machine, so nothing
+    // needs it to match across units — and making it differ per file means two
+    // documents locked with the same password do not advertise the fact.
+    v.verifier = QPasswordDigestor::deriveKeyPbkdf2(QCryptographicHash::Sha256, password.toUtf8(),
+                                                    v.salt, v.iterations, kAccessVerifierBytes);
+    if (v.verifier.size() != kAccessVerifierBytes)
+        v = AccessVerifier(); // derivation failed: store nothing rather than half a lock
+    return v;
+}
+
+QJsonObject AccessVerifier::toJson() const
+{
+    QJsonObject o;
+    o["salt"] = QString::fromLatin1(salt.toBase64());
+    o["iterations"] = iterations;
+    o["verifier"] = QString::fromLatin1(verifier.toBase64());
+    return o;
+}
+
+AccessVerifier AccessVerifier::fromJson(const QJsonObject &o)
+{
+    AccessVerifier v;
+    v.salt = QByteArray::fromBase64(o["salt"].toString().toLatin1());
+    v.iterations = o["iterations"].toInt(kAccessVerifierIterations);
+    v.verifier = QByteArray::fromBase64(o["verifier"].toString().toLatin1());
+    return v;
+}
+
+const AccessVerifier &AccessVerifierSet::verifier(AccessFunction fn) const
+{
+    // A shared unset verifier for an out-of-range function. isSet() is false on
+    // it and verify() refuses it, so a bad index degrades to "no password
+    // recorded" rather than to a dangling reference.
+    static const AccessVerifier none;
+    return validFunction(fn) ? verifiers[int(fn)] : none;
+}
+
+void AccessVerifierSet::setVerifier(AccessFunction fn, const AccessVerifier &v)
+{
+    if (validFunction(fn))
+        verifiers[int(fn)] = v;
+}
+
+bool AccessVerifierSet::isSet(AccessFunction fn) const
+{
+    return verifier(fn).isSet();
+}
+
+bool AccessVerifierSet::any() const
+{
+    for (const AccessVerifier &v : verifiers) {
+        if (v.isSet())
+            return true;
+    }
+    return false;
+}
+
+void AccessVerifierSet::clear()
+{
+    for (AccessVerifier &v : verifiers)
+        v = AccessVerifier();
+}
+
+QJsonObject AccessVerifierSet::toJson() const
+{
+    QJsonObject o;
+    // Only the functions that actually carry a password are written. An unset
+    // verifier is all-empty and says nothing, and emitting three of them into
+    // every .ct3 would make an unprotected document look protected to anyone
+    // reading the file.
+    for (int i = 0; i < kAccessFunctionCount; ++i) {
+        const AccessFunction fn = allAccessFunctions()[i];
+        if (verifiers[i].isSet())
+            o[accessFunctionKey(fn)] = verifiers[i].toJson();
+    }
+    return o;
+}
+
+AccessVerifierSet AccessVerifierSet::fromJson(const QJsonObject &o)
+{
+    AccessVerifierSet set;
+    for (int i = 0; i < kAccessFunctionCount; ++i) {
+        const AccessFunction fn = allAccessFunctions()[i];
+        const QJsonValue v = o[accessFunctionKey(fn)];
+        if (v.isObject())
+            set.verifiers[i] = AccessVerifier::fromJson(v.toObject());
+    }
+    return set;
+}
+
+QString FleetIdentity::clampToWire(const QString &text, int maxBytes)
+{
+    if (maxBytes <= 0 || text.isEmpty())
+        return {};
+
+    const QByteArray utf8 = text.toUtf8();
+    if (utf8.size() <= maxBytes)
+        return text;
+
+    // QString::left() is the bug this function exists to prevent, and it is an
+    // easy one to write: left() counts QChars while the wire counts BYTES.
+    // "Motörsport Elektronik" is 21 QChars and 22 UTF-8 bytes, so left(16)
+    // yields something that still does not fit a 16-byte field, and whoever
+    // finally copies it into the fixed-width buffer truncates mid-character —
+    // leaving a lead byte with its continuation bytes lopped off. The device
+    // stores those bytes verbatim and hands them back on CMD_READ_FLEET_ID, so
+    // the damage is permanent and shows up as a mojibake vendor name months
+    // later.
+    //
+    // Cutting in the UTF-8 encoding is therefore the only correct place to cut.
+    // Take maxBytes, then walk backwards off any continuation byte (10xxxxxx)
+    // until we reach the lead byte of the character that straddles the limit,
+    // and drop that character whole.
+    int cut = maxBytes;
+    while (cut > 0 && (quint8(utf8.at(cut)) & 0xC0) == 0x80)
+        --cut;
+
+    // Whole code points, not whole grapheme clusters — a combining accent can
+    // still be separated from the letter it modifies. That is a deliberate
+    // limit rather than an oversight: these two fields are machine identifiers
+    // compared byte for byte, never prose, and getting clusters right would
+    // mean dragging in text segmentation for a case that cannot arise in a
+    // sensible vendor or model code.
+    return QString::fromUtf8(utf8.left(cut));
+}
+
+bool FleetIdentity::sameFleetAs(const FleetIdentity &other) const
+{
+    // An unset identity matches nothing — including another unset one. Two blank
+    // devices are not "the same fleet"; they are two devices nobody has told
+    // anything about, and treating that as a match would wave every update
+    // through on unprovisioned hardware.
+    if (!isSet() || !other.isSet())
+        return false;
+    // Exact string comparison, deliberately: vendorId and modelId are
+    // identifiers that cross the wire as raw bytes, not display names, so
+    // "ACME" and "acme " are two different fleets and folding them together
+    // here would let a config install on hardware it was never built for.
+    // serialNumber and configVersion are absent on purpose — one is the
+    // targeting question and the other the ordering question, and UploadPolicy
+    // asks those separately.
+    return vendorId == other.vendorId && modelId == other.modelId;
+}
+
+QJsonObject FleetIdentity::toJson(bool includeFleetKey) const
+{
+    QJsonObject o;
+    // Clamped on the way out, so a file can never carry more than the wire can.
+    // Anything longer would only be silently cut later, and a value that
+    // survives a save/load round trip unchanged is worth more than preserving
+    // characters no device will ever see.
+    o["vendorId"] = clampToWire(vendorId, kFleetVendorIdBytes);
+    o["modelId"] = clampToWire(modelId, kFleetModelIdBytes);
+    // qint64 rather than int: these are opaque 32-bit numbers chosen by whoever
+    // builds the fleet, and one above 2^31 would come back negative through the
+    // int overload.
+    o["serialNumber"] = qint64(serialNumber);
+    o["configVersion"] = int(configVersion);
+    o["flags"] = int(flags);
+    // The flag is honoured strictly: when it is false the key does not appear
+    // under this or any other name. A plain .ct3 is legible text that people
+    // mail around, and one careless `true` here would put the fleet secret in
+    // every copy of it.
+    if (includeFleetKey && fleetKey != kNoAccessKey)
+        o["fleetKey"] = QString::fromLatin1(accessKeyBytes(fleetKey).toBase64());
+    return o;
+}
+
+FleetIdentity FleetIdentity::fromJson(const QJsonObject &o)
+{
+    FleetIdentity id;
+    // Clamped on the way in as well. toJson() cannot write an over-long field,
+    // but a hand-edited .ct3 can, and every consumer downstream assumes the
+    // string already fits the wire. Enforcing it here means there is exactly
+    // one definition of "too long" instead of one per reader.
+    id.vendorId = clampToWire(o["vendorId"].toString(), kFleetVendorIdBytes);
+    id.modelId = clampToWire(o["modelId"].toString(), kFleetModelIdBytes);
+    id.serialNumber = quint32(o["serialNumber"].toInteger());
+    id.configVersion = quint16(o["configVersion"].toInteger());
+    id.flags = quint16(o["flags"].toInteger());
+    // Absent in a plain .ct3 by design, so its absence is normal rather than an
+    // error: the identity is still usable for the vendor/model check,
+    // and only the device's attestation goes unverified without it.
+    id.fleetKey = accessKeyFromBytes(QByteArray::fromBase64(o["fleetKey"].toString().toLatin1()));
+    return id;
+}
+
+bool UploadPolicy::allowsSerial(quint32 serial) const
+{
+    // An empty list means "any serial in the fleet", which is the common case: a
+    // configuration is normally written for a model, not for one car. The list
+    // only exists for the one-off — a replacement config cut for a single
+    // vehicle — and once it is non-empty it is exhaustive, so a serial that is
+    // not named is refused even if everything else about the device matches.
+    if (allowedSerials.isEmpty())
+        return true;
+    return allowedSerials.contains(serial);
+}
+
+QJsonObject UploadPolicy::toJson() const
+{
+    QJsonObject o;
+    QJsonArray serials;
+    for (quint32 serial : allowedSerials)
+        serials.append(qint64(serial)); // qint64 for the same reason as serialNumber
+    // Written even when empty, and the two flags are written even when they hold
+    // their defaults. Omitting a `false` would let fromJson's default-to-true
+    // read it back as `true`, quietly re-arming a check the user turned off.
+    o["allowedSerials"] = serials;
+    o["requireFleetKey"] = requireFleetKey;
+    o["warnOnOlderVersion"] = warnOnOlderVersion;
+    return o;
+}
+
+UploadPolicy UploadPolicy::fromJson(const QJsonObject &o)
+{
+    UploadPolicy policy;
+    const QJsonArray serials = o["allowedSerials"].toArray();
+    policy.allowedSerials.reserve(serials.size());
+    for (const auto &v : serials) {
+        // Non-numeric entries are dropped rather than coerced. toInteger() would
+        // turn a string or a null into 0, and 0 is the serial an unprovisioned
+        // device reports — so a single typo in a hand-edited file would add
+        // "and any blank unit" to an allow-list written to exclude exactly that.
+        if (v.isDouble())
+            policy.allowedSerials.append(quint32(v.toInteger()));
+    }
+    // Default TRUE when absent. Both flags exist to refuse an upload, so a file
+    // that predates them, or one where the key was deleted by hand, must land on
+    // the strict reading — an older file quietly becoming permissive is the one
+    // failure mode a security default cannot have.
+    policy.requireFleetKey = o["requireFleetKey"].toBool(true);
+    policy.warnOnOlderVersion = o["warnOnOlderVersion"].toBool(true);
+    return policy;
+}
+
+} // namespace ct

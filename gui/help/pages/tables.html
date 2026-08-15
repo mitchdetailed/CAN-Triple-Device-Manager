@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Lookup Tables</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Lookup Tables</h1>
+
+<p>A lookup table maps one or two input channels onto an output channel through a
+set of calibration points ("sites"). The device offers two kinds, up to
+<b>8 of each</b>:</p>
+
+<table>
+<tr><th>Type</th><th>Axes</th><th>Sites</th><th>Typical use</th></tr>
+<tr><td>2x16</td><td>1 input axis</td><td>up to 16</td><td>Sensor linearisation,
+a 1-D calibration curve.</td></tr>
+<tr><td>8x8</td><td>X and Y inputs</td><td>up to 8 × 8</td><td>A 2-D map — output
+as a function of two channels, 64 cells.</td></tr>
+</table>
+
+<p class="note">The 8x8 replaced the earlier <b>4x4</b> table, which held 4 sites
+per axis and 16 cells. Configurations saved with 4x4 tables still open: each one
+loads into the top-left of an 8x8, keeping its sites, its cells and its
+interpolation modes, and simply leaves the extra sites unused. Nothing needs
+re-entering, and re-saving writes the file in the new form.</p>
+
+<p>Tables are evaluated right after <a href="constants.html">constants</a> in
+every pass, before <a href="math-channels.html">math</a> and
+<a href="conditions.html">conditions</a>, so a table output can feed a math
+channel or a condition in the same pass. The output is a generated channel typed
+like a <a href="constants.html">constant</a> (name, data type, decimal places)
+and registered in the document, so it can be picked anywhere a channel can.</p>
+
+<h2>The Tables dialog</h2>
+
+<p>To add a table, choose <b>Calculations → Tables…</b>. The dialog lists every
+table with the columns <b>#</b>, <b>Type</b>, <b>Output</b>, <b>Axes</b> and
+<b>Active</b>, with <b>Add 2x16…</b>, <b>Add 8x8…</b>, <b>Change…</b> and
+<b>Remove</b> buttons at the right. Double-clicking a row opens it for change.
+OK commits the changes; Cancel discards them. A new table's output channel is
+pre-named "Table N"; adding beyond the limit reports "The device supports at
+most 8 2x16 tables" (or 8x8 tables).</p>
+
+<h2>Editing a 2x16 table</h2>
+
+<p>The <b>2x16 Table</b> editor holds:</p>
+
+<ul>
+<li><b>Output Channel</b> — <b>Channel Name:</b> (up to 31 characters — the
+device stores a 32-byte label), <b>Data Type:</b> and <b>Decimal Places:</b>,
+exactly as for a <a href="constants.html">constant</a>. The type and decimals
+set the range and precision the output cells accept.</li>
+<li><b>Input Axis</b> — <b>Input:</b> plus <b>Select…</b> picks the channel the
+table reads, and <b>Interpolated</b> / <b>Discrete (centered)</b> chooses how
+values between sites are resolved (see below). The axis cells take the picked
+channel's range and decimal places.</li>
+<li><b>Sites and Output Values</b> — a two-row grid, <b>Axis</b> above
+<b>Output</b>, with 16 numbered columns. As the dialog itself says: "Fill only
+the sites you need (left to right, up to 16) — they auto-sort ascending. Each
+site needs an output; Delete clears a cell. Values are limited to their
+channel's range/decimals."</li>
+</ul>
+
+<p>Editing an axis cell re-sorts the sites ascending automatically, carrying each
+site's output value with it, so you can type calibration points in any order.
+Typing an axis value that already exists on the axis clears the cell — duplicate
+sites are not allowed. Delete or Backspace clears the selected cells.</p>
+
+<p>OK checks that the sites are filled contiguously from the left, that an axis
+channel is selected, that every filled site has an output value, and that the
+axis strictly ascends.</p>
+
+<h2>Editing an 8x8 table</h2>
+
+<p>The <b>8x8 Table</b> editor has the same <b>Output Channel</b> group, then an
+<b>X Axis</b> and a <b>Y Axis</b> group — each with its own <b>Input:</b> channel
+and its own <b>Interpolated</b> / <b>Discrete (centered)</b> choice. Each group's
+title shows the axis and its chosen channel (for example "X Axis — Manifold
+Pressure"), so which axis is which is readable at a glance. The
+<b>Sites and Output Grid</b> is a 9×9 grid: the "Y ↓ \ X →" corner label, the X
+sites across the top row, the Y sites down the left column, and the inner 8×8
+cells holding the output for each X/Y combination. As the dialog says: "Fill only
+the X/Y sites you need (up to 8 per axis) — they auto-sort ascending. Every cell
+in the filled grid needs an output; Delete clears a cell. Values are limited to
+their channel's range/decimals."</p>
+
+<p>The site band — the top row, the left column and the corner — is <b>shaded</b>
+so the axis inputs read apart from the output cells they index. (The 2x16 grid
+shades its <b>Axis</b> row the same way.) The shade is derived from your
+desktop's colours, so it works on a light or a dark theme, and the selection
+highlight still shows through it on whichever cell is current.</p>
+
+<p>The grid's columns are a fixed width and scroll rather than stretching, and
+the editor body scrolls as a whole, so the OK and Cancel buttons stay reachable
+on a small or scaled display.</p>
+
+<h2>Defining an axis in the Axis Setup window</h2>
+
+<p>Each axis group has an <b>Edit Axis…</b> button that opens a dedicated
+<b>Axis Setup</b> window for building that axis's breakpoints — handier than
+typing them across the grid's header band when there are several to lay out. It
+holds the axis's <b>Input</b> channel (with <b>Select…</b>), its
+<b>Axis Behaviour</b> (Continuous, i.e. interpolated, or Discrete, i.e.
+centered), and a row of value cells with the channel's unit and the maximum
+count shown above them. Four tools build the breakpoints quickly:</p>
+
+<ul>
+<li><b>Insert</b> — add one breakpoint after the last, spaced by the gap between
+the previous two.</li>
+<li><b>Delete</b> — remove the selected breakpoints.</li>
+<li><b>Linearise</b> — space every breakpoint evenly between the current first
+and last, keeping the ends fixed.</li>
+<li><b>Generate…</b> — fill the axis with a chosen count of evenly spaced values
+between a <b>From</b> and a <b>To</b>.</li>
+</ul>
+
+<p>Breakpoints ascend left to right — they auto-sort, and a duplicate is
+dropped. <b>OK</b> writes the axis back into the grid (shrinking an axis clears
+the cells that fall outside the new site band); <b>Cancel</b> leaves the grid
+untouched. Typing the sites directly into the grid's header row/column still
+works exactly as before — the window is an addition, not a replacement.</p>
+
+<h2>Copying and pasting cells</h2>
+
+<p>Both table grids (and the Axis Setup value row) support spreadsheet-style
+clipboard editing over a cell or a block of cells:</p>
+
+<ul>
+<li><b>Ctrl+C</b> copies the selection, <b>Ctrl+X</b> cuts it, <b>Ctrl+V</b>
+pastes at the top-left of the selection (or the current cell).</li>
+<li>The exchange format is tab-between-columns, newline-between-rows text — the
+same shape Excel and Google Sheets use — so a block of values round-trips to and
+from a spreadsheet.</li>
+<li>A single copied value pasted onto a multi-cell selection fills the whole
+selection.</li>
+<li>Pasted values are clamped to each destination cell's range and decimals;
+non-editable cells (the corner label) are skipped. <b>Delete</b> or
+<b>Backspace</b> clears the selection.</li>
+</ul>
+
+<p>Each axis sorts independently: editing an X site re-orders the columns
+(carrying their output cells), editing a Y site re-orders the rows. A duplicate
+value on the same axis is cleared. OK checks that X sites are filled
+contiguously from the left and Y sites from the top, that both axis channels are
+selected, that every cell in the filled rectangle has an output, and that both
+axes strictly ascend.</p>
+
+<h2>Interpolated vs. Discrete (centered)</h2>
+
+<p>Each axis resolves the live input independently, in one of two modes:</p>
+
+<ul>
+<li><b>Interpolated</b> — linear interpolation between the two sites that
+bracket the input. Use this for continuous calibrations (sensor curves,
+compensation maps).</li>
+<li><b>Discrete (centered)</b> — the output snaps to the <i>nearest</i> site,
+with the transition at the midpoint between adjacent sites. Use this to map an
+input onto a set of steps — a rotary switch position, a gear number.</li>
+</ul>
+
+<p>In an 8x8 table the two axes may mix modes freely; the output blends
+bilinearly over the interpolated axes while a discrete axis contributes its
+nearest row or column. On both table types the input is <b>clamped to the end
+sites</b>: below the first site the first output applies, above the last site
+the last output applies — a table never extrapolates. On a partly filled table
+"the end sites" means the last site you filled, not the eighth column: an 8x8
+using three X sites clamps at the third, and the unused cells are never
+read.</p>
+
+<h2>Output channel name rules</h2>
+
+<ul>
+<li>The name must not be empty and must fit the 31-byte device label budget.</li>
+<li>"The output channel must differ from the axis input." — a table cannot
+write the channel it reads.</li>
+<li>No two tables may output to the same channel: "A table already outputs to
+&quot;X&quot;."</li>
+<li>The name may not collide with an unrelated existing channel: "A channel
+named &quot;X&quot; already exists. Choose a different name."</li>
+</ul>
+
+<p class="note">Renaming a table's output channel carries references along —
+anything reading the old name is rewritten when the Tables dialog is closed with
+OK. A table axis may even be another table's output; the one-pass evaluation
+rule from <a href="math-channels.html">Math Channels</a> applies to such
+chains.</p>
+
+<p class="warn">Tables may be partial — only the populated sites are sent to the
+device — but a site without an output value, or a gap in the middle of an axis,
+is refused when the editor is closed. If a value seems to vanish as you type it,
+check that it does not duplicate an existing site on that axis.</p>
+
+<h2>See also</h2>
+
+<p><a href="math-channels.html">Math Channels</a> ·
+<a href="conditions.html">Conditions</a> ·
+<a href="constants.html">Constants</a> ·
+<a href="channels.html">Channels</a> ·
+<a href="monitor.html">Monitoring Live Values</a></p>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program
+and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

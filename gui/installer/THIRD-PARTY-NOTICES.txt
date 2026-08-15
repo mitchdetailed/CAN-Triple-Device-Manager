@@ -1,0 +1,865 @@
+================================================================================
+CAN TRIPLE DEVICE MANAGER - THIRD-PARTY NOTICES
+================================================================================
+
+Publisher: Minton Performance
+Last reviewed: 2026-08-13
+
+CAN Triple Device Manager itself is open-source software under the MIT
+License, Copyright (c) 2026 Minton Performance. That licence text is in
+COPYING.txt, next to this file, and the program's complete source code is
+published at:
+
+    https://github.com/mitchdetailed/CAN-Triple-Device-Manager
+
+That repository carries this application (gui/) and the released device
+firmware binaries (firmware/). The executable additionally contains a small
+part of the device's own code -- its image validator and script engine,
+compiled in so the two sides agree exactly. Those portions are NOT open
+source: they are proprietary firmware code, (c) Minton Performance, all
+rights reserved, and ship in the repository as a prebuilt library the
+application links.
+
+CANTripleDeviceManager.exe and the help files cantriple.qch and cantriple.qhc
+are parts of CAN Triple Device Manager itself and are covered by COPYING.txt.
+The executable additionally has code by other authors linked into it, for
+which there is no separate file; sections 4 (the mingw-w64 runtime) and 7
+(the Lua interpreter) record that code and reproduce its notices.
+
+Everything listed below is NOT part of CAN Triple Device Manager. Each entry is
+a separate, independent work by other authors, redistributed here unmodified so
+that the program can run. Each remains under its own licence and its own
+copyright holders, and nothing in this file changes the terms COPYING.txt places
+on CAN Triple Device Manager itself. Where anything stated informally here
+differs from a component's own licence text, that licence text governs.
+
+This document is a factual record of what is redistributed and under which
+terms. It is not legal advice.
+
+--------------------------------------------------------------------------------
+LICENCE TEXTS INCLUDED WITH THIS DISTRIBUTION
+--------------------------------------------------------------------------------
+
+All five sit in the program directory - the folder containing
+CANTripleDeviceManager.exe. The .zip distribution has a single top-level
+folder, CANTripleDeviceManager\, which is that program directory: the five
+files are inside it, beside CANTripleDeviceManager.exe, not loose at the
+root of the archive.
+
+    COPYING.txt                MIT License (the application)
+    LICENSE.LGPLv3.txt         GNU Lesser General Public License v3 (Qt)
+    LICENSE.GPLv3.txt          GNU General Public License v3 (the text the
+                               LGPLv3 and the GCC exception layer on; carried
+                               for Qt and the GCC runtime, not the application)
+    GCC-RUNTIME-EXCEPTION.txt  GCC Runtime Library Exception v3.1 (GCC runtime)
+    THIRD-PARTY-NOTICES.txt    this file
+
+The LGPLv3 is written as a set of additional permissions layered on top of the
+GPLv3: LICENSE.LGPLv3.txt incorporates the GPLv3 by reference, and the GPLv3
+text it refers to is the one in LICENSE.GPLv3.txt. The two are meant to be
+read together.
+
+
+================================================================================
+1. Qt 6.7.2
+================================================================================
+
+What it is
+    A cross-platform C++ application framework. Qt provides this program's
+    entire user interface, and also its networking, SQL, SVG and PDF handling,
+    printing, serial-port access and offline help viewer.
+
+Copyright
+    Copyright (C) The Qt Company Ltd. and other Qt contributors.
+
+Licence
+    GNU Lesser General Public License, version 3 (LGPLv3).
+    Full text: LICENSE.LGPLv3.txt, in the program directory.
+
+    Qt is also offered by The Qt Company under the GPL and under a separate
+    commercial licence. The binaries shipped here are used under the LGPLv3.
+
+Version and build
+    Qt 6.7.2 for Windows, x86_64, built for the MinGW toolchain (mingw_64), as
+    published by The Qt Company. Dynamically linked. Unmodified - the DLLs are
+    redistributed exactly as obtained, with no patches of any kind applied.
+
+Files redistributed
+    Libraries, in the program directory:
+
+        Qt6Core.dll          Qt6Gui.dll           Qt6Help.dll
+        Qt6Network.dll       Qt6Pdf.dll           Qt6PrintSupport.dll
+        Qt6SerialPort.dll    Qt6Sql.dll           Qt6Svg.dll
+        Qt6Widgets.dll
+
+    Plugins, in subdirectories of the program directory:
+
+        generic\             qtuiotouchplugin.dll
+        iconengines\         qsvgicon.dll
+        imageformats\        qgif.dll, qicns.dll, qico.dll, qjpeg.dll,
+                             qpdf.dll, qsvg.dll, qtga.dll, qtiff.dll,
+                             qwbmp.dll, qwebp.dll
+        networkinformation\  qnetworklistmanager.dll
+        platforms\           qwindows.dll
+        sqldrivers\          qsqlite.dll, qsqlmimer.dll, qsqlodbc.dll,
+                             qsqlpsql.dll
+        styles\              qmodernwindowsstyle.dll
+        tls\                 qcertonlybackend.dll, qopensslbackend.dll,
+                             qschannelbackend.dll
+
+Source code
+    The complete corresponding source for this exact version is the official
+    Qt 6.7.2 source release:
+
+        https://download.qt.io/archive/qt/6.7/6.7.2/single/
+
+YOUR RIGHT TO REPLACE QT (LGPLv3 section 4)
+    You are entitled to run CAN Triple Device Manager with a modified version of
+    Qt, and this distribution is arranged so that you can actually do so:
+
+      * Qt is linked dynamically. Every Qt library listed above is a separate
+        .dll file sitting in the program directory. To use your own build of
+        Qt, obtain the Qt source from the link above, modify it, build
+        interface-compatible DLLs, and overwrite the corresponding files. No
+        part of CAN Triple Device Manager needs to be rebuilt for that to work.
+
+      * If you would rather relink than swap DLLs, the complete source of CAN
+        Triple Device Manager is published under the MIT License at the GitHub
+        URL at the top of this file (the small proprietary device-core portion
+        ships there as a linkable prebuilt library), so you can rebuild the
+        application yourself against your modified Qt.
+
+    This file also serves as the notice described by LGPLv3 section 4(a): Qt is
+    used by this program, and Qt and its use here are covered by the LGPLv3.
+    The copies of the GPLv3 and of the LGPLv3 described by section 4(b) are
+    LICENSE.GPLv3.txt and LICENSE.LGPLv3.txt. Section 4(c) applies because the
+    program does display copyright notices while it runs: Help > About shows
+    Qt's copyright line alongside the application's own, and points here.
+
+Third-party code inside Qt
+    The Qt libraries themselves incorporate a number of third-party components
+    under their own, mostly permissive, licences - for example PDFium inside
+    Qt6Pdf.dll, and the image and font libraries inside Qt6Gui.dll. There are
+    too many of them to enumerate here, and this file does not try to.
+
+    Their notices are not reproduced here and the URL below does not stand in
+    for them. The notices themselves travel with the Qt 6.7.2 source archive
+    cited above under "Source code": each of these components sits in a
+    src/3rdparty directory inside that archive next to its own licence file
+    and a qt_attribution.json recording its version, copyright holders and
+    licence, and the archive also carries a top-level LICENSES directory of
+    the full licence texts. From that data Qt generates one attribution
+    document per component - version, copyright holders and complete licence
+    text - and those documents ship in the Qt 6.7.2 documentation set. The
+    same set is published online as "Third-Party Code Used in Qt":
+
+        https://doc.qt.io/qt-6/licenses-used-in-qt.html
+
+    Two are worth calling out explicitly:
+
+    SQLite - embedded in sqldrivers\qsqlite.dll. SQLite is in the public
+    domain; its authors have disclaimed copyright in it. See:
+
+        https://www.sqlite.org/copyright.html
+
+    OpenSSL - NOT redistributed. tls\qopensslbackend.dll is a Qt plugin that
+    can load OpenSSL at run time if OpenSSL is already installed on your
+    system. No OpenSSL binaries are included anywhere in this distribution;
+    when OpenSSL is absent the program uses the Windows Schannel backend
+    (tls\qschannelbackend.dll) instead.
+
+
+================================================================================
+2. GCC 13.1.0 runtime libraries (libgcc, libstdc++)
+================================================================================
+
+Files redistributed
+    libgcc_s_seh-1.dll    GCC low-level runtime support and stack unwinder
+    libstdc++-6.dll       The GNU implementation of the C++ standard library
+
+What they are
+    The runtime support libraries belonging to the compiler that built this
+    program. The program cannot start without them.
+
+Copyright
+    Copyright (C) Free Software Foundation, Inc.
+
+Version
+    GCC 13.1.0, from the MinGW-W64 x86_64-posix-seh build of the toolchain
+    produced by the MinGW-Builds project. Dynamically linked, unmodified.
+
+Licence
+    GNU General Public License, version 3, WITH the GCC Runtime Library
+    Exception, version 3.1.
+
+    That exception matters here, and COPYING.txt alone does not express it. It
+    is an additional permission granted by the copyright holder under GPLv3
+    section 7, and it is what allows these runtime libraries to be combined
+    with and distributed alongside a compiled program without the GPLv3's
+    copyleft reaching that program merely because the compiler's own runtime
+    was linked into it.
+
+        Full text of the exception:  GCC-RUNTIME-EXCEPTION.txt
+        Full text of the GPLv3:      LICENSE.GPLv3.txt
+
+Source code
+    GCC source, including the source of these runtime libraries, is available
+    from the GNU Compiler Collection project:
+
+        https://gcc.gnu.org/
+
+
+================================================================================
+3. mingw-w64 winpthreads
+================================================================================
+
+File redistributed
+    libwinpthread-1.dll
+
+What it is
+    winpthreads, the mingw-w64 project's POSIX threads implementation for
+    Windows. The libstdc++-6.dll above is built with the POSIX thread model and
+    depends on this library, so it too is required for the program to start.
+
+Version
+    As shipped in the MinGW-Builds GCC 13.1.0 toolchain (mingw-w64 runtime v11,
+    x86_64, POSIX thread model, SEH exceptions). Unmodified.
+
+Licence
+    Permissive: the MIT licence for the mingw-w64 project's own code, together
+    with a 3-clause BSD notice covering the portions derived from Lockless Inc.
+    The complete notice, reproduced verbatim from the winpthreads COPYING file
+    distributed with the toolchain, follows between the markers below.
+
+----- begin winpthreads COPYING -----
+
+Copyright (c) 2011 mingw-w64 project
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+/*
+ * Parts of this library are derived by:
+ *
+ * Posix Threads library for Microsoft Windows
+ *
+ * Use at own risk, there is no implied warranty to this code.
+ * It uses undocumented features of Microsoft Windows that can change
+ * at any time in the future.
+ *
+ * (C) 2010 Lockless Inc.
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *
+ *  * Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *  * Neither the name of Lockless Inc. nor the names of its contributors may be
+ *    used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AN
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+ * OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+----- end winpthreads COPYING -----
+
+Source code
+    mingw-w64 project home page, from which source releases and the source
+    repository are reachable:
+
+        https://www.mingw-w64.org/
+
+
+================================================================================
+4. mingw-w64 runtime, statically linked into CANTripleDeviceManager.exe
+================================================================================
+
+File redistributed
+    None of its own. This code is linked into CANTripleDeviceManager.exe itself
+    and has no separate file anywhere in the distribution.
+
+What it is
+    The mingw-w64 project's C runtime for Windows: the CRT startup objects
+    that run before main(), and libmingwex, which supplies the standard C
+    functions that the Microsoft C runtime shipped with Windows does not
+    provide - among them the floating-point conversion code (gdtoa) behind the
+    printf family, and parts of the maths library. GCC links these objects
+    into every executable it builds for this target, so they end up inside the
+    .exe rather than in a DLL beside it.
+
+Version
+    mingw-w64 runtime v11.0, x86_64-w64-mingw32, from the same MinGW-Builds
+    GCC 13.1.0 toolchain that supplied the libraries in sections 2 and 3.
+    Unmodified.
+
+Licence
+    Permissive, and not a single licence but a set of notices: the mingw-w64
+    project's own terms for the runtime as a whole, plus separate notices for
+    the getopt implementation, for the gdtoa floating-point conversion code,
+    and for the parts of the maths library that came from Sun Microsystems and
+    from the Cephes library. The mingw-w64 project collects all of them into
+    one file, COPYING.MinGW-w64-runtime.txt, which opens by stating that parts
+    of the runtime are under licences requiring the copyright and licence
+    notices to be included when the code is distributed in binary form. That
+    file, as distributed with the toolchain, is reproduced verbatim between
+    the markers below.
+
+----- begin COPYING.MinGW-w64-runtime.txt -----
+
+MinGW-w64 runtime licensing
+***************************
+
+This program or library was built using MinGW-w64 and statically
+linked against the MinGW-w64 runtime. Some parts of the runtime
+are under licenses which require that the copyright and license
+notices are included when distributing the code in binary form.
+These notices are listed below.
+
+
+========================
+Overall copyright notice
+========================
+
+Copyright (c) 2009, 2010 by the mingw-w64 project
+
+This license has been certified as open source. It has also been designated
+as GPL compatible by the Free Software Foundation (FSF).
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+   1. Redistributions in source code must retain the accompanying copyright
+      notice, this list of conditions, and the following disclaimer.
+   2. Redistributions in binary form must reproduce the accompanying
+      copyright notice, this list of conditions, and the following disclaimer
+      in the documentation and/or other materials provided with the
+      distribution.
+   3. Names of the copyright holders must not be used to endorse or promote
+      products derived from this software without prior written permission
+      from the copyright holders.
+   4. The right to distribute this software or to use it for any purpose does
+      not give you the right to use Servicemarks (sm) or Trademarks (tm) of
+      the copyright holders.  Use of them is covered by separate agreement
+      with the copyright holders.
+   5. If any files are modified, you must cause the modified files to carry
+      prominent notices stating that you changed the files and the date of
+      any change.
+
+Disclaimer
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY EXPRESSED
+OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
+OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+======================================== 
+getopt, getopt_long, and getop_long_only
+======================================== 
+
+Copyright (c) 2002 Todd C. Miller <Todd.Miller@courtesan.com> 
+ 
+Permission to use, copy, modify, and distribute this software for any 
+purpose with or without fee is hereby granted, provided that the above 
+copyright notice and this permission notice appear in all copies. 
+ 	 
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+Sponsored in part by the Defense Advanced Research Projects
+Agency (DARPA) and Air Force Research Laboratory, Air Force
+Materiel Command, USAF, under agreement number F39502-99-1-0512.
+
+        *       *       *       *       *       *       * 
+
+Copyright (c) 2000 The NetBSD Foundation, Inc.
+All rights reserved.
+
+This code is derived from software contributed to The NetBSD Foundation
+by Dieter Baron and Thomas Klausner.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+ 1. Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+ 2. Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE NETBSD FOUNDATION, INC. AND CONTRIBUTORS
+``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR CONTRIBUTORS
+BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+
+===============================================================
+gdtoa: Converting between IEEE floating point numbers and ASCII
+===============================================================
+
+The author of this software is David M. Gay.
+
+Copyright (C) 1997, 1998, 1999, 2000, 2001 by Lucent Technologies
+All Rights Reserved
+
+Permission to use, copy, modify, and distribute this software and
+its documentation for any purpose and without fee is hereby
+granted, provided that the above copyright notice appear in all
+copies and that both that the copyright notice and this
+permission notice and warranty disclaimer appear in supporting
+documentation, and that the name of Lucent or any of its entities
+not be used in advertising or publicity pertaining to
+distribution of the software without specific, written prior
+permission.
+
+LUCENT DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
+INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.
+IN NO EVENT SHALL LUCENT OR ANY OF ITS ENTITIES BE LIABLE FOR ANY
+SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER
+IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+
+        *       *       *       *       *       *       *
+
+The author of this software is David M. Gay.
+
+Copyright (C) 2005 by David M. Gay
+All Rights Reserved
+
+Permission to use, copy, modify, and distribute this software and its
+documentation for any purpose and without fee is hereby granted,
+provided that the above copyright notice appear in all copies and that
+both that the copyright notice and this permission notice and warranty
+disclaimer appear in supporting documentation, and that the name of
+the author or any of his current or former employers not be used in
+advertising or publicity pertaining to distribution of the software
+without specific, written prior permission.
+
+THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
+INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.  IN
+NO EVENT SHALL THE AUTHOR OR ANY OF HIS CURRENT OR FORMER EMPLOYERS BE
+LIABLE FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY
+DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS
+SOFTWARE.
+
+        *       *       *       *       *       *       *
+
+The author of this software is David M. Gay.
+
+Copyright (C) 2004 by David M. Gay.
+All Rights Reserved
+Based on material in the rest of /netlib/fp/gdota.tar.gz,
+which is copyright (C) 1998, 2000 by Lucent Technologies.
+
+Permission to use, copy, modify, and distribute this software and
+its documentation for any purpose and without fee is hereby
+granted, provided that the above copyright notice appear in all
+copies and that both that the copyright notice and this
+permission notice and warranty disclaimer appear in supporting
+documentation, and that the name of Lucent or any of its entities
+not be used in advertising or publicity pertaining to
+distribution of the software without specific, written prior
+permission.
+
+LUCENT DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
+INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.
+IN NO EVENT SHALL LUCENT OR ANY OF ITS ENTITIES BE LIABLE FOR ANY
+SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER
+IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+
+
+=========================
+Parts of the math library
+=========================
+
+Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+Developed at SunSoft, a Sun Microsystems, Inc. business.
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+
+        *       *       *       *       *       *       *
+
+Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+Developed at SunPro, a Sun Microsystems, Inc. business.
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+
+        *       *       *       *       *       *       *
+
+FIXME: Cephes math lib
+Copyright (C) 1984-1998 Stephen L. Moshier
+
+It sounds vague, but as to be found at
+<http://lists.debian.org/debian-legal/2004/12/msg00295.html>, it gives an
+impression that the author could be willing to give an explicit
+permission to distribute those files e.g. under a BSD style license. So
+probably there is no problem here, although it could be good to get a
+permission from the author and then add a license into the Cephes files
+in MinGW runtime. At least on follow-up it is marked that debian sees the
+version a-like BSD one. As MinGW.org (where those cephes parts are coming
+from) distributes them now over 6 years, it should be fine.
+
+===================================
+Headers and IDLs imported from Wine
+===================================
+
+Some header and IDL files were imported from the Wine project. These files
+are prominent maked in source. Their copyright belongs to contributors and
+they are distributed under LGPL license.
+
+Disclaimer
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+----- end COPYING.MinGW-w64-runtime.txt -----
+
+Source code
+    mingw-w64 project home page, from which source releases and the source
+    repository are reachable:
+
+        https://www.mingw-w64.org/
+
+
+================================================================================
+5. Mesa (llvmpipe software OpenGL rasteriser)
+================================================================================
+
+File redistributed
+    opengl32sw.dll
+
+What it is
+    Mesa's llvmpipe Gallium software rasteriser, packaged as a drop-in software
+    implementation of OpenGL. Qt uses it as a fallback so that the program can
+    still render when the machine has no usable hardware OpenGL driver - for
+    instance inside a virtual machine or across some remote-desktop sessions.
+    It is placed in the distribution by Qt's windeployqt deployment tool.
+
+Version
+    Mesa 11.2.2 - the prebuilt Windows binary as redistributed by the Qt
+    Project. Unmodified.
+
+Copyright
+    Copyright (C) Brian Paul and the other Mesa contributors, together with the
+    authors of the third-party components Mesa incorporates.
+
+Licence
+    MIT. This is the licence of the core Mesa library, reproduced verbatim
+    between the markers below from Mesa's own licence document in the source
+    tree - docs/license.html in the releases of this era, docs/license.rst in
+    later ones.
+
+----- begin Mesa licence -----
+
+Copyright (C) 1999-2007  Brian Paul   All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+----- end Mesa licence -----
+
+    Beyond that core, opengl32sw.dll also contains third-party components
+    under their own, likewise permissive, licences; individual files in the
+    Mesa tree carry their own notices. Those notices are not reproduced here.
+    Mesa's licensing overview, which points to the per-component licence files
+    in the source tree, is at:
+
+        https://docs.mesa3d.org/license.html
+
+Source code
+    Mesa project home page:    https://www.mesa3d.org/
+    Source archives:           https://archive.mesa3d.org/
+    Source repository:         https://gitlab.freedesktop.org/mesa/mesa
+
+
+================================================================================
+6. Microsoft Direct3D HLSL compiler
+================================================================================
+
+File redistributed
+    D3Dcompiler_47.dll
+
+What it is
+    The Microsoft Direct3D HLSL shader compiler, in its redistributable form.
+    Qt loads it when it needs to compile shaders for the Direct3D graphics
+    backend. It is placed in the distribution by Qt's windeployqt deployment
+    tool.
+
+Version
+    6.3.9600.16384 - the copy shipped in the Windows 8.1 SDK. Unmodified.
+
+Copyright
+    Copyright (C) Microsoft Corporation.
+
+Licence
+    Proprietary. Redistributed under the redistributable-code terms of the
+    Microsoft Windows SDK licence agreement, which permits this file to be
+    distributed with applications that use it.
+
+    This component is not free software. No source code is available for it,
+    and it is not covered by COPYING.txt, LICENSE.LGPLv3.txt or
+    GCC-RUNTIME-EXCEPTION.txt.
+
+Where to obtain it
+    From the Windows SDK, which carries the applicable licence agreement:
+
+        https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/
+
+
+================================================================================
+7. Lua 5.4.8, statically linked into CANTripleDeviceManager.exe
+================================================================================
+
+File redistributed
+    None of its own. The Lua interpreter is compiled into
+    CANTripleDeviceManager.exe itself (from the sources vendored in the
+    project's third_party/lua directory) and has no separate file anywhere in
+    the distribution.
+
+What it is
+    The Lua programming language, version 5.4.8, by Lua.org, PUC-Rio. It powers
+    the Tools > Lua Console scripting feature. The standalone lua/luac
+    executables are not built or shipped; only the library is linked in, and
+    the embedded copy runs sandboxed (no file, process or network access from
+    scripts).
+
+Version
+    Lua 5.4.8, unmodified, from the official source mirror:
+
+        https://github.com/lua/lua  (tag v5.4.8)
+        https://www.lua.org/
+
+Licence
+    MIT. The copyright and permission notice from lua.h is reproduced verbatim
+    between the markers below, as that licence requires for binary
+    distribution.
+
+----- begin Lua licence -----
+
+Copyright (C) 1994-2025 Lua.org, PUC-Rio.
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+----- end Lua licence -----
+
+
+================================================================================
+8. STMicroelectronics ST-LINK USB driver package (STSW-LINK009)
+================================================================================
+
+Files redistributed
+    The Drivers\stlink directory in its entirety:
+
+        stlink_VCP.inf, stlinkvcp_x64.cat, stlinkvcp_x86.cat
+                              -- the Virtual COM Port driver, the interface
+                                 this program actually talks to the device over
+        stlink_dbg_winusb.inf, stlinkdbgwinusb_*.cat
+        stlink_bridge_winusb.inf, stlinkbridgewinusb_*.cat
+                              -- the debug and bridge interfaces of the same
+                                 composite USB device
+        amd64\, x86\          -- Microsoft WinUSB / KMDF co-installers
+                                 (winusbcoinstaller2.dll, WdfCoInstaller01009.dll)
+        dpinst_amd64.exe, dpinst_x86.exe
+                              -- Microsoft's Driver Package Installer, as
+                                 shipped by STMicroelectronics inside this
+                                 package; the installer runs the amd64 one
+        readme.txt, stlink_winusb_install.bat, stlink_winusb_silent_install.bat
+                              -- STMicroelectronics' own documentation and
+                                 installation scripts, kept so the package
+                                 stays exactly as published
+
+What it is
+    The digitally signed Windows USB drivers for the ST-LINK interface built
+    into CAN Triple hardware. The device enumerates as an ST-LINK composite
+    USB device; its Virtual COM Port is how this program communicates with it.
+    Windows Update can supply the same driver on a connected machine; the copy
+    here is what makes an offline installation work.
+
+Version
+    The stsw-link009 v3 package, redistributed byte-for-byte as obtained from
+    STMicroelectronics (via the STM32CubeProgrammer distribution). Unmodified.
+
+Copyright
+    The driver files: Copyright (C) STMicroelectronics.
+    dpinst_*.exe and the co-installer DLLs: Copyright (C) Microsoft
+    Corporation, redistributed by STMicroelectronics inside their package
+    under Microsoft's redistributable-component terms.
+
+Licence
+    Proprietary. Redistributed under STMicroelectronics' software licence
+    terms for this package, which permit distributing it for use with
+    ST hardware -- the ST-LINK circuitry inside the CAN Triple being exactly
+    that. This component is not free software: no source code is available,
+    and it is not covered by COPYING.txt, LICENSE.LGPLv3.txt or
+    GCC-RUNTIME-EXCEPTION.txt.
+
+Where to obtain it
+    From STMicroelectronics, which carries the applicable licence agreement:
+
+        https://www.st.com/en/development-tools/stsw-link009.html
+
+
+================================================================================
+9. OpenOCD (with libusb and libftdi), in the recovery kit
+================================================================================
+
+Files redistributed
+    Firmware\openocd\bin\openocd.exe
+    Firmware\openocd\bin\libusb-1.0.dll
+    Firmware\openocd\bin\libftdi1.dll
+    Firmware\openocd\scripts\interface\stlink.cfg
+    Firmware\openocd\scripts\target\swj-dp.tcl
+    Firmware\openocd\scripts\mem_helper.tcl
+
+What it is
+    The Open On-Chip Debugger. CANTripleRecovery.exe (part of CAN Triple
+    Device Manager, MIT, source in the repository at the top of this file)
+    invokes it as a SEPARATE PROGRAM - a child process, not a linked library -
+    to program the device's bootloader and application over the board's
+    built-in ST-LINK. The two .dll files are libraries OpenOCD itself loads
+    for USB access; the .cfg/.tcl files are configuration scripts from
+    OpenOCD's own distribution. (stm32g4x_512k.cfg in the same directory is
+    NOT OpenOCD's: it is this project's, a one-line variant of OpenOCD's
+    stm32g4x.cfg, and is covered by COPYING.txt like the rest of the
+    project's own files - its provenance is documented in its header.)
+
+Version
+    The xPack OpenOCD 0.12.0 Windows x86_64 binaries, as redistributed in
+    PlatformIO's tool-openocd package (package version 3.1200.7).
+    Unmodified.
+
+Copyright
+    OpenOCD: Copyright (C) its many contributors - see the source.
+    libusb:  Copyright (C) the libusb contributors.
+    libftdi: Copyright (C) Intra2net AG and the libftdi contributors.
+
+Licence
+    OpenOCD: GNU General Public License, version 2 or (at your option) any
+    later version. The GPLv2-or-later text accompanies the OpenOCD source at
+    the locations below; exercised as GPLv3, the applicable text is
+    LICENSE.GPLv3.txt in the program directory.
+
+    libusb and libftdi: GNU Lesser General Public License, version 2.1. Both
+    are dynamically loaded .dll files sitting beside openocd.exe, so
+    replacing them with your own builds requires nothing to be recompiled.
+
+Source code
+    OpenOCD project:      https://openocd.org/
+                          https://sourceforge.net/p/openocd/code/
+    xPack binaries:       https://github.com/xpack-dev-tools/openocd-xpack
+    libusb:               https://libusb.info/
+    libftdi:              https://www.intra2net.com/en/developer/libftdi/
+
+    The xPack releases page above carries, for each release, the exact source
+    archive the binaries were built from.
+
+
+================================================================================
+OBTAINING SOURCE CODE
+================================================================================
+
+Every free-software component above is listed with the place its source can be
+obtained. Those upstream locations are the authoritative ones and are maintained
+by the projects themselves.
+
+If one of these links has gone stale, or if you believe a component shipped in
+this distribution is missing from this file, please open an issue at:
+
+    https://github.com/mitchdetailed/CAN-Triple-Device-Manager

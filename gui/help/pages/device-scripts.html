@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Device Scripts</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Device Scripts</h1>
+
+<p>A <b>device script</b> is a small program that runs <em>on the CAN Triple</em>,
+100 times a second, alongside everything else the configuration does. It reads
+channels, does arithmetic, remembers values between ticks, and writes channels
+back. Where a <a href="math-channels.html">math channel</a> is one expression and
+a <a href="conditions.html">condition</a> is one comparison, a script is the
+place for logic that needs several steps and a memory — a state machine, a
+hysteresis band, a debounce, a staged fan curve.</p>
+
+<p class="note">A device script is <b>not</b> the
+<a href="scripting.html">Lua Console</a>. The console runs on your PC and edits
+the document in front of you; nothing it does reaches a unit. A device script is
+part of the configuration and runs on the hardware. They share a language and
+nothing else.</p>
+
+<h2>Writing one</h2>
+
+<p>Choose <b>Calculations → Device Script…</b>. The left half is the editor; the
+right half is the simulator. Press <b>Compile</b> (or Ctrl+Enter) to check the
+script, then <b>Step</b> or <b>Run</b> to watch it work.</p>
+
+<pre><code>-- Persistent values, declared at file scope. They survive across ticks.
+local hold = state(0)
+
+function on_tick()
+    local temp = sig("Coolant Temp")
+
+    -- Turn the fan on at 96, off at 90 — a 6-degree band, so it does not
+    -- chatter around a single threshold.
+    if temp &gt; 96 then
+        hold = 1
+    elseif temp &lt; 90 then
+        hold = 0
+    end
+
+    setSig("Fan Request", hold)
+end</code></pre>
+
+<p><code>sig("<i>name</i>")</code> reads a channel and
+<code>setSig("<i>name</i>", <i>value</i>)</code> writes one. Channels are
+addressed by <b>name</b>, exactly as they appear everywhere else in the program —
+naming a channel that does not exist is a compile error, not a silent read of
+nothing. <code>on_tick()</code> is the hook the device calls; a script without
+one is refused, since it could never run.</p>
+
+<h2>The simulator</h2>
+
+<p>The panel on the right is not a model of the device — it <em>is</em> the
+device's script engine, the same code compiled into this program. A tick here
+and a tick on the unit run the same instructions over the same numbers, so a
+script that behaves correctly in the simulator behaves correctly on the
+hardware.</p>
+
+<ul>
+<li><b>Channels</b> — type a number into any channel to feed it to the script.
+Channels the script <em>writes</em> are highlighted after a tick, so cause and
+effect are visible at a glance.</li>
+<li><b>Persistent state</b> — the values declared with <code>state()</code>, as
+they stand after the last tick.</li>
+<li><b>Step</b> runs one tick. <b>Run</b> runs the number of ticks in the box
+beside it — 100 ticks is one second of device time — and reports the peak cost
+and any fault.</li>
+<li><b>Reset</b> puts it back to a fresh power-on: state cleared, initialisers
+re-run.</li>
+</ul>
+
+<h2>The budget</h2>
+
+<p>The device gives every tick a fixed <b>budget</b>, and each instruction costs
+against it — more for the expensive operations (division, square root,
+<code>%</code>, <code>floor</code>, <code>clamp</code> and <code>wrap</code>). A
+script that exceeds its budget in a single tick is <b>suspended</b>: it stops
+running and does not run again until the configuration is reloaded, the rest of
+the configuration carries on
+untouched, and its persistent <code>state()</code> values are restored to what
+they were at the start of the tick. Channels the script had already written that
+tick keep the values it wrote — treat a suspended script's outputs as stale. The
+engine and the CAN buses never stall waiting for a script.</p>
+
+<p>That is a safety net, not a design target. After <b>Run</b>, the figure under
+the state table shows the highest cost any of those ticks reached. After
+<b>Compile</b> it shows the straight-line cost with every loop taken zero times —
+a floor, not a bound. <b>Step</b> does not update it. A script sitting near the
+limit is one input change away from being suspended. If the simulator reports
+a fault, look for a loop whose end condition depends on something that can grow
+without bound.</p>
+
+<p>For scale, measured on a device: the fan example above costs <b>23 of 2000
+units — 37 microseconds, or 0.4% of a tick</b>. A script deliberately written
+to run away and be killed is stopped inside about a millisecond — a tenth of a
+tick — either by exhausting the budget or by hitting the device's cycle ceiling,
+whichever comes first. Ordinary logic does not come close to the limit; if yours
+does, it is looping.</p>
+
+<p>Not every instruction costs the same, because on this processor floating-point
+work is done in software. A divide costs about three times an add, and
+<code>sqrt</code>, <code>floor</code>, <code>ceil</code>, <code>round</code>,
+<code>%</code>, <code>clamp</code> and <code>wrap</code>
+cost more still — so the budget charges them more. That is why replacing a
+divide with a multiply, or hoisting a <code>sqrt</code> out of a loop, buys more
+than it looks like it should.</p>
+
+<h2>The two ways a script can be stopped</h2>
+
+<p>There are two limits, and they answer different questions. The simulator can
+show you the first; only a device can hit the second.</p>
+
+<table>
+<tr><th>Reported as</th><th>What it means</th><th>What to do</th></tr>
+<tr>
+<td><b>Budget</b></td>
+<td>The script did too much <em>work</em> in one tick. This is the limit the
+simulator enforces too, so a script that trips it on the device trips it on your
+desk as well.</td>
+<td>Look for a loop whose end condition can grow without bound.</td>
+</tr>
+<tr>
+<td><b>Overrun</b></td>
+<td>The script took too long in real <em>time</em>, whatever the budget thought
+it was spending. In practice this means <code>wrap</code>, <code>clamp</code> or
+<code>%</code> applied across a very wide range of magnitudes — those are far
+slower when the two numbers differ by many powers of ten.</td>
+<td>Bring the operands closer in magnitude, or do the range reduction with
+arithmetic you control.</td>
+</tr>
+</table>
+
+<p class="note">The simulator cannot reproduce an <b>Overrun</b>, and that is
+the one place its answer is not the device's. It runs on a PC, where the same
+instructions take a different amount of time — so it tells you exactly what your
+script will <em>compute</em>, and the device tells you what it costs. Every
+value the simulator shows is the value the unit produces, bit for bit; only the
+timing is the device's business.</p>
+
+<p>Either way the outcome is the same and nothing else is affected: the script
+stops and stays stopped until the configuration is reloaded, its
+<code>state()</code> values are put back, any channels it wrote that tick keep
+what it wrote, the rest of the configuration keeps running, and the reason is
+readable from the device.</p>
+
+<h2>What the language has</h2>
+
+<p>Device scripts are a <b>subset of Lua</b>. The syntax is Lua's, checked by a
+real Lua parser, so an ordinary typo produces an ordinary Lua error message with
+a line number.</p>
+
+<table>
+<tr><th>Available</th><th>Notes</th></tr>
+<tr><td>Local variables, assignment</td><td><code>local x = 1</code></td></tr>
+<tr><td>Arithmetic <code>+ - * / %</code></td><td>All values are numbers</td></tr>
+<tr><td>Comparison <code>&lt; &lt;= &gt; &gt;= == ~=</code></td><td>Yield 1 or 0</td></tr>
+<tr><td><code>and</code> <code>or</code> <code>not</code></td><td>Yield 1 or 0; they do <em>not</em> short-circuit</td></tr>
+<tr><td><code>if</code> / <code>elseif</code> / <code>else</code></td><td></td></tr>
+<tr><td><code>while</code>, numeric <code>for</code>, <code>break</code></td><td>A <code>for</code> step must be constant</td></tr>
+<tr><td><code>abs min max floor ceil round sqrt</code></td><td></td></tr>
+<tr><td><code>clamp(x,lo,hi)</code> <code>lerp(a,b,t)</code></td><td></td></tr>
+<tr><td><code>select(c,a,b)</code> <code>wrap(x,lo,hi)</code></td><td><code>select</code> returns <code>a</code> when <code>c</code> is greater than zero — not merely non-zero</td></tr>
+<tr><td><code>sig(name)</code> <code>setSig(name, v)</code></td><td>Channel read and write</td></tr>
+<tr><td><code>state(initial)</code></td><td>File scope only; a value that survives ticks</td></tr>
+</table>
+
+<p>Truth is numeric, and the two forms test it differently: <code>and</code>,
+<code>or</code> and <code>not</code> treat a value as true only when it is
+greater than zero, while <code>if</code> and <code>while</code> take any
+non-zero value as true. For <code>x = -1</code>, <code>if x then</code> takes
+the branch but <code>x and 1</code> yields 0.</p>
+
+<p>Arithmetic never faults; an out-of-domain case produces a defined value
+instead: <code>a / 0</code> and <code>a % 0</code> yield 0, <code>sqrt</code> of
+a negative yields 0, <code>clamp(x, lo, hi)</code> returns <code>x</code>
+unchanged when <code>hi &lt;= lo</code>, and <code>wrap(x, lo, hi)</code>
+returns a value in <code>[lo, hi)</code> — the high bound itself is never
+produced.</p>
+
+<p>The language also accepts <code>neg(x)</code> (unary minus as a function), a
+bare <code>return</code>, <code>do</code>…<code>end</code> blocks, the literals
+<code>true</code>, <code>false</code> and <code>nil</code>, hexadecimal number
+literals, and a negative <code>for</code> step.</p>
+
+<p>Fixed limits: at most <b>64</b> local variables, at most <b>64</b>
+<code>state()</code> values, and a compiled script of at most <b>1024
+instructions</b> (8&nbsp;KB of bytecode). Exceeding any of them is a compile
+error that names the limit.</p>
+
+<p>Deliberately absent: tables, strings as values, closures, functions other
+than the hooks, varargs, <code>goto</code>, <code>repeat</code>, <code>#</code>,
+string concatenation, and the trigonometric and exponential functions
+(<code>sin</code>, <code>cos</code>, <code>exp</code>, <code>log</code>,
+<code>^</code>). Most produce a compile error that names the exclusion and says
+why; a few — tables, <code>goto</code>, <code>repeat</code>, and a function used
+as a value — are simply not part of the grammar, so the message is a plain parse
+error such as "expected a value" or "'repeat' is not declared".</p>
+
+<p class="note">The trigonometric functions are excluded for a specific reason.
+The IEEE-754 standard does not require them to be rounded identically on every
+machine, so the same script could differ by the smallest representable amount
+between your PC and the device — and a comparison sitting on that difference
+would branch the other way. Leaving them out is what lets the simulator's answer
+be trusted as the device's answer rather than an approximation of it.</p>
+
+<h2>How a script is stored and sent</h2>
+
+<p>The script is part of the configuration. A script you wrote saves in the
+<code>.ct3</code> file as <b>source</b> and is compiled to bytecode when you send
+it; a script <a href="#retrieved">read back off a device</a> has no source, so
+the file carries the compiled image instead. A document describes its script one
+way or the other, never both.</p>
+
+<ul>
+<li><b>Send Configuration</b> compiles the script and writes it with everything
+else. A script that does not compile blocks the send, with the reason — the
+device is never left running an old script against new tables. A retained
+compiled image is sent exactly as it came back, and is refused before anything
+is erased if it has been damaged since.</li>
+<li><b>Verify Configuration</b> compares the device's stored script against what
+this document would send, like any other table.</li>
+<li>Sending a configuration with <em>no</em> script <b>removes</b> any script
+already on the device.</li>
+</ul>
+
+<h2 id="retrieved">Reading a script back off a device</h2>
+
+<p><b>Get Configuration</b> brings the script back with everything else — as
+<b>compiled bytecode</b>, which is what the device stores. Sending that document
+back puts the same script on a unit <b>byte for byte</b>. Nothing is
+re-compiled, re-numbered or re-encoded on the way through, so a script survives
+being read out of one unit and written into another unchanged.</p>
+
+<p>What a Get cannot bring back is the <b>Lua</b>. Bytecode does not turn back
+into source — the names, the structure and the comments were gone the moment it
+was compiled. So a document read off a device holds a working script and no text
+for it, and the Script Editor says so rather than opening on an empty box:</p>
+
+<ul>
+<li>A banner at the top states what the document is carrying and that there is no
+source for it.</li>
+<li>The <b>Disassembly</b> tab lists the script as instructions — index,
+operation, operands, and the budget cost of each — with the instruction count
+measured against the device's ceiling of 1024. The line <code>on_tick</code>
+starts at is marked. It is a <em>view</em>: there is no way to edit it, and no
+assembler behind it.</li>
+<li>The editor itself is read-only, and <b>Compile</b>, <b>Load Script…</b> and
+<b>Save Script…</b> are off, because there is no source for any of them to work
+on.</li>
+<li>To write Lua instead, press <b>Replace With a Lua Script…</b>. It asks
+first, and it is the only thing in the dialog that discards the compiled image.
+Pressing OK on a document you have not deliberately taken over changes
+nothing.</li>
+</ul>
+
+<p class="warn"><b>Keep your source anyway.</b> A retrieved script can be sent
+back, listed and copied to another unit, but it can never be read as Lua or
+edited a line at a time — <em>only replaced whole</em>. The
+<code>.ct3</code> it was written in, or a <code>.lua</code> saved with <b>Save
+Script…</b>, is still the only copy you can change.</p>
+
+<p class="note">If a device answers with something that is not a valid script
+image — a mangled transfer, a truncated file — nothing is kept, and the Get says
+which check failed. That is deliberate: an unusable image stored in the document
+would be refused at the next Send, which happens <em>after</em> the device has
+been erased.</p>
+
+<h2>Keeping scripts as files</h2>
+
+<p>The script lives in the configuration, but two buttons at the right of the
+editor's control row move it to and from a plain <code>.lua</code> file:</p>
+
+<ul>
+<li><b>Save Script…</b> writes what is in the editor to a file. Use it to keep a
+library of scripts, to share one, or simply to have a copy that does not depend
+on the <code>.ct3</code>.</li>
+<li><b>Load Script…</b> replaces what is in the editor with a file's contents,
+and compiles it straight away so any error shows up now rather than at Send. It
+asks first if that would discard unsaved changes.</li>
+</ul>
+
+<p>Loading a script does <em>not</em> tie the document to that file — the script
+is copied in, and from then on it belongs to the configuration like any other
+setting. Saving again after editing is up to you.</p>
+
+<h2>The worked examples</h2>
+
+<p>The program installs ten complete, working scripts in the <b>examples</b>
+folder beside it. Open any of them with <b>Load Script…</b>. Each one starts with
+a comment block saying what it does, which channels it expects, and which
+constants are meant to be tuned; the channel names are ordinary ones like
+"Coolant Temp", so adapt them to whatever your configuration actually calls
+things.</p>
+
+<table>
+<tr><th>File</th><th>What it shows</th></tr>
+<tr><td><code>fan-hysteresis.lua</code></td><td>A two-stage fan with separate on
+and off thresholds, so a temperature sitting between them cannot chatter the
+relay.</td></tr>
+<tr><td><code>rolling-counter.lua</code></td><td>An alive counter that wraps
+0-15, plus detecting a <em>received</em> counter that has stopped
+changing.</td></tr>
+<tr><td><code>crc8-can-message.lua</code></td><td>A CRC8 over an eight-byte
+message. The interesting part is how it works without bitwise operators, and how
+it splits the work across two ticks to stay inside the budget.</td></tr>
+<tr><td><code>gear-from-ratio.lua</code></td><td>Gear from engine speed over road
+speed, including guarding the division at a standstill.</td></tr>
+<tr><td><code>smoothing-filter.lua</code></td><td>An exponential moving average
+for a noisy sensor, seeded from the first reading so it does not ramp up from
+zero at power-on.</td></tr>
+<tr><td><code>slew-rate-limiter.lua</code></td><td>Limiting how fast a commanded
+output may change, in units per second.</td></tr>
+<tr><td><code>debounce-input.lua</code></td><td>Ignoring a switch until it has
+held the same value for several ticks.</td></tr>
+<tr><td><code>peak-hold-decay.lua</code></td><td>A peak that jumps instantly and
+decays slowly, alongside a session peak that never decays.</td></tr>
+<tr><td><code>latching-fault.lua</code></td><td>A warning that latches after a
+condition persists, and clears only on a deliberate reset.</td></tr>
+<tr><td><code>run-timer.lua</code></td><td>Accumulating running hours, and why
+the total lives only in <code>state()</code>.</td></tr>
+</table>
+
+<p>All ten compile and run inside the tick budget — that is checked automatically
+whenever the program is built, against the same compiler and the same virtual
+machine the device uses.</p>
+
+<h2>See also</h2>
+<ul>
+<li><a href="math-channels.html">Math Channels</a> — for a single expression</li>
+<li><a href="conditions.html">Conditions</a> — for a single comparison</li>
+<li><a href="tables.html">Tables</a> — for a curve or a map</li>
+<li><a href="scripting.html">Lua Console</a> — scripting the <em>document</em>, on your PC</li>
+</ul>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

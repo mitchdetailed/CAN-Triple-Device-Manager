@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Monitoring Live Values</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Monitoring Live Values</h1>
+
+<p>Two windows show what a connected device is doing: <b>Monitor Channels</b>
+(F3) shows decoded channel values, and the <b>CAN Viewer</b> (F4) shows raw
+CAN frames. Both stay open alongside the editors while you work.</p>
+
+<h2>Monitor Channels (F3)</h2>
+
+<p>Choose <b>Online → Monitor Channels…</b> or press <b>F3</b>. The window
+lists every mapped channel in a live grid with columns <b>Channel</b>,
+<b>Value</b> and <b>Units</b>, sorted by channel name. Values are fed by the
+device's always-on value stream and are formatted with the channel's decimal
+places; a value that has never arrived shows as "—". An enumerated channel —
+<b>Device Last Reset Reason</b> is the one (see
+<a href="channels.html">Channels</a>) — shows its label with the number,
+"Power On (1)"; a value its enumeration does not name shows as the bare
+number. The stream refreshes
+every channel within 70&nbsp;ms even at the device's channel limit — see
+<a href="engine.html">Order &amp; Timing of Operations</a> for the exact
+rates.</p>
+
+<p class="note">A value that has not updated for about 2 seconds turns gray —
+the channel's message has stopped arriving, or the device is not sending the
+stream. It returns to normal color with the next update.</p>
+
+<p>The label above the grid states what is being shown: the channel mapping of
+the <em>current document</em>, not necessarily what the device is running. If
+you have edited the configuration since the last Send, the rows and the
+device's stream can disagree — <a href="online.html">send the
+configuration</a> to bring the device in line with the document. The grid
+re-maps itself automatically when the document changes.</p>
+
+<p>If the document has mapping errors, the label reports how many and shows
+the first one; the device mapping may then be incomplete. Run <b>File → Check
+Channels</b> for the full list — see
+<a href="validation-report.html">Validation &amp; the Config Summary</a>. For a
+<b>concealed</b> message — one marked Hidden or Protect Communication — the
+error detail is withheld: the label names the message and tells you to open it
+in <b>Connections → Communications</b> with its own <b>Message Password</b>,
+since what is wrong with it cannot be shown without that. It does <em>not</em>
+point at File → Reveal Protected Comms: that is the document-wide Edit Protected
+Comms password, which opens no Hidden message at all and is only one of the two
+things a Protect Communication message asks for. A <b>Read Only</b> message
+reports its errors in full; it conceals nothing (see
+<a href="communications.html#marking">Marking a message</a>).</p>
+
+<h2>CAN Viewer (F4)</h2>
+
+<p>Choose <b>Online → CAN Viewer…</b> or press <b>F4</b>. The viewer
+shows raw frames from all three buses as they arrive, with columns
+<b>Time (s)</b>, <b>Bus</b>, <b>Dir</b> (Rx or Tx), <b>ID</b>, <b>Len</b> and
+<b>Data</b>. Standard IDs are shown as three hex digits (0x123), extended IDs
+as eight (0x18FEF100).</p>
+
+<table>
+<tr><th>Control</th><th>Meaning</th></tr>
+<tr><td>Pause</td><td>Stops capturing new frames; frames arriving while paused
+are discarded, not queued.</td></tr>
+<tr><td>Auto scroll</td><td>Keeps the newest frame in view.</td></tr>
+<tr><td>Show: CAN 1 / CAN 2 / CAN 3</td><td>Which buses appear in the list. All
+three are ticked by default — see below.</td></tr>
+<tr><td>Save to File…</td><td>Writes every buffered frame as a Vector ASCII
+log (*.asc), readable by common CAN tools. Timestamps in the file are relative
+to the first buffered frame.</td></tr>
+<tr><td>Clear</td><td>Empties the table and the capture buffer.</td></tr>
+<tr><td>Inject Frame</td><td>Sends a frame from the device — see below.</td></tr>
+</table>
+
+<p class="note">The capture buffer holds up to 10 million frames for export;
+the on-screen table is a bounded window of the most recent 5,000 rows. "N
+frames buffered" above the table counts the full capture buffer, not the
+visible rows.</p>
+
+<h3>Filtering by bus</h3>
+
+<p>The <b>Show:</b> checkboxes — <b>CAN 1</b>, <b>CAN 2</b>, <b>CAN 3</b> — pick
+which buses appear in the list. Unticking a busy bus is the quickest way to
+read a quiet one: on a gateway where one network runs at a few thousand frames
+a second, the traffic you care about otherwise scrolls past before you can see
+it.</p>
+
+<p>These filter the <b>display only</b>. Every bus is captured regardless, so:</p>
+
+<ul>
+<li><b>Save to File…</b> always writes the whole trace, including buses that
+were hidden while it was recording.</li>
+<li>The "N frames buffered" count is the whole capture, not the visible
+rows.</li>
+<li>Re-ticking a bus brings its history back rather than starting from that
+moment — the list is rebuilt from the buffer.</li>
+</ul>
+
+<p class="note">Hiding a bus is not the same as <b>Pause</b>. Pause stops
+capture altogether and discards what arrives; a bus filter keeps recording
+everything and only changes what is on screen.</p>
+
+<h3>Inject Frame</h3>
+
+<p>The <b>Inject Frame</b> panel at the bottom transmits a single frame
+through the device: choose the <b>Bus:</b> (CAN 1–3), enter the <b>ID:</b> in
+hex (for example 0x7E0), tick <b>Extended</b> for a 29-bit ID, enter the
+<b>Data:</b> as hex bytes separated by spaces (for example
+<code>00 11 22 33 44 55 66 77</code>), and click <b>Send</b>. Standard IDs
+reach 0x7FF, extended IDs 0x1FFFFFFF; up to 64 data bytes are accepted.
+An injected frame is also treated as if it had arrived on that bus: it is
+parsed into channels, and any relay or routing rule that matches it fires. That
+is why it appears twice in the viewer — once as Rx and once as Tx.</p>
+
+<p class="warn">A payload of 9&nbsp;bytes or more is sent as a CAN FD frame; 8 or
+fewer goes out as a classic frame, because the format is inferred from the
+length. Injected frames go onto a live bus — be sure the ID you send cannot be
+mistaken for real traffic by other nodes.</p>
+
+<h2>See also</h2>
+<p><a href="online.html">Online: Send, Get &amp; Flash</a> ·
+<a href="channels.html">Channels</a> ·
+<a href="communications.html">Communications: Messages &amp; Sections</a> ·
+<a href="validation-report.html">Validation &amp; the Config Summary</a> ·
+<a href="troubleshooting.html">Troubleshooting</a></p>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>
