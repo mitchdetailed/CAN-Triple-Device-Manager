@@ -391,6 +391,9 @@ int main(int argc, char **argv)
     std::printf("\n  This programs the bootloader at 0x08000000 and the\n"
                 "  application at 0x08004000 over the built-in ST-LINK.\n"
                 "  The stored configuration and retained values are NOT touched.\n"
+                "  The firmware installed here is a starting point - pick the\n"
+                "  firmware you want inside the CAN Triple Device Manager\n"
+                "  (Online > Update Firmware) once the device is running.\n"
                 "  Safe to re-run at any time, including after a failed attempt.\n\n");
 
     if (!assumeYes) {
@@ -417,7 +420,9 @@ int main(int argc, char **argv)
     }
 
     std::printf("\n  DONE - bootloader v%u and firmware %u.%u.%u installed "
-                "and verified.\n  The device has been reset and is running.\n",
+                "and verified.\n  The device has been reset and is running.\n"
+                "\n  This firmware is a starting point. To run a different one, open\n"
+                "  the CAN Triple Device Manager and use Online > Update Firmware.\n",
                 blVersion, hdr->fw_version_major, hdr->fw_version_minor,
                 hdr->fw_version_patch);
     if (!assumeYes) {
