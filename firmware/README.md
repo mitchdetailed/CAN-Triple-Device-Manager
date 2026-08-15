@@ -8,7 +8,7 @@ the small prebuilt library the Device Manager links.
 
 | file | what it is |
 |---|---|
-| `bootloader.bin` | the bootloader the **CAN Triple Recovery Tool** installs over USB |
+| `bootloader.bin` | the bootloader the **CAN Triple Initial Programming Tool** installs over USB |
 | `can-triple-<version>.ctf` | the firmware image the Manager installs via **Online → Update Firmware…** |
 
 A `.ctf` is a packed, checksummed firmware image. The device validates it

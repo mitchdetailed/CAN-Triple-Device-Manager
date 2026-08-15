@@ -17,7 +17,7 @@ One Setup installs everything:
 | **CAN Triple Device Manager** | the configuration software |
 | **USB drivers** | installed automatically — the device just works when plugged in |
 | **Firmware** | the matching firmware release, ready to install from the app |
-| **Recovery tool** | brings back a blank or unresponsive board over the same USB cable |
+| **Initial programming tool** | puts the firmware on a factory-fresh board over the same USB cable — and brings back an unresponsive one |
 
 > **Windows SmartScreen:** the installer is not yet code-signed, so the first
 > run may show *"Windows protected your PC"* with an unknown publisher. Click
@@ -33,8 +33,9 @@ One Setup installs everything:
 3. Follow **[Getting Started](docs/getting-started.md)** — from first
    connection to seeing live values.
 
-New board fresh from the factory? Run **CAN Triple Recovery Tool** (in the
-Start Menu) once — it installs the bootloader and firmware directly over USB.
+New board fresh from the factory? Run **CAN Triple Initial Programming Tool**
+(in the Start Menu) once — it installs the bootloader and firmware directly
+over USB.
 After that, firmware updates happen inside the Manager
 (**Online → Update Firmware…**).
 

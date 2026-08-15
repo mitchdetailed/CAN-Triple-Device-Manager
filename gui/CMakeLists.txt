@@ -828,8 +828,9 @@ target_include_directories(ct3check PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(ct3check PRIVATE ct_lua Qt6::Core Qt6::Gui Qt6::Network
     ct_device_core) # device_mapper.cpp - see test_roundtrip
 
-# CANTripleRecovery - program the bootloader and application over the built-in
-# ST-LINK, via a bundled OpenOCD. The unbrick path: it depends on no code
+# CANTripleInitialProgramming - program the bootloader and application over
+# the built-in ST-LINK, via a bundled OpenOCD. First programming of a
+# factory-fresh board and the unbrick path in one: it depends on no code
 # running on the target, so it works on a blank, corrupt or reset-looping
 # unit, and a failed attempt is always recoverable by running it again.
 # Validates both images with the device's own code (fw_image.c) before any
@@ -840,14 +841,14 @@ target_link_libraries(ct3check PRIVATE ct_lua Qt6::Core Qt6::Gui Qt6::Network
 # Plain add_executable, no Qt, and statically linked: it ships in the
 # Firmware/ subfolder of an install, away from the Qt and MinGW DLLs in the
 # program directory, and the whole folder is meant to be copyable onto a USB
-# stick as a self-contained recovery kit. A DLL dependency would quietly
+# stick as a self-contained programming kit. A DLL dependency would quietly
 # break both properties.
-add_executable(CANTripleRecovery
-    tools/recovery_tool.cpp
+add_executable(CANTripleInitialProgramming
+    tools/initial_programming_tool.cpp
 )
-target_include_directories(CANTripleRecovery PRIVATE ${FIRMWARE_DIR}/include)
-target_link_libraries(CANTripleRecovery PRIVATE ct_device_core) # fw_image
-target_link_options(CANTripleRecovery PRIVATE -static)
+target_include_directories(CANTripleInitialProgramming PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(CANTripleInitialProgramming PRIVATE ct_device_core) # fw_image
+target_link_options(CANTripleInitialProgramming PRIVATE -static)
 
 # Multiple selection in Communications Setup, driven through the real dialog.
 # The list order is the TRANSMIT order, so a reorder that loses a message or
@@ -1093,9 +1094,10 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${FIRMWARE_DIR}/.pio/build/CAN_Triple/firmware.ctf"
                 "${DEPLOY_DIR}/Firmware/can-triple-${FW_VERSION}.ctf"
-        # The recovery kit, completing the Firmware/ folder into something a
-        # bench machine can bring a BLANK OR BRICKED board to life with:
-        # CANTripleRecovery.exe (statically linked, no DLL needs), the
+        # The initial-programming kit, completing the Firmware/ folder into
+        # something a bench machine can bring a BLANK OR BRICKED board to life
+        # with: CANTripleInitialProgramming.exe (statically linked, no DLL
+        # needs), the
         # bootloader image it programs, and the OpenOCD it drives — binaries
         # from the same PlatformIO package every SWD flash in this project
         # uses, plus the exact three scripts the invocation touches and the
@@ -1105,7 +1107,7 @@ if(WIN32)
         # still works. A missing tool-openocd package fails the copy loudly
         # here rather than producing a kit that cannot flash.
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<TARGET_FILE:CANTripleRecovery>" "${DEPLOY_DIR}/Firmware"
+                "$<TARGET_FILE:CANTripleInitialProgramming>" "${DEPLOY_DIR}/Firmware"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${FIRMWARE_DIR}/bootloader/.pio/build/bootloader/firmware.bin"
                 "${DEPLOY_DIR}/Firmware/bootloader.bin"
@@ -1127,7 +1129,7 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${FIRMWARE_DIR}/openocd/stm32g4x_512k.cfg"
                 "${DEPLOY_DIR}/Firmware/openocd/scripts"
-        DEPENDS CANTripleDeviceManager CANTripleRecovery help_docs
+        DEPENDS CANTripleDeviceManager CANTripleInitialProgramming help_docs
         COMMENT "Deploying standalone build to deploy/"
         VERBATIM
     )

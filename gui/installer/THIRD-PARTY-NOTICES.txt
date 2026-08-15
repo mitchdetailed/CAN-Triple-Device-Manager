@@ -797,7 +797,7 @@ Where to obtain it
 
 
 ================================================================================
-9. OpenOCD (with libusb and libftdi), in the recovery kit
+9. OpenOCD (with libusb and libftdi), in the initial-programming kit
 ================================================================================
 
 Files redistributed
@@ -809,9 +809,10 @@ Files redistributed
     Firmware\openocd\scripts\mem_helper.tcl
 
 What it is
-    The Open On-Chip Debugger. CANTripleRecovery.exe (part of CAN Triple
-    Device Manager, MIT, source in the repository at the top of this file)
-    invokes it as a SEPARATE PROGRAM - a child process, not a linked library -
+    The Open On-Chip Debugger. CANTripleInitialProgramming.exe (part of
+    CAN Triple Device Manager, MIT, source in the repository at the top of
+    this file) invokes it as a SEPARATE PROGRAM - a child process, not a
+    linked library -
     to program the device's bootloader and application over the board's
     built-in ST-LINK. The two .dll files are libraries OpenOCD itself loads
     for USB access; the .cfg/.tcl files are configuration scripts from

@@ -10,7 +10,8 @@ together with the **firmware in [`firmware/`](firmware/README.md)**: one
 repository, one wire format, one release.
 
 **Installing rather than building?** The Windows installer — application,
-device drivers, firmware and the recovery tool in one Setup — is published on
+device drivers, firmware and the initial programming tool in one Setup — is
+published on
 the repository's **Releases** page. The manual is browsable under `docs/` in
 the published repository, and ships inside the program as Help → Contents (F1).
 

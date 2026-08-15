@@ -1,4 +1,6 @@
-// CANTripleRecovery — bring a CAN Triple back from anything, over SWD.
+// CANTripleInitialProgramming — put the bootloader and firmware on a CAN
+// Triple over SWD: the first programming of a factory-fresh board, and the
+// way back from anything.
 //
 // The CAN Triple carries an ST-LINK on the board, so the same USB cable the
 // Manager talks through also exposes a debug interface that works no matter
@@ -13,8 +15,8 @@
 // pull the power mid-programming and the answer is "run it again".
 //
 // What it deliberately does NOT do:
-//   - touch the configuration store, retained values, or access keys — a
-//     recovery reinstates the PROGRAM, not the device's data (the erase is
+//   - touch the configuration store, retained values, or access keys — this
+//     tool reinstates the PROGRAM, not the device's data (the erase is
 //     bounded to the pages the two images occupy, all in bank 1);
 //   - upload configurations. Configuration transfer belongs to the serial
 //     protocol, where the device's own gates — access passwords, upload
@@ -34,8 +36,8 @@
 // and it works on any machine with the ST-LINK driver (which the same folder's
 // parent install provides).
 //
-//   CANTripleRecovery [--yes] [--bootloader FILE] [--firmware FILE]
-//                     [--openocd EXE]
+//   CANTripleInitialProgramming [--yes] [--bootloader FILE] [--firmware FILE]
+//                               [--openocd EXE]
 //
 // Exit 0 on success, 1 on any failure, so it can gate a provisioning script.
 
@@ -167,7 +169,7 @@ bool validateBootloader(const std::vector<uint8_t> &img, uint32_t *version_out)
 // voltage) and its last lines double as the success evidence.
 //
 // logPath is in-out: the caller's preference is beside the exe — where a
-// technician working out of a recovery folder or USB stick will look — but
+// technician working out of a programming folder or USB stick will look — but
 // the INSTALLED copy lives under Program Files, which an unelevated process
 // cannot write. That exact failure shipped once: the tool validated both
 // images, said "programming...", and then refused at the log file before
@@ -197,7 +199,7 @@ bool runOpenocd(const std::string &ocd, const std::string &scripts,
         char tmp[MAX_PATH];
         const DWORD n = GetTempPathA(MAX_PATH, tmp);
         if (n > 0 && n < MAX_PATH) {
-            logPath = std::string(tmp) + "recovery-openocd.log";
+            logPath = std::string(tmp) + "initial-programming-openocd.log";
             log = CreateFileA(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                               &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         }
@@ -266,8 +268,8 @@ bool runOpenocd(const std::string &ocd, const std::string &scripts,
 
 int main(int argc, char **argv)
 {
-    std::printf("\nCAN Triple Recovery\n"
-                "-------------------\n");
+    std::printf("\nCAN Triple Initial Programming Tool\n"
+                "-----------------------------------\n");
 
     const std::string dir = exeDir();
     std::string blPath = dir + "\\bootloader.bin";
@@ -288,8 +290,8 @@ int main(int argc, char **argv)
         else if (a == "--openocd" && hasNext)
             ocdPath = argv[++i];
         else {
-            std::printf("usage: CANTripleRecovery [--yes] [--bootloader FILE] "
-                        "[--firmware FILE] [--openocd EXE]\n");
+            std::printf("usage: CANTripleInitialProgramming [--yes] "
+                        "[--bootloader FILE] [--firmware FILE] [--openocd EXE]\n");
             return 1;
         }
     }
@@ -402,7 +404,7 @@ int main(int argc, char **argv)
     }
 
     std::printf("\n  programming (the device resets when this finishes)...\n");
-    std::string logPath = dir + "\\recovery-openocd.log";
+    std::string logPath = dir + "\\initial-programming-openocd.log";
     if (!runOpenocd(ocdPath, scripts, blPath, appPath, logPath)) {
         std::printf("\n  The device was NOT necessarily left working - run this "
                     "tool again once the\n  cause above is fixed. Nothing about "

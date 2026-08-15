@@ -184,13 +184,14 @@
   #error Payload incomplete: deploy\Firmware holds no .ctf -- build the firmware, then re-run the `deploy` target.
 #endif
 
-; The recovery kit: the tool, the bootloader image it programs, and the
-; OpenOCD that drives the board's built-in ST-LINK. Any of the three missing
-; makes Firmware\ a folder that can update a healthy device but not rescue a
-; dead one, which is exactly the machine the kit exists for. Checked by the
-; file each failure would otherwise surface through at the worst time.
-#if !FileExists(MyDeployDir + "\Firmware\CANTripleRecovery.exe")
-  #error Payload incomplete: deploy\Firmware\CANTripleRecovery.exe is missing -- re-run the `deploy` target.
+; The initial-programming kit: the tool, the bootloader image it programs,
+; and the OpenOCD that drives the board's built-in ST-LINK. Any of the three
+; missing makes Firmware\ a folder that can update a healthy device but not
+; program a factory-fresh or dead one, which is exactly the machine the kit
+; exists for. Checked by the file each failure would otherwise surface
+; through at the worst time.
+#if !FileExists(MyDeployDir + "\Firmware\CANTripleInitialProgramming.exe")
+  #error Payload incomplete: deploy\Firmware\CANTripleInitialProgramming.exe is missing -- re-run the `deploy` target.
 #endif
 #if !FileExists(MyDeployDir + "\Firmware\bootloader.bin")
   #error Payload incomplete: deploy\Firmware\bootloader.bin is missing -- build the bootloader, then re-run the `deploy` target.
@@ -476,13 +477,14 @@ Type: files; Name: "{autodesktop}\CAN Triple Manager.lnk"
 ;                              known place Online -> Update Firmware browses
 ;                              to, and what lets a bench machine restore a
 ;                              unit with nothing but this install.
-;   Firmware\CANTripleRecovery.exe, bootloader.bin, openocd\
-;                           -- the recovery kit: programs the bootloader and
-;                              application over the board's built-in ST-LINK,
-;                              so a blank or bricked unit comes back to life
-;                              with no other tooling. The folder is
-;                              self-contained on purpose -- copied wholesale
-;                              onto a USB stick it still works.
+;   Firmware\CANTripleInitialProgramming.exe, bootloader.bin, openocd\
+;                           -- the initial-programming kit: programs the
+;                              bootloader and application over the board's
+;                              built-in ST-LINK, so a factory-fresh unit gets
+;                              its first firmware -- and a bricked one comes
+;                              back to life -- with no other tooling. The
+;                              folder is self-contained on purpose -- copied
+;                              wholesale onto a USB stick it still works.
 ;   COPYING.txt and the     -- the licences. The MIT notice must accompany the
 ;   three notice files         app and LGPLv3 section 4 requires Qt's to travel
 ;                              with the binaries; the CMake deploy target
@@ -512,12 +514,13 @@ Source: "{#MyDeployDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsub
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-; The recovery tool earns a Start Menu entry precisely because it is needed
-; when nothing else works: a technician staring at a dead board should not
-; also have to know which subfolder of Program Files holds the rescue. It is
-; a console program; the shortcut opens its own window and the tool waits for
-; Enter before closing, so double-click works.
-Name: "{group}\CAN Triple Recovery Tool"; Filename: "{app}\Firmware\CANTripleRecovery.exe"; WorkingDir: "{app}\Firmware"
+; The initial programming tool earns a Start Menu entry because it is the
+; first thing run on a factory-fresh board and the last resort for a dead
+; one: an operator staring at either should not also have to know which
+; subfolder of Program Files holds it. It is a console program; the shortcut
+; opens its own window and the tool waits for Enter before closing, so
+; double-click works.
+Name: "{group}\CAN Triple Initial Programming Tool"; Filename: "{app}\Firmware\CANTripleInitialProgramming.exe"; WorkingDir: "{app}\Firmware"
 ; Apps & Features is the canonical way to uninstall, but this tool lives on
 ; offline bench machines whose operators go to the Start Menu for everything,
 ; so the entry earns its place.
