@@ -1,0 +1,3 @@
+2026-08-15 19:46:20,508 - aqt.helper - DEBUG - helper 17448 Attempt to download checksum at https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/tools_mingw90/Updates.xml.sha256
+2026-08-15 19:46:22,538 - aqt.helper - DEBUG - helper 22260 Attempt to download checksum at https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/tools_mingw1310/Updates.xml.sha256
+2026-08-15 19:46:24,484 - aqt.helper - DEBUG - helper 27008 Attempt to download checksum at https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_672/Updates.xml.sha256
