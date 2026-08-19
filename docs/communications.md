@@ -181,7 +181,15 @@ messages only — a transmit message is the frame it composes, while a receive
 message's length comes from the sender. Classic frames are 0–8 bytes; FD frames
 also allow 12, 16, 20, 24, 32, 48 and 64.</td></tr>
 <tr><td><b>Transmission :</b></td><td><b>Cyclic</b> or <b>Triggered</b>. Transmit
-messages only.</td></tr>
+messages only. <b>Cyclic</b> transmits every period, as it always has;
+<b>Triggered</b> transmits only while a chosen
+<a href="conditions.md">User Condition</a> is true — see
+<a href="#triggered">below</a>.</td></tr>
+<tr><td><b>Transmit Condition :</b></td><td>Appears only while
+<b>Triggered</b> is selected. It lists the document's active
+<a href="conditions.md">User Conditions</a>, and only a User Condition can be
+chosen — no other channel is offered, however boolean it happens to
+be.</td></tr>
 <tr><td><b>Transmit Rate :</b></td><td>1, 2, 5, 10, 20, 50, 100 or 200 Hz. A
 rate read back from the device that falls outside the presets is inserted into
 the list rather than snapped to the nearest. When each transmission actually
@@ -195,6 +203,36 @@ period; <b>Sequential (one ID per period, round-robin)</b> sends one.</td></tr>
 
 The **Gateway Routing (CAN Triple)** group — **Route this message to :** with a checkbox per bus — forwards this one message's frames to other buses. The source bus is never routed back and stays disabled. For forwarding whole ranges of IDs by mask, use a [Message Relay](relays.md) instead; in relay mode this group is replaced by the **Message Relay** group.
 
+<a id="triggered"></a>
+
+### Triggered transmit
+
+**Cyclic** transmits every period, which is what a transmit message has always done. **Triggered** transmits only while the chosen [User Condition](conditions.md) is true — the rest of the time the message is silent, and nothing else about it changes.
+
+**Transmit Condition :** appears only while Triggered is selected, and it lists the document's active [User Conditions](conditions.md). Only a User Condition can be chosen; the ordinary channel picker is not offered here, so no other channel can be named however boolean its values happen to be. The condition is identified by its output channel rather than by its row number, which is what keeps the binding pointing at the same condition when rows above it are added, removed or reordered — and renaming that channel carries the binding along with it.
+
+The control is hidden outright on a Cyclic message rather than greyed out: it has no meaning without a trigger, and a disabled control only invites you to wonder what reaching it would do.
+
+**Sending once per event, rather than once per period, is done in the condition.** Triggered transmits for as long as its condition holds, so a condition that comes up and stays up produces a frame every period until it drops. When what you want is *one* frame — a reply to a request, a one-shot announcement — the place to say so is the [User Condition](conditions.md) itself, which has two shapes that do it:
+- A **Set / Reset** condition **set on Message Received** and **reset on Message Transmitted**. The condition comes up when the request arrives, this message answers it, and the transmission itself puts the condition away again. One reply per request — see [the message operators](conditions.md#messages). The reset lands on the next calculation pass rather than the instant the frame leaves, so at 100 Hz or 200 Hz the message can come due again before it arrives and send a second frame; at every slower rate the reset is there first.
+- A **Momentary** condition, whose output pulses for one period of its Latch Frequency on each rising edge and then drops on its own.
+
+Writing it in the condition rather than beside the message is the better answer for three reasons: it reads where you can see it, next to the thing it resets; the reset can name a *different* message than the one it gates, which a per-message tick box could never do; and nothing reaches sideways from a transmit message to rewrite a calculation's output.
+
+> **Note:** A tick box on this tab, **Reset User Condition once Triggered**, used to do the first of those by force — it set the named condition's output channel back to 0 after each frame. It is gone, and it never shipped, so no configuration in the field carries it. With it gone, two messages triggered on one User Condition simply both transmit while it holds, which is what sharing a condition ought to mean and needs no warning of its own.
+
+**When the frame actually goes out** is the part worth reading twice. The device tests the condition in its **5 ms transmit slot** (200 Hz), whatever the message's own Transmit Rate is, so a condition that becomes true is acted on within 5 ms even for a 1 Hz message. A slow message is not a slow trigger.
+
+The message then transmits at its configured **Transmit Rate**, and the interval is measured **from the moment the condition became true** — not from a free-running clock the message was already keeping. A 1 Hz message whose condition becomes true at 1.2 s transmits at 1.2 s, 2.2 s, 3.2 s and so on for as long as the condition holds. It does *not* transmit at 2.0 s and 3.0 s, and it does not sit out the remaining 0.8 s waiting for a tick that was already on its way.
+
+Dropping the condition stops transmission immediately, mid-period if that is where it falls — there is no closing frame to round the period off. Arming it again starts a fresh interval with an immediate frame, exactly as the first arming did.
+
+> **Note:** A Triggered message with **no User Condition selected**, or naming one the document no longer has — deleted since, or since made inactive — is an **error**: Check Channels reports it and Send is blocked until it is fixed. It is deliberately not treated as Cyclic. Falling back that way would turn a message configured to speak only on a condition into one that never stops — frames on somebody's bus that nobody asked for, from a configuration that looked like it mapped cleanly. A condition that has gone missing is kept as a selectable entry in the combo and marked "(missing)", so what the section names stays visible rather than being quietly rewritten to some other trigger the next time the message is opened.
+
+The Config Summary prints such a message as "triggered on *channel*". A cyclic message says nothing there, because cyclic is what a transmit message has always been and every line would otherwise carry a word meaning "normal". See [Validation &amp; the Config Summary](validation-report.md).
+
+> **Note:** Earlier releases stored **Transmission** in the file and then ignored it: a message set to Triggered transmitted cyclically like any other. That is why a file using a transmit condition is refused by an older build of the program rather than opened — the older build would read the section as a perfectly ordinary message, find nothing missing, and send one that transmits continuously where you had configured it to transmit only on a condition.
+
 ### Channels tab
 
 The **Message Type** box selects **Single** or **Compound** (multiplexed). Switching between them removes all channels and identifiers, after a confirmation.
@@ -202,6 +240,8 @@ The **Message Type** box selects **Single** or **Compound** (multiplexed). Switc
 **Single** messages carry one flat list of channel rows. **Add…**, **Change…** and **Remove** manage rows; each row shows its channel name, start bit, width, type and scaling, and is tinted with the colour its bits carry in the frame map. Adding or changing a row opens the Comms Channel dialog — see [Channels](channels.md) for its fields.
 
 **Compound** messages carry channels only inside *identifiers* — there is no shared always-present set; a signal present in every variant is defined in each identifier. The **Identifiers :** table lists 16 numbered slots with **Offset**, **ID** and **ID Mask** columns; **Change…** opens the **Compound Message Identifier** dialog (Offset / Identifier / Identifier Mask) and **Clear** empties a slot. A received frame decodes an identifier's channels only while the frame's selector window at that byte offset matches (selector &amp; mask) == (ID &amp; mask). The channel list and frame map show one identifier at a time — variants may legitimately reuse the same bits.
+
+**An identifier with no channels is still transmitted.** Give a slot an Offset, ID and ID Mask and leave it empty, and the device sends that variant each period carrying its selector over an all-zero payload — which is the whole message for a request or a ping frame, where the ID byte IS the content. Both cadences honour it: Batch sends it alongside the others, and Sequential gives it its turn in the rotation. Only slots you have actually set count; an untouched slot sends nothing.
 
 ### The frame layout map
 
@@ -294,8 +334,14 @@ Check Channels rules on the recipe:
 
 ## Scaling
 
-Channel rows are DBC-native: **physical = raw × DBC Factor + DBC Offset**, stored on the device as two float32 values, so a Get Configuration reconstructs each row verbatim. The channel's range becomes the device's clamp — every reading is clamped to the channel's Range Minimum…Maximum. See [Channels](channels.md) for how storage types and ranges are chosen.
+Channel rows are DBC-native: **physical = raw × Bit Resolution + Offset**, stored on the device as two float32 values, so a Get Configuration reconstructs each row verbatim. The channel's range becomes the device's clamp — every reading is clamped to the channel's Range Minimum…Maximum. See [Channels](channels.md) for how storage types and ranges are chosen.
+
+**You enter the same two numbers whichever way the message goes**, and the device inverts them for you when transmitting. A row with Bit Resolution 0.1 and Offset -40 reads a raw 7 as -39.3 on receive; transmitting -39.3 puts 7 back on the wire. That is what makes a pair of CAN Triples talking to each other work from one set of numbers, and it is why a transmit row is not entered with the signs reversed.
+
+A transmit row also chooses what happens when the value will not fit: **Clamp to Signal Limit**, ticked by default, sends the nearest value the signal's bits can carry, while unticking it sends the low bits and lets the count roll over. 256 into an 8-bit field is 255 ticked and 0 unticked. Unticking also skips the channel's own range clamp, which would otherwise decide the answer before the field width came into it. See [Channels](channels.md) for the full note. The Config Summary marks such a row **rolls over**, and so does the channel list in the section editor.
+
+> **Note:** The consequence worth knowing: on a transmit row the offset is SUBTRACTED on the way out, because it was added on the way in. A channel sitting at 0 with an Offset of 1 has nothing to send — raw would be -1, which an unsigned field cannot carry, so it pins to 0. If a transmitted value comes out flat at zero, check whether the channel's value is below the lowest the row can represent, which is the Offset itself.
 
 > **Note:** OK validates the section before closing: the base address must be valid hex within its 11/29-bit range, the message length must fit the frame kind, a relay must forward to at least one bus, and a Transmit CRC8 message must have a CRC channel selected and its byte location inside the message length. Deeper cross-checks — overlapping signals, channels written twice, FD frames on a classic bus — appear in the validation report; see [Validation &amp; the Config Summary](validation-report.md).
 
-See also: [Channels](channels.md) · [DBC Import](dbc-import.md) · [Message Relays](relays.md) · [Monitoring Live Values](monitor.md) · [Online: Send, Get &amp; Flash](online.md)
+See also: [Channels](channels.md) · [DBC Import](dbc-import.md) · [Message Relays](relays.md) · [User Conditions](conditions.md) · [Monitoring Live Values](monitor.md) · [Online: Send, Get &amp; Flash](online.md)

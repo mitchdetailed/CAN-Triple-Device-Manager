@@ -1,6 +1,6 @@
 # Math Channels
 
-A math channel computes one operation over up to three inputs (A, B and C) and writes the result into an output channel on every evaluation pass. The device supports up to **100** math channels. Inputs can be channels or fixed values; the output is an ordinary generated channel, so it can feed another math channel, a [condition](conditions.md), a [table](tables.md) axis, a transmit message, or be watched in [Monitor Channels](monitor.md).
+A math channel computes one operation over up to three inputs (A, B and C) and writes the result into an output channel on every evaluation pass. The device supports up to **100** math channels. Inputs can be channels or fixed values; the output is an ordinary generated channel, so it can feed another math channel, a [User Condition](conditions.md), a [table](tables.md) axis, a transmit message, or be watched in [Monitor Channels](monitor.md).
 
 ## The Math Channels dialog
 
@@ -73,16 +73,16 @@ example). If C ≤ B, wrapping is disabled.</td></tr>
 </table>
 
 ## Conventions and guards
-- **Boolean convention: true = value &gt; 0.** The logical operations and Select test their inputs against 0, and every comparison and logical operation produces exactly 1 or 0. This is the same convention [conditions](conditions.md), [counters](counters.md) and [timers](timers.md) use, so their outputs interoperate freely.
+- **Boolean convention: true = value &gt; 0.** The logical operations and Select test their inputs against 0, and every comparison and logical operation produces exactly 1 or 0. This is the same convention [User Conditions](conditions.md), [counters](counters.md) and [timers](timers.md) use, so their outputs interoperate freely.
 - **Division guards:** A ÷ B and Modulo (A mod B) give 0 when B is 0, and Square root (√A) gives 0 for negative A — a row never produces infinity or an error from these.
 - **Bitwise operations** (A AND B, A OR B, XOR) convert both inputs to 32-bit signed integers first, saturating at the integer range, apply the bit operation, and convert the result back.
 - **NaN in comparisons:** a comparison with a NaN operand takes the false branch (IEEE behaviour), so Logical NOT (A) of NaN is 1.
 
-> **Warning:** A = B and A ≠ B are **exact** float comparisons with no tolerance. They are dependable against integers and against a value that was stored and read back unchanged, but two independently *computed* values rarely compare exactly equal. To test "close to", compare against a band instead — for example A ≥ B one row, A ≤ C the next, combined with Logical AND, or use a [condition](conditions.md) with two comparisons.
+> **Warning:** A = B and A ≠ B are **exact** float comparisons with no tolerance. They are dependable against integers and against a value that was stored and read back unchanged, but two independently *computed* values rarely compare exactly equal. To test "close to", compare against a band instead — for example A ≥ B one row, A ≤ C the next, combined with Logical AND, or use a [User Condition](conditions.md) with two comparisons.
 
 ## Evaluation order and chaining
 
-The device evaluates the configuration in a fixed pass: [constants](constants.md) first, then [lookup tables](tables.md), then the math rows in list order, then [conditions](conditions.md). The pass runs at 100 Hz and again when a received frame updates channels.
+The device evaluates the configuration in a fixed pass: [constants](constants.md) first, then [lookup tables](tables.md), then the math rows in list order, then [User Conditions](conditions.md). The pass runs at 100 Hz and again when a received frame updates channels.
 
 Within the math list, rows run top to bottom in a single pass. A row that reads the output of a row **above** it sees that row's fresh result in the same pass, so a chain of calculations laid out in order settles immediately. A row that reads the output of a row **below** it sees the value from the *previous* pass — a one-pass lag. Order dependent chains accordingly: put the producer above the consumer.
 
@@ -90,4 +90,4 @@ Within the math list, rows run top to bottom in a single pass. A row that reads 
 
 ## See also
 
-[Order &amp; Timing of Operations](engine.md) · [Conditions](conditions.md) · [Constants](constants.md) · [Lookup Tables](tables.md) · [Up/Down Counters](counters.md) · [Integrators](integrators.md) · [Device Scripts](device-scripts.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md)
+[Order &amp; Timing of Operations](engine.md) · [User Conditions](conditions.md) · [Constants](constants.md) · [Lookup Tables](tables.md) · [Up/Down Counters](counters.md) · [Integrators](integrators.md) · [Device Scripts](device-scripts.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md)

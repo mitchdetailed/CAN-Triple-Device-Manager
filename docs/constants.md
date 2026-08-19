@@ -1,6 +1,6 @@
 # Constants
 
-A constant creates a channel that always carries a fixed value. The device writes the value into the channel at the start of every evaluation pass — before [tables](tables.md), [math](math-channels.md) and [conditions](conditions.md) run — so anything downstream can read it: a calibration factor for a math channel, a threshold for a condition, a fixed field in a transmit message. The device supports up to **100** constants.
+A constant creates a channel that always carries a fixed value. The device writes the value into the channel at the start of every evaluation pass — before [tables](tables.md), [math](math-channels.md) and [User Conditions](conditions.md) run — so anything downstream can read it: a calibration factor for a math channel, a threshold for a condition, a fixed field in a transmit message. The device supports up to **100** constants.
 
 A constant is essentially a custom channel (name, data type, decimal places, with the range derived from the type) plus the value itself; it has no Channel Type or Display Units. Saving the dialog registers the channel in the document, so the constant is immediately selectable wherever a channel can be picked.
 
@@ -28,10 +28,10 @@ OK enforces the same rules as the other channel editors:
 - No two constants may share a name (case-insensitive): "A constant named "X" already exists."
 - A constant may not take the name of an unrelated existing channel — it would overwrite that channel's definition: "A channel named "X" already exists. Choose a different name."
 
-> **Note:** Renaming a constant carries its references along: math inputs, condition comparisons, transmit rows and table axes that used the old name are rewritten to the new one when the dialog is closed with OK.
+> **Note:** Renaming a constant carries its references along: math inputs, User Condition comparisons, transmit rows and table axes that used the old name are rewritten to the new one when the dialog is closed with OK.
 
 > **Warning:** Deleting a constant removes its channel from the document. Any calculation still referencing the old name will be flagged by File → Check Channels, so run it after a clean-up.
 
 ## See also
 
-[Math Channels](math-channels.md) · [Conditions](conditions.md) · [Lookup Tables](tables.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md)
+[Math Channels](math-channels.md) · [User Conditions](conditions.md) · [Lookup Tables](tables.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md)

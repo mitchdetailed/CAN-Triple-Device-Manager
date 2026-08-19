@@ -12,7 +12,8 @@
 writes the result into an output channel on every evaluation pass. The device
 supports up to <b>100</b> math channels. Inputs can be channels or fixed values;
 the output is an ordinary generated channel, so it can feed another math channel,
-a <a href="conditions.html">condition</a>, a <a href="tables.html">table</a> axis,
+a <a href="conditions.html">User Condition</a>, a
+<a href="tables.html">table</a> axis,
 a transmit message, or be watched in <a href="monitor.html">Monitor Channels</a>.</p>
 
 <h2>The Math Channels dialog</h2>
@@ -113,7 +114,8 @@ example). If C ≤ B, wrapping is disabled.</td></tr>
 <li><b>Boolean convention: true = value &gt; 0.</b> The logical operations and
 Select test their inputs against 0, and every comparison and logical operation
 produces exactly 1 or 0. This is the same convention
-<a href="conditions.html">conditions</a>, <a href="counters.html">counters</a>
+<a href="conditions.html">User Conditions</a>,
+<a href="counters.html">counters</a>
 and <a href="timers.html">timers</a> use, so their outputs interoperate freely.</li>
 <li><b>Division guards:</b> A ÷ B and Modulo (A mod B) give 0 when B is 0, and
 Square root (√A) gives 0 for negative A — a row never produces infinity or an
@@ -130,14 +132,15 @@ tolerance. They are dependable against integers and against a value that was
 stored and read back unchanged, but two independently <i>computed</i> values
 rarely compare exactly equal. To test "close to", compare against a band instead
 — for example A ≥ B one row, A ≤ C the next, combined with Logical AND, or use a
-<a href="conditions.html">condition</a> with two comparisons.</p>
+<a href="conditions.html">User Condition</a> with two comparisons.</p>
 
 <h2>Evaluation order and chaining</h2>
 
 <p>The device evaluates the configuration in a fixed pass:
 <a href="constants.html">constants</a> first, then
 <a href="tables.html">lookup tables</a>, then the math rows in list order, then
-<a href="conditions.html">conditions</a>. The pass runs at 100 Hz and again when
+<a href="conditions.html">User Conditions</a>. The pass runs at 100 Hz and again
+when
 a received frame updates channels.</p>
 
 <p>Within the math list, rows run top to bottom in a single pass. A row that
@@ -154,7 +157,7 @@ produced on their last evaluation.</p>
 <h2>See also</h2>
 
 <p><a href="engine.html">Order &amp; Timing of Operations</a> ·
-<a href="conditions.html">Conditions</a> ·
+<a href="conditions.html">User Conditions</a> ·
 <a href="constants.html">Constants</a> ·
 <a href="tables.html">Lookup Tables</a> ·
 <a href="counters.html">Up/Down Counters</a> ·

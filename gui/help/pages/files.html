@@ -55,8 +55,12 @@ touched — cancelling leaves whatever you had open exactly as it was.</p>
 has changed shape the file is migrated as it loads: a <b>4x4 lookup table</b>
 from an older configuration becomes an <a href="tables.html">8x8</a> with its
 sites, cells and interpolation modes intact, occupying the top-left of the wider
-grid. Nothing needs re-entering, and the next Save writes the file in the
-current form. The reverse does not hold — a file saved by a <i>newer</i> version
+grid, and a <b>User Condition</b> written before conditions had modes becomes a
+<a href="conditions.html#migration">Set/Reset</a> whose Reset expression is
+generated as the logical inverse of its Set — which behaves identically to the
+plain level it replaces, though it does mean opening one and finding a Reset
+expression you did not write. Nothing needs re-entering, and the next Save
+writes the file in the current form. The reverse does not hold — a file saved by a <i>newer</i> version
 of the program is refused rather than half-read, because a field this build does
 not know about is one it would silently drop.</p>
 
@@ -113,10 +117,23 @@ saved file will require it.</p>
 <h2>Version compatibility</h2>
 
 <p>Every .ct3 records the schema version it was written at (currently
-<b>12</b>). Older files keep loading — fields a newer schema added simply
+<b>18</b>). Older files keep loading — fields a newer schema added simply
 take their defaults. A file whose version is <i>ahead</i> of the program is
 refused rather than half-read, with a message saying it was saved by a newer
 version of CAN Triple Device Manager; update the program to open it.</p>
+
+<p>Refusing is deliberate, and the reason is worth knowing: a setting an older
+program does not recognise is not always a setting it can safely ignore. A
+message set to transmit only on a
+<a href="communications.html#triggered">User Condition</a> looks like an
+ordinary message to a program written before that existed, and sending it from
+there would put a continuously transmitting message on the bus. A
+<a href="conditions.html#modes">User Condition</a> with a mode is the same
+hazard in its sharpest form: a program written before the modes finds none of
+the keys it expects, reads every condition as a single empty comparison —
+because a missing key has always been a legal way to say "default" — and would
+send a configuration whose logic is simply absent. Refusing the file names the
+real remedy instead.</p>
 
 <p class="note">The file schema version is independent of the firmware
 protocol version. Updating firmware never invalidates your .ct3 files — but

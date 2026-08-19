@@ -68,4 +68,4 @@ The store is reset whenever you send a changed configuration, so a preserved tot
 
 ## See also
 
-[Math Channels](math-channels.md) · [Up/Down Counters](counters.md) · [Timers](timers.md) · [Conditions](conditions.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md) · [Validation &amp; the Config Summary](validation-report.md)
+[Math Channels](math-channels.md) · [Up/Down Counters](counters.md) · [Timers](timers.md) · [User Conditions](conditions.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md) · [Validation &amp; the Config Summary](validation-report.md)

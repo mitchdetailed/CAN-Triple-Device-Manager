@@ -1,6 +1,6 @@
 # Device Scripts
 
-A **device script** is a small program that runs *on the CAN Triple*, 100 times a second, alongside everything else the configuration does. It reads channels, does arithmetic, remembers values between ticks, and writes channels back. Where a [math channel](math-channels.md) is one expression and a [condition](conditions.md) is one comparison, a script is the place for logic that needs several steps and a memory — a state machine, a hysteresis band, a debounce, a staged fan curve.
+A **device script** is a small program that runs *on the CAN Triple*, 100 times a second, alongside everything else the configuration does. It reads channels, does arithmetic, remembers values between ticks, and writes channels back. Where a [math channel](math-channels.md) is one expression and a [User Condition](conditions.md) is one comparison, a script is the place for logic that needs several steps and a memory — a state machine, a hysteresis band, a debounce, a staged fan curve.
 
 > **Note:** A device script is **not** the [Lua Console](scripting.md). The console runs on your PC and edits the document in front of you; nothing it does reaches a unit. A device script is part of the configuration and runs on the hardware. They share a language and nothing else.
 
@@ -171,6 +171,6 @@ All ten compile and run inside the tick budget — that is checked automatically
 
 ## See also
 - [Math Channels](math-channels.md) — for a single expression
-- [Conditions](conditions.md) — for a single comparison
+- [User Conditions](conditions.md) — for a single comparison
 - [Tables](tables.md) — for a curve or a map
 - [Lua Console](scripting.md) — scripting the *document*, on your PC

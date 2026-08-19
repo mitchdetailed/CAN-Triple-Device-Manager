@@ -20,7 +20,7 @@
                     <section title="Message Relays" ref="pages/relays.html"/>
                 </section>
                 <section title="Math Channels &amp; Calculations" ref="pages/math-channels.html">
-                    <section title="Conditions" ref="pages/conditions.html"/>
+                    <section title="User Conditions" ref="pages/conditions.html"/>
                     <section title="Constants" ref="pages/constants.html"/>
                     <section title="Lookup Tables" ref="pages/tables.html"/>
                     <section title="Up/Down Counters" ref="pages/counters.html"/>
@@ -53,6 +53,8 @@
             <keyword name="sections" ref="pages/communications.html"/>
             <keyword name="receive message" ref="pages/communications.html"/>
             <keyword name="transmit message" ref="pages/communications.html"/>
+            <keyword name="Triggered transmit" ref="pages/communications.html"/>
+            <keyword name="transmit condition" ref="pages/communications.html"/>
             <keyword name="base address" ref="pages/communications.html"/>
             <keyword name="CAN ID" ref="pages/communications.html"/>
             <keyword name="alignment" ref="pages/communications.html"/>
@@ -172,9 +174,19 @@
             <keyword name="chaining" ref="pages/math-channels.html"/>
 
             <!-- Other calculations -->
-            <keyword name="Conditions" ref="pages/conditions.html"/>
+            <keyword name="User Conditions" ref="pages/conditions.html"/>
             <keyword name="comparisons" ref="pages/conditions.html"/>
             <keyword name="joins" ref="pages/conditions.html"/>
+            <keyword name="condition mode" ref="pages/conditions.html"/>
+            <keyword name="Momentary" ref="pages/conditions.html"/>
+            <keyword name="Set / Reset" ref="pages/conditions.html"/>
+            <keyword name="Latch Frequency" ref="pages/conditions.html"/>
+            <keyword name="latch" ref="pages/conditions.html"/>
+            <keyword name="was received" ref="pages/conditions.html"/>
+            <keyword name="was transmitted" ref="pages/conditions.html"/>
+            <keyword name="Message Received" ref="pages/conditions.html"/>
+            <keyword name="Message Transmitted" ref="pages/conditions.html"/>
+            <keyword name="request/response" ref="pages/conditions.html"/>
             <keyword name="Constants" ref="pages/constants.html"/>
             <keyword name="Lookup Tables" ref="pages/tables.html"/>
             <keyword name="tables" ref="pages/tables.html"/>

@@ -16,11 +16,21 @@ enum class DbcType { Unsigned = 0, Signed = 1, IEEE754 = 2 };
 
 // One signal packed into / extracted from a message frame, defined DBC-style:
 // Start Bit + Bit Length + DBC Type, with linear scaling
-// physical = raw × DBC Factor + DBC Offset. Byte order (Intel vs Motorola) is
-// the section's Alignment. These map 1:1 onto the device's signal record, so a
-// row round-trips through Get exactly — the one caveat is that Factor/Offset are
-// stored on the wire as float32, so a double like 0.1 comes back as its nearest
-// float (0.1 → 0.100000001…). That float value then round-trips stably.
+//
+//     physical = raw × Bit Resolution + Offset
+//
+// The editor calls the first "Bit Resolution" because that is what it means to
+// whoever types it — how much one raw count is worth — and the number reads the
+// same in both directions: 0.1 is a tenth per count whether the message is
+// received or transmitted. The FIELDS keep their dbcFactor/dbcOffset names here
+// and in the .ct3, because renaming a label costs nothing and renaming a stored
+// key would invalidate every saved configuration.
+//
+// Byte order (Intel vs Motorola) is the section's Alignment. These map 1:1 onto
+// the device's signal record, so a row round-trips through Get exactly — the one
+// caveat is that both are stored on the wire as float32, so a double like 0.1
+// comes back as its nearest float (0.1 → 0.100000001…). That float value then
+// round-trips stably.
 struct CommsChannelRow {
     QString channelName;
     double defaultValue = 0.0;   // physical units, applied on receive timeout
@@ -29,6 +39,26 @@ struct CommsChannelRow {
     int dbcType = int(DbcType::Unsigned);
     double dbcFactor = 1.0;      // physical = raw × factor + offset
     double dbcOffset = 0.0;
+
+    // TRANSMIT only: clamp the outgoing value to what the field can hold, or
+    // send the low bitLength bits of it. Clamping is the default and was the
+    // only behaviour before this existed, so an older .ct3 (no key) loads as
+    // true and behaves exactly as it always did.
+    //
+    // Unticked, 256 into an 8-bit field with a resolution of 1 sends 0, not
+    // 255 — the count rolls over, which is what a rolling counter, a checksum
+    // input or a wrapping angle actually wants. It also stops the CHANNEL's
+    // range clamping first: a channel ranged 0..255 would otherwise never
+    // present 256 for the field to roll over.
+    //
+    // Receive rows ignore it and always clamp — a received field is bitLength
+    // bits wide by construction, so there is nothing to roll over, and the
+    // clamp on that side is the channel's declared range.
+    //
+    // Stored INVERTED on the wire (SIG_FLAG_TX_WRAP, set = wrap) so that a
+    // record written before the flag existed, whose bits are all zero, means
+    // clamp. The single inversion lives in device_mapper.
+    bool clampToRange = true;
 
     QJsonObject toJson() const;
     static CommsChannelRow fromJson(const QJsonObject &o);
@@ -96,11 +126,32 @@ struct CommsSection {
     quint32 baseAddress = 0;
     bool routeEnable = false;         // CAN Triple extra: gateway this message
     int routeBusMask = 0;             // bit0=CAN1 bit1=CAN2 bit2=CAN3
-    bool cyclic = true;               // transmit only
+    bool cyclic = true;               // transmit only: false = Triggered
     int transmitRateHz = 50;          // transmit only (UI field)
     int transmitPeriodMs = 0;         // authoritative period when > 0 (else derived
                                       // from rate); set on Get so any device period
                                       // survives a round-trip exactly
+
+    // Triggered transmit. `cyclic == false` means the message only goes out while
+    // this User Condition holds; the rate above still caps how often.
+    //
+    // The condition is named by its OUTPUT CHANNEL, not by its row number, even
+    // though the wire carries an index. A ConditionRow has no name and no stable
+    // id — every other part of the document identifies one by position — so an
+    // index here would silently re-point at a different condition the moment a
+    // row was inserted, deleted or reordered above it. The output channel is the
+    // one handle a condition really has, it is unique because two conditions
+    // writing one channel is already a validation warning, and it comes free
+    // with the rename walk that repoints every other channel reference.
+    // mapToDevice resolves it to the index the device wants; mapFromDevice
+    // resolves it back.
+    //
+    // There is no "reset it once triggered" tickbox beside this any more. A
+    // Set/Reset User Condition carries its own Reset expression, so "send once
+    // when the request arrives" is written where it can be read — set on
+    // Message Received, reset on Message Transmitted — instead of a transmit
+    // message reaching sideways to rewrite a calculation's output.
+    QString transmitCondition;
     int messageLengthBytes = 8;       // DLC
 
     bool compound = false;
@@ -367,18 +418,34 @@ struct MathRow {
     static MathRow fromJson(const QJsonObject &o);
 };
 
-// Condition row (Calculations > Conditions...). A condition is a pure boolean
-// logic channel: it evaluates "A op B" and drives its output channel to true
-// (1) while the comparison holds, false (0) otherwise. The output is an
-// ordinary generated channel, so it can feed counters/timers, math, transmit
-// signals, or another condition.
-// One "A op B" comparison inside a condition.
+// User Condition rows (Calculations > User Conditions...). A condition drives a
+// boolean output channel, and its MODE decides the shape of that output rather
+// than merely its value — see ConditionRow below. The output is an ordinary
+// generated channel, so it can feed counters/timers, math, transmit signals, a
+// message's transmit trigger, or another condition.
+//
+// One comparison inside a condition: "A op B", or — for the two message
+// operators — "this message was received / was transmitted".
 struct ConditionTermRow {
     QString aChannel;
     int op = 0;                  // ct::ConditionOp
     bool bIsChannel = false;
     QString bChannel;
     double bConst = 0;
+
+    // The two MESSAGE operators (COND_OP_MSG_RX / COND_OP_MSG_TX) take a
+    // message where a channel comparison takes input A, and ignore B entirely.
+    //
+    // A message is named by its BUS and its section NAME, not by an index, for
+    // the reason a transmit condition names a channel rather than a row: an
+    // index is permuted by reordering, shifted by deleting or Off-ing any
+    // earlier section, and rewritten wholesale by a Get. (bus, name) is also
+    // not a new idea here — the Get reconciliation pass, the protection untick
+    // path and the section access grants had each already settled on it.
+    int aMessageBus = 0;         // 1..3; 0 = unset
+    QString aMessage;            // the section's name, compared case-insensitively
+
+    bool isMessageOp() const;
 
     QJsonObject toJson() const;
     static ConditionTermRow fromJson(const QJsonObject &o);
@@ -392,23 +459,62 @@ struct ConditionTermRow {
 QString joinConditionTerms(const QStringList &termTexts, const QList<int> &joiners,
                            const QString &andWord, const QString &orWord);
 
-// A condition drives a boolean output channel from 1..COND_MAX_TERMS
-// comparisons joined by AND/OR. `joiners` has one entry per gap, so
-// joiners.size() == terms.size() - 1; the expression folds STRICTLY LEFT TO
-// RIGHT — ((t0 J0 t1) J1 t2) — which is what the editor displays.
+// How a User Condition shapes its output. There is no plain level any more: a
+// condition that simply follows its comparisons is a Set/Reset whose Reset is
+// the inverse of its Set, which is exactly what every pre-modes configuration
+// was migrated into.
+enum class ConditionMode {
+    Momentary = 0, // rising edge of Set -> 1, holds one period of latchHz
+    SetReset = 1,  // Set -> 1, Reset -> 0, holds between; RESET IS DOMINANT
+};
+
+// A User Condition drives a boolean output channel.
+//
+// Both expressions hold 1..COND_MAX_TERMS comparisons with one joiner per gap
+// (joiners.size() == terms.size() - 1), folded STRICTLY LEFT TO RIGHT —
+// ((t0 J0 t1) J1 t2) — which is what the editor displays.
+//
+// Momentary uses setTerms and latchHz; Set/Reset uses setTerms and resetTerms.
+// The unused half is KEPT rather than cleared when the mode changes, so
+// switching back and forth in the editor does not destroy what was typed.
+// mapToDevice is what decides which half reaches the device.
 struct ConditionRow {
-    QList<ConditionTermRow> terms{ConditionTermRow{}};
-    QList<int> joiners;          // ct::ConditionJoin per gap
-    QString outputChannel;       // boolean output: 1 when the condition holds
+    ConditionMode mode = ConditionMode::SetReset;
+    QList<ConditionTermRow> setTerms{ConditionTermRow{}};
+    QList<int> setJoiners;       // ct::ConditionJoin per gap
+    QList<ConditionTermRow> resetTerms{ConditionTermRow{}};
+    QList<int> resetJoiners;
+    // Momentary hold, as a frequency: the output holds for ONE PERIOD of this,
+    // so 10 Hz is 100 ms. Capped at COND_LATCH_MAX_HZ because the device spends
+    // the hold on its 10 ms calculation pass and cannot resolve finer.
+    int latchHz = 10;
+    QString outputChannel;       // boolean output: 1 while the condition holds
     bool active = true;
 
-    // Every channel the condition reads, for rename/validation walks.
+    // Every channel the condition reads, across BOTH expressions, for
+    // rename/validation walks. Message operands are not channels and are not
+    // included; see messageRefs().
     QStringList inputChannels() const;
+    // Every message either expression names, as (bus, section name) pairs.
+    QList<QPair<int, QString>> messageRefs() const;
 
     QJsonObject toJson() const;
-    // Accepts the v14 "terms" form and the older single-comparison shape.
+    // Accepts the modes form, the v14 "terms" form (migrated to a Set/Reset
+    // whose Reset is the inverse of the Set) and the older single-comparison
+    // shape.
     static ConditionRow fromJson(const QJsonObject &o);
 };
+
+// The logical inverse of an expression: negate every comparison and flip every
+// joiner. Exact for a strictly left-to-right fold, by De Morgan applied at each
+// gap, and lossless because all six comparison operators invert within the set.
+//
+// This is what migrates a pre-modes condition, so it has to be right: the
+// result must be true exactly when the input is false, for every combination of
+// operators and joiners. Refuses (returns false, leaving `out` untouched) if any
+// term carries a message operator, which has no negation.
+bool invertConditionExpr(const QList<ConditionTermRow> &terms, const QList<int> &joiners,
+                         QList<ConditionTermRow> *outTerms, QList<int> *outJoiners);
 
 // Up/Down counter (Calculations > Up / Down Counters). Inputs are boolean
 // channels (edge-triggered); the output channel is generated by the counter.

@@ -1,9 +1,12 @@
 # CAN Triple
 
+[![build](https://github.com/mitchdetailed/CAN-Triple-Device-Manager/actions/workflows/build.yml/badge.svg)](https://github.com/mitchdetailed/CAN-Triple-Device-Manager/actions/workflows/build.yml)
+
 **A three-bus CAN gateway and calculation computer**, configured from Windows
 with the **CAN Triple Device Manager** — build messages and channels, add math,
-conditions, counters, timers and lookup tables, watch everything live, and
-program it into the device over a single USB cable.
+user conditions, counters, timers and lookup tables, transmit cyclically or on a
+condition, watch everything live, and program it into the device over a single
+USB cable.
 
 ## Download
 
@@ -34,10 +37,11 @@ One Setup installs everything:
    connection to seeing live values.
 
 New board fresh from the factory? Run **CAN Triple Initial Programming Tool**
-(in the Start Menu) once — it installs the bootloader and firmware directly
-over USB.
-After that, firmware updates happen inside the Manager
-(**Online → Update Firmware…**).
+(in the Start Menu) once — it installs the bootloader and a starting firmware
+directly over USB. That firmware is just the starting point: pick and install
+the firmware you actually want from inside the Manager
+(**Online → Update Firmware…**), which is also where every later update
+happens.
 
 ## Documentation
 

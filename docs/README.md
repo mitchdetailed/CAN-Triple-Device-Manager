@@ -14,7 +14,7 @@ then the first entry below.
   - [DBC Import](dbc-import.md)
   - [Message Relays](relays.md)
 - [Math Channels & Calculations](math-channels.md)
-  - [Conditions](conditions.md)
+  - [User Conditions](conditions.md)
   - [Constants](constants.md)
   - [Lookup Tables](tables.md)
   - [Up/Down Counters](counters.md)

@@ -85,7 +85,7 @@ Scripts save as <code>.lua</code> files under
 <tr><td><code>ct.setChannel{...}</code></td><td>Add-or-update by <code>name</code>.</td></tr>
 <tr><td><code>ct.removeChannel(name)</code></td><td>Removes it.</td></tr>
 <tr><td><code>ct.renameChannel(old, new)</code></td>
-<td>Renames AND updates every reference — comms rows, math, conditions.
+<td>Renames AND updates every reference — comms rows, math, User Conditions.
 Returns the number of references updated.</td></tr>
 <tr><td><code>ct.allocatedChannels()</code> /
 <code>ct.generatedChannels()</code> / <code>ct.protectedChannels()</code></td>
@@ -123,8 +123,11 @@ normally.</td></tr>
 <code>alignment</code> = <code>"normal"|"wordswap"</code>,
 <code>rateHz</code>/<code>cyclic</code> (transmit),
 <code>timeoutMs</code> (receive), and <code>rows</code> — an array of
-<code>{channel, startBit, bitLength, dbcType, factor, offset, default}</code>
-with <code>dbcType</code> = <code>"unsigned"|"signed"|"float"</code>.</td></tr>
+<code>{channel, startBit, bitLength, dbcType, factor, offset, default,
+clampToRange}</code> with <code>dbcType</code> =
+<code>"unsigned"|"signed"|"float"</code>. <code>clampToRange</code> defaults to
+<code>true</code>; <code>false</code> makes a transmit row send the low
+<code>bitLength</code> bits and roll over.</td></tr>
 <tr><td><code>ct.setSection(n, name, {...})</code></td>
 <td>Updates fields; include <code>name</code> to rename; include
 <code>rows</code> to replace the rows.</td></tr>

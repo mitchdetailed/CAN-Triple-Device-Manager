@@ -17,7 +17,7 @@ Files, Exit. See <a href="files.md">Configuration Files</a> and
 <tr><td><b>Connections</b></td><td>Communications… — the three CAN buses,
 their messages (sections) and channels. See
 <a href="communications.md">Communications</a>.</td></tr>
-<tr><td><b>Calculations</b></td><td>Math Channels…, Conditions…, Timers…,
+<tr><td><b>Calculations</b></td><td>Math Channels…, User Conditions…, Timers…,
 Up / Down Counters…, Integrators…, Constants…, Tables…, Device Script… —
 on-device calculations that read and write channels.</td></tr>
 <tr><td><b>Online</b></td><td>Connect / Disconnect, Send / Get / Verify
@@ -53,7 +53,7 @@ If this is your first session, read [Getting Started](getting-started.md): it wa
 <a href="relays.md">Message Relays</a></td></tr>
 <tr><td>Calculations</td><td>
 <a href="math-channels.md">Math Channels</a> ·
-<a href="conditions.md">Conditions</a> ·
+<a href="conditions.md">User Conditions</a> ·
 <a href="constants.md">Constants</a> ·
 <a href="tables.md">Lookup Tables</a> ·
 <a href="counters.md">Up/Down Counters</a> ·

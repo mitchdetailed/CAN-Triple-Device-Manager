@@ -9,6 +9,15 @@
 
 #include "../protocol/wire_structs.h" // TABLE_2X16_SITES, MSGPROT_*
 
+// The application version, stamped into every saved file as `writtenBy`. Only
+// the application target defines it; the test binaries link this translation
+// unit without it, and a file a test writes has no build to name. Guarded rather
+// than made a link-time symbol because the fallback is genuinely correct — the
+// question "which build wrote this" has no answer there.
+#ifndef CT_APP_VERSION
+#define CT_APP_VERSION "unknown"
+#endif
+
 namespace ct {
 
 // ---- CommsProtection: the two conversions the tier has ----
@@ -85,6 +94,10 @@ QJsonObject CommsChannelRow::toJson() const
     o["dbcType"] = dbcType;
     o["dbcFactor"] = dbcFactor;
     o["dbcOffset"] = dbcOffset;
+    // Written unconditionally rather than only when false: "clamp" is the
+    // default, so a reader that meets the key absent has to assume it, and a
+    // file that STATES it can be told apart from one that predates it.
+    o["clampToRange"] = clampToRange;
     return o;
 }
 
@@ -98,6 +111,8 @@ CommsChannelRow CommsChannelRow::fromJson(const QJsonObject &o)
     r.dbcType = o["dbcType"].toInt(int(DbcType::Unsigned));
     r.dbcFactor = o["dbcFactor"].toDouble(1.0);
     r.dbcOffset = o["dbcOffset"].toDouble(0.0);
+    // Absent means a pre-schema-19 file, which could only ever clamp.
+    r.clampToRange = o["clampToRange"].toBool(true);
     return r;
 }
 
@@ -263,6 +278,10 @@ QJsonObject CommsSection::toJson() const
     o["cyclic"] = cyclic;
     o["transmitRateHz"] = transmitRateHz;
     o["transmitPeriodMs"] = transmitPeriodMs;
+    // Written only when there is one, so a Cyclic message carries no trace of
+    // the feature — the same idiom the protection tier uses for None.
+    if (!transmitCondition.isEmpty())
+        o["transmitCondition"] = transmitCondition;
     o["messageLength"] = messageLengthBytes;
     o["compound"] = compound;
     o["compoundTxMode"] = compoundTxMode == CompoundTxMode::Sequential ? "sequential" : "batch";
@@ -342,6 +361,7 @@ CommsSection CommsSection::fromJson(const QJsonObject &o, int fileVersion)
     s.cyclic = o["cyclic"].toBool(true);
     s.transmitRateHz = o["transmitRateHz"].toInt(50);
     s.transmitPeriodMs = o["transmitPeriodMs"].toInt(0);
+    s.transmitCondition = o["transmitCondition"].toString();
     s.messageLengthBytes = o["messageLength"].toInt(8);
     s.compound = o["compound"].toBool(false);
     s.compoundTxMode = o["compoundTxMode"].toString(QStringLiteral("batch")) == "sequential"
@@ -496,6 +516,11 @@ MathRow MathRow::fromJson(const QJsonObject &o)
     return m;
 }
 
+bool ConditionTermRow::isMessageOp() const
+{
+    return condOpIsMessage(quint8(op));
+}
+
 QJsonObject ConditionTermRow::toJson() const
 {
     QJsonObject o;
@@ -504,6 +529,13 @@ QJsonObject ConditionTermRow::toJson() const
     o["bIsChannel"] = bIsChannel;
     o["bChannel"] = bChannel;
     o["bConst"] = bConst;
+    // Written only for a message operator, so a comparison carries no trace of
+    // the feature — the idiom the protection tier and the transmit condition
+    // both use.
+    if (isMessageOp()) {
+        o["aMessageBus"] = aMessageBus;
+        o["aMessage"] = aMessage;
+    }
     return o;
 }
 
@@ -515,7 +547,38 @@ ConditionTermRow ConditionTermRow::fromJson(const QJsonObject &o)
     t.bIsChannel = o["bIsChannel"].toBool(false);
     t.bChannel = o["bChannel"].toString();
     t.bConst = o["bConst"].toDouble(0);
+    t.aMessageBus = o["aMessageBus"].toInt(0);
+    t.aMessage = o["aMessage"].toString();
     return t;
+}
+
+bool invertConditionExpr(const QList<ConditionTermRow> &terms, const QList<int> &joiners,
+                         QList<ConditionTermRow> *outTerms, QList<int> *outJoiners)
+{
+    // De Morgan, applied at every gap of a strictly left-to-right fold.
+    //
+    //   NOT((X J t))  ==  (NOT X) J' (NOT t)
+    //
+    // where J' is the flipped joiner. Applying that from the outside in leaves
+    // every term negated and every joiner flipped, and nothing else changes —
+    // the bracketing is the same shape, so the editor still displays it the way
+    // the device evaluates it.
+    for (const ConditionTermRow &t : terms)
+        if (t.isMessageOp())
+            return false; // "a frame did not arrive" is not a thing to latch on
+    QList<ConditionTermRow> inv;
+    inv.reserve(terms.size());
+    for (ConditionTermRow t : terms) {
+        t.op = int(condOpNegate(quint8(t.op)));
+        inv.append(t);
+    }
+    QList<int> flipped;
+    flipped.reserve(joiners.size());
+    for (int j : joiners)
+        flipped.append(j == int(COND_JOIN_OR) ? int(COND_JOIN_AND) : int(COND_JOIN_OR));
+    *outTerms = inv;
+    *outJoiners = flipped;
+    return true;
 }
 
 QString joinConditionTerms(const QStringList &termTexts, const QList<int> &joiners,
@@ -540,16 +603,36 @@ QString joinConditionTerms(const QStringList &termTexts, const QList<int> &joine
 QStringList ConditionRow::inputChannels() const
 {
     QStringList names;
-    for (const ConditionTermRow &t : terms) {
-        if (!t.aChannel.isEmpty())
-            names << t.aChannel;
-        if (t.bIsChannel && !t.bChannel.isEmpty())
-            names << t.bChannel;
+    // BOTH expressions. A Reset comparison reads a channel exactly as a Set one
+    // does, and a rename walk that missed it would leave the Reset pointing at
+    // a name that no longer exists — the latch would then never clear.
+    for (const QList<ConditionTermRow> *side : {&setTerms, &resetTerms}) {
+        for (const ConditionTermRow &t : *side) {
+            if (t.isMessageOp())
+                continue; // its operand is a message, not a channel
+            if (!t.aChannel.isEmpty())
+                names << t.aChannel;
+            if (t.bIsChannel && !t.bChannel.isEmpty())
+                names << t.bChannel;
+        }
     }
     return names;
 }
 
-QJsonObject ConditionRow::toJson() const
+QList<QPair<int, QString>> ConditionRow::messageRefs() const
+{
+    QList<QPair<int, QString>> refs;
+    for (const QList<ConditionTermRow> *side : {&setTerms, &resetTerms})
+        for (const ConditionTermRow &t : *side)
+            if (t.isMessageOp() && !t.aMessage.isEmpty())
+                refs.append({t.aMessageBus, t.aMessage});
+    return refs;
+}
+
+namespace {
+// One expression in and out of JSON, plus the invariant every consumer relies
+// on: at most COND_MAX_TERMS terms, at least one, and exactly one joiner per gap.
+QJsonObject exprToJson(const QList<ConditionTermRow> &terms, const QList<int> &joiners)
 {
     QJsonObject o;
     QJsonArray termArray;
@@ -560,6 +643,41 @@ QJsonObject ConditionRow::toJson() const
     for (int j : joiners)
         joinArray.append(j);
     o["joiners"] = joinArray;
+    return o;
+}
+
+void normaliseExpr(QList<ConditionTermRow> *terms, QList<int> *joiners)
+{
+    // A file written by a future build may carry more terms than this one
+    // supports; keep the leading ones rather than failing the load.
+    if (terms->size() > COND_MAX_TERMS)
+        *terms = terms->mid(0, COND_MAX_TERMS);
+    if (terms->isEmpty())
+        terms->append(ConditionTermRow{});
+    while (joiners->size() < terms->size() - 1)
+        joiners->append(int(COND_JOIN_AND));
+    *joiners = joiners->mid(0, terms->size() - 1);
+}
+
+void exprFromJson(const QJsonObject &o, QList<ConditionTermRow> *terms, QList<int> *joiners)
+{
+    terms->clear();
+    joiners->clear();
+    for (const auto &v : o["terms"].toArray())
+        terms->append(ConditionTermRow::fromJson(v.toObject()));
+    for (const auto &v : o["joiners"].toArray())
+        joiners->append(v.toInt(int(COND_JOIN_AND)));
+    normaliseExpr(terms, joiners);
+}
+} // namespace
+
+QJsonObject ConditionRow::toJson() const
+{
+    QJsonObject o;
+    o["mode"] = mode == ConditionMode::Momentary ? "momentary" : "setreset";
+    o["set"] = exprToJson(setTerms, setJoiners);
+    o["reset"] = exprToJson(resetTerms, resetJoiners);
+    o["latchHz"] = latchHz;
     o["outputChannel"] = outputChannel;
     o["active"] = active;
     return o;
@@ -568,27 +686,50 @@ QJsonObject ConditionRow::toJson() const
 ConditionRow ConditionRow::fromJson(const QJsonObject &o)
 {
     ConditionRow c;
-    c.terms.clear();
-    if (o.contains(QStringLiteral("terms"))) {
-        for (const auto &v : o["terms"].toArray())
-            c.terms.append(ConditionTermRow::fromJson(v.toObject()));
-        for (const auto &v : o["joiners"].toArray())
-            c.joiners.append(v.toInt(int(COND_JOIN_AND)));
+    if (o.contains(QStringLiteral("mode"))) {
+        c.mode = o["mode"].toString() == QLatin1String("momentary") ? ConditionMode::Momentary
+                                                                   : ConditionMode::SetReset;
+        exprFromJson(o["set"].toObject(), &c.setTerms, &c.setJoiners);
+        exprFromJson(o["reset"].toObject(), &c.resetTerms, &c.resetJoiners);
+        c.latchHz = qBound(1, o["latchHz"].toInt(10), int(COND_LATCH_MAX_HZ));
     } else {
-        // Pre-v14 files hold ONE comparison inline, on the condition object
-        // itself; it becomes this condition's first (and only) term.
-        c.terms.append(ConditionTermRow::fromJson(o));
+        // THE MIGRATION. Before the modes a condition was a plain level: its
+        // output followed one expression, with no memory. That is exactly a
+        // Set/Reset whose Reset is the logical inverse of its Set — the latch
+        // sets whenever the expression holds and resets whenever it does not,
+        // which is a level with extra steps — so the file's single expression
+        // becomes the Set and its inverse becomes the Reset.
+        //
+        // Keyed on the ABSENCE of "mode" rather than on the file version,
+        // because that is self-describing and idempotent: a file that has been
+        // through this once has a mode and never sees it again.
+        c.mode = ConditionMode::SetReset;
+        c.setTerms.clear();
+        c.setJoiners.clear();
+        if (o.contains(QStringLiteral("terms"))) {
+            for (const auto &v : o["terms"].toArray())
+                c.setTerms.append(ConditionTermRow::fromJson(v.toObject()));
+            for (const auto &v : o["joiners"].toArray())
+                c.setJoiners.append(v.toInt(int(COND_JOIN_AND)));
+        } else {
+            // Pre-v14 files hold ONE comparison inline, on the condition object
+            // itself; it becomes this condition's first (and only) term.
+            c.setTerms.append(ConditionTermRow::fromJson(o));
+        }
+        normaliseExpr(&c.setTerms, &c.setJoiners);
+        if (!invertConditionExpr(c.setTerms, c.setJoiners, &c.resetTerms, &c.resetJoiners)) {
+            // Unreachable for a real pre-modes file — the message operators did
+            // not exist when those were written, and they are the only thing
+            // that refuses. Falling back to the Set expression unchanged would
+            // build a latch that resets whenever it sets, so leave the Reset
+            // empty instead: "never resets" is at least honest, and validation
+            // reports it.
+            c.resetTerms.clear();
+            c.resetJoiners.clear();
+        }
     }
-    // A file written by a future build may carry more terms than this one
-    // supports; keep the leading ones rather than failing the load.
-    if (c.terms.size() > COND_MAX_TERMS)
-        c.terms = c.terms.mid(0, COND_MAX_TERMS);
-    if (c.terms.isEmpty())
-        c.terms.append(ConditionTermRow{});
-    // Hold the invariant every consumer relies on: exactly one joiner per gap.
-    while (c.joiners.size() < c.terms.size() - 1)
-        c.joiners.append(int(COND_JOIN_AND));
-    c.joiners = c.joiners.mid(0, c.terms.size() - 1);
+    normaliseExpr(&c.setTerms, &c.setJoiners);
+    normaliseExpr(&c.resetTerms, &c.resetJoiners);
     // Pre-boolean files stored the output under "targetChannel" (SET_SIGNAL_VAL
     // action); fall back to it so older conditions keep their output channel.
     c.outputChannel = o["outputChannel"].toString(o["targetChannel"].toString());
@@ -1460,7 +1601,43 @@ bool Configuration::mayBeSentTo(const QString &uid) const
 // transmitCrc8 section as a RECEIVE message (the device-token fallback) and
 // the next Send would install a listener where the author configured a
 // stamped transmit. Refusing the file names the real remedy instead.
-static constexpr int kConfigSchemaVersion = 16;
+// 17: Triggered transmit — "transmitCondition" and "resetConditionOnTransmit"
+// on a transmit section. Additive keys, and the bump is for the now-familiar
+// reason: "cyclic": false has been a legal, inert value in every file since the
+// beginning, so an older build reads one of these sections as a perfectly
+// ordinary message and finds nothing missing. It would then send a message that
+// transmits CONTINUOUSLY where the author configured it to transmit only on a
+// condition — traffic on a customer's bus that nobody asked for, from a file
+// that looked like it loaded cleanly. Refusing names the remedy instead.
+//
+// The same release forces every User Condition's output channel to boolean.
+// That migration needs no version to key off: it is idempotent, it runs
+// unconditionally on load, and a file already holding boolean outputs is
+// unchanged by it.
+// 18: User Condition modes. A condition is now Momentary or Set/Reset and
+// carries TWO expressions under "set" and "reset", plus "mode" and "latchHz";
+// the old single "terms"/"joiners" pair is gone, and a comparison may name a
+// MESSAGE ("aMessageBus"/"aMessage") instead of comparing channels.
+//
+// The bump is mandatory for the usual reason in its sharpest form yet: an older
+// build reads a modes file, finds no "terms" key, and loads every condition as
+// a single empty comparison — silently, because an absent key has always been a
+// legal way to say "default". It would then Send a configuration whose logic is
+// simply missing. Refusing the file names the remedy instead.
+//
+// Going the OTHER way is a migration and lives in ConditionRow::fromJson: a
+// file with no "mode" is pre-modes, and its one expression becomes the Set with
+// its logical inverse as the Reset. That is keyed on the absent key rather than
+// on this number, and deliberately — it is self-describing and idempotent, so
+// it cannot run twice. The version is threaded to fromJson only where absence
+// is AMBIGUOUS, which for conditions it is not; see the note on loadBody.
+// 18 -> 19 adds CommsChannelRow::clampToRange. The key is additive and its
+// absence is unambiguous (a file without it predates the option and clamped),
+// so nothing needs migrating — the bump is for the guard ABOVE, in the other
+// direction. A build that predates the flag would drop it on load and Send a
+// configuration that clamps where the author asked it to roll over: a silent
+// behaviour change on a real bus. Refusing to open the file says so instead.
+static constexpr int kConfigSchemaVersion = 19;
 
 namespace {
 
@@ -1881,6 +2058,16 @@ void Configuration::loadBody(const QJsonObject &root, int fileVersion)
         setDeviceLock(lock[QStringLiteral("uid")].toString(),
                       AccessKey(lock[QStringLiteral("key")].toString().toULongLong()));
     }
+
+    // Every User Condition output is boolean, including in files written before
+    // that was true. LAST in this function on purpose: it reads conditionRows
+    // and writes the catalogue, and both are set above — the channels at the top
+    // of loadBody, the conditions after them.
+    //
+    // Unconditional rather than gated on fileVersion, because it is idempotent
+    // and describes what the engine has always done rather than a format change.
+    // A file where every condition output is already boolean loads bit-identical.
+    forceConditionOutputsBoolean();
 }
 
 namespace {
@@ -2052,6 +2239,17 @@ bool Configuration::saveToFile(const QString &path, QString *error)
     QJsonObject root;
     root["fileType"] = QStringLiteral("CANTripleConfig");
     root["fileVersion"] = kConfigSchemaVersion;
+    // Which BUILD wrote this, for people rather than for the parser. fileVersion
+    // says how to read the file and is the only thing load ever compares;
+    // writtenBy says who produced it, which is the question actually asked when
+    // a configuration turns up behaving oddly and nobody remembers which machine
+    // it came off.
+    //
+    // Deliberately never read back. A parser that branched on an application
+    // version would be deciding structure from a number that does not describe
+    // structure — that is fileVersion's job, and two numbers answering one
+    // question is how they drift apart.
+    root["writtenBy"] = QStringLiteral(CT_APP_VERSION);
     const QJsonObject body = buildBody();
     for (auto it = body.constBegin(); it != body.constEnd(); ++it)
         root.insert(it.key(), it.value());
@@ -2158,6 +2356,12 @@ int renameChannelRefs(CommsSection &section, const QString &oldName, const QStri
     // longer exists, exactly the dangling reference this walk exists to
     // prevent.
     updated += renameRef(section.crcChannel, oldName, newName);
+    // A Triggered message names its User Condition by the condition's output
+    // channel, so this walk is what keeps that binding alive across a rename —
+    // and it is the reason the binding is a channel name rather than a row
+    // index. Miss it and the message quietly stops transmitting: the condition
+    // still exists, but nothing answers to the name the section remembers.
+    updated += renameRef(section.transmitCondition, oldName, newName);
     for (CommsChannelRow &row : section.rows)
         updated += renameRef(row.channelName, oldName, newName);
     for (CompoundIdentifier &ident : section.identifiers)
@@ -2191,9 +2395,18 @@ int renameChannelRefs(QList<ConditionRow> &rows, const QString &oldName, const Q
 {
     int updated = 0;
     for (ConditionRow &c : rows) {
-        for (ConditionTermRow &t : c.terms) {
-            updated += renameRef(t.aChannel, oldName, newName);
-            updated += renameRef(t.bChannel, oldName, newName);
+        // BOTH expressions, including a Momentary's unused Reset half. That half
+        // is kept in the document so switching modes does not destroy what was
+        // typed, so it has to be repointed too — otherwise a rename while in
+        // Momentary would quietly break the Reset the moment the user switched
+        // back to Set/Reset.
+        for (QList<ConditionTermRow> *side : {&c.setTerms, &c.resetTerms}) {
+            for (ConditionTermRow &t : *side) {
+                if (t.isMessageOp())
+                    continue; // names a message, not a channel
+                updated += renameRef(t.aChannel, oldName, newName);
+                updated += renameRef(t.bChannel, oldName, newName);
+            }
         }
         updated += renameRef(c.outputChannel, oldName, newName);
     }
@@ -2286,6 +2499,36 @@ int Configuration::renameChannelReferences(const QString &oldName, const QString
     // the old name (a row added since the dialog opened). See the signal.
     emit channelRenamed(oldName, newName);
     return updated;
+}
+
+int Configuration::forceConditionOutputsBoolean()
+{
+    int changed = 0;
+    for (const ConditionRow &c : conditionRows) {
+        if (!c.active || c.outputChannel.isEmpty())
+            continue;
+        // A device channel is the firmware's, not the document's, and cannot be
+        // retyped from here. A condition writing into one is already a mistake
+        // the mapper refuses; silently rewriting a built-in definition would be
+        // a worse answer than leaving validation to say so.
+        if (ChannelCatalog::isDeviceChannel(c.outputChannel))
+            continue;
+        Channel ch = m_catalog.findByName(c.outputChannel);
+        if (!ch.isValid())
+            continue; // nothing to retype yet; the picker creates it typed
+        if (ch.dataType == QLatin1String("boolean") && ch.minValue == 0.0
+            && ch.maxValue == 1.0 && ch.decimalPlaces == 0)
+            continue;
+        ch.dataType = QStringLiteral("boolean");
+        ch.minValue = 0.0;
+        ch.maxValue = 1.0;
+        ch.decimalPlaces = 0;
+        m_catalog.addOrUpdateUserChannel(ch);
+        ++changed;
+    }
+    if (changed > 0)
+        setDirty();
+    return changed;
 }
 
 void Configuration::copyContentTo(Configuration &target) const

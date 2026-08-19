@@ -158,7 +158,9 @@ void MainWindow::buildMenus()
     // Calculations
     QMenu *calcMenu = menuBar()->addMenu(tr("C&alculations"));
     calcMenu->addAction(tr("&Math Channels…"), this, &MainWindow::onMathChannels);
-    calcMenu->addAction(tr("C&onditions…"), this, &MainWindow::onConditions);
+    // Mnemonic moved o -> C with the rename: "Up / Down Counters" already owns U
+    // and "Constants" owns n, so C is the letter left in "User Conditions".
+    calcMenu->addAction(tr("User &Conditions…"), this, &MainWindow::onConditions);
     calcMenu->addAction(tr("&Timers…"), this, &MainWindow::onTimers);
     calcMenu->addAction(tr("&Up / Down Counters…"), this, &MainWindow::onCounters);
     calcMenu->addAction(tr("&Integrators…"), this, &MainWindow::onIntegrators);
@@ -1047,6 +1049,12 @@ void MainWindow::onConditions()
 {
     ConditionsDialog dialog(&m_config, this);
     dialog.exec();
+    // Every User Condition output is boolean. Applied here rather than inside
+    // the dialog's accept because the picker can create or re-type a channel
+    // from inside it — the Edit… button reaches the full Channel Editor — so
+    // the state that has to be corrected is whatever the document holds when
+    // the dialog closes, cancelled or not.
+    m_config.forceConditionOutputsBoolean();
     if (m_monitorDialog)
         m_monitorDialog->rebuild();
 }
@@ -1988,7 +1996,7 @@ void MainWindow::runVerifyTransfer(bool allowUnlockRetry)
         extrasBeyond(device.math, mapped.tables.math.size(),
                      [](const MathConfig &m) { return m.is_active != 0; });
         extrasBeyond(device.conditions, mapped.tables.conditions.size(),
-                     [](const ConditionConfig &c) { return c.is_active != 0; });
+                     [](const ConditionConfig &c) { return (c.flags & CONDFLAG_ACTIVE) != 0; });
         compare(mapped.tables.counters, device.counters, mismatches);
         extrasBeyond(device.counters, mapped.tables.counters.size(),
                      [](const CounterConfig &c) { return (c.flags & COUNTERFLAG_ACTIVE) != 0; });
@@ -2422,6 +2430,12 @@ void MainWindow::onUploadConfiguration()
 void MainWindow::onChannelEditor()
 {
     ChannelEditorDialog::run(&m_config, this);
+    // The Channel Editor can retype any channel, including one a User Condition
+    // writes — where the type is not the user's to choose. Put it back rather
+    // than refusing the edit: refusing would mean greying out the type of a
+    // channel whose OTHER fields (name, units, description) are perfectly
+    // editable, and explaining why in a dialog nobody reads.
+    m_config.forceConditionOutputsBoolean();
     updateWindowTitle(); // editing a channel can mark the document dirty
     if (m_monitorDialog)
         m_monitorDialog->rebuild();

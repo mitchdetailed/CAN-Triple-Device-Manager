@@ -29,9 +29,12 @@ detection and rate steps.</td></tr>
 elapsed time.</td></tr>
 <tr><td>8</td><td><a href="integrators.md">Integrators</a></td><td>Accumulate
 by the real elapsed time.</td></tr>
-<tr><td>9</td><td><a href="conditions.md">Conditions</a></td><td>All
+<tr><td>9</td><td><a href="conditions.md">User Conditions</a></td><td>All
 comparisons, in row order — after everything above, so a condition on a math or
-table result sees the value computed this pass.</td></tr>
+table result sees the value computed this pass. Each condition's
+<a href="conditions.md#modes">mode</a> is applied here too: a Set/Reset latch
+is set, reset or held, and a Momentary's hold is spent against the elapsed
+time.</td></tr>
 <tr><td>10</td><td><a href="device-scripts.md">Device script</a></td><td>The
 script's <code>on_tick</code> runs last of the calculation stages, within its
 per-pass budget, so it sees everything the pass produced and its outputs still
@@ -46,6 +49,8 @@ after every other byte of the frame is final — and published to its CRC
 channel.</td></tr>
 </table>
 
+> **Note:** **The condition stage is the one calculation stage whose output does not follow from this pass's channel values alone.** A [User Condition](conditions.md) carries memory: its latched output, the previous pass's Set expression for edge detection, and a Momentary's remaining hold. It used to be pure — same inputs, same output, every pass — and that purity is what let it run from the receive path as freely as from the tick. It still runs from both, but the receive path is told that no time has passed, so a frame can move a latch and cannot shorten a hold. None of that state is persisted: a power cycle, and a configuration being sent, re-arm every condition.
+
 Around the pass, on the same 100 Hz beat: the CAN error state of all three buses is sampled just *before* it (feeding the diagnostics the pass publishes in stage 1), and after it the [Monitor Channels](monitor.md) value stream sends its slice of the channel table (see the rate table below).
 
 ## When a frame arrives
@@ -54,10 +59,10 @@ Received frames are not held for the next pass — each one is processed on arri
 1. **[Message relays](relays.md)** — every relay rule is checked against every received frame, matched or not, and forwards immediately.
 2. **Message match** — the first active receive message on that bus with that CAN ID (and matching standard/extended type) wins; the message's timeout window restarts.
 3. **Channel decode** — the matched section's channels are extracted and scaled into their values.
-4. **Recalculation** — constants, lookup tables, math and conditions re-run (the same stages 3–5 and 9 above, in the same order), so anything derived from the received channels updates immediately rather than up to 10 ms later.
+4. **Recalculation** — constants, lookup tables, math and User Conditions re-run (the same stages 3–5 and 9 above, in the same order), so anything derived from the received channels updates immediately rather than up to 10 ms later. A **was received** comparison naming this message is true on exactly this evaluation, which is why no received frame can be missed however fast they arrive.
 5. **Routing** — if the section routes to other buses, the frame is forwarded last, after the recalculation.
 
-Counters, timers and integrators do *not* run here — they advance on the 10 ms clock only, because they measure time. The device script's `on_tick` does not run here either: it is a per-pass hook with a per-pass budget, not a per-frame one. Both pick up the received values on the next pass, at most 10 ms later.
+Counters, timers and integrators do *not* run here — they advance on the 10 ms clock only, because they measure time. A Momentary condition's hold measures time in the same way and is likewise spent on the pass alone: the recalculation above is told that no time has passed, so a burst of frames cannot cut a pulse short. The device script's `on_tick` does not run here either: it is a per-pass hook with a per-pass budget, not a per-frame one. Both pick up the received values on the next pass, at most 10 ms later.
 
 ## Reading across the order: the one-pass lag
 
@@ -66,13 +71,13 @@ Within a pass, a reference to something computed at an *earlier* stage (or an ea
 <table>
 <tr><th>Reference</th><th>What it reads</th></tr>
 <tr><td>Math ← constant, table</td><td>This pass</td></tr>
-<tr><td>Condition ← math, table, counter, timer, integrator</td><td>This
-pass</td></tr>
+<tr><td>User Condition ← math, table, counter, timer, integrator</td>
+<td>This pass</td></tr>
 <tr><td>Table axis ← math channel</td><td>Previous pass (tables run before
 math)</td></tr>
-<tr><td>Math ← condition</td><td>Previous pass</td></tr>
-<tr><td>Counter / timer / integrator input ← condition</td><td>Previous
-pass</td></tr>
+<tr><td>Math ← User Condition</td><td>Previous pass</td></tr>
+<tr><td>Counter / timer / integrator input ← User Condition</td>
+<td>Previous pass</td></tr>
 <tr><td>Anything ← script-written channel</td><td>Previous pass (except the
 transmit stage, which runs after the script)</td></tr>
 <tr><td>Transmit message ← anything</td><td>This pass</td></tr>
@@ -89,6 +94,8 @@ Each transmit message runs on its own period — the section's Transmit Rate, 1 
 - **Section order is the tie-break.** Messages sharing a bus and a rate are offset in list order, so they go out in the order the [Communications](communications.md) list shows — list order = transmit order.
 - **An oversubscribed bus degrades fairly.** If more comes due than the bus can carry, the scan resumes each pass where the queue filled, so the shortfall is shared across the whole table instead of silencing the messages at the end of the list.
 - **A missed cycle is dropped, not banked.** When a transmission cannot be sent (bus off, queue full), the message does not accumulate a backlog; the next cycle sends the current channel values. Cyclic data carries the freshest value or nothing.
+- **A transmission is recorded for the next pass.** The 5 ms scheduler does not evaluate conditions, so a **was transmitted** comparison sees the frame on the following calculation pass — up to 10 ms later — and any transmissions of one message inside that window collapse into a single event. A 5 ms message manages two per window, and a Batch compound message emits every identifier in one service. Receive is not like this: a **was received** comparison is evaluated by the frame's own pass and sees every frame. See [the message operators](conditions.md#messages).
+- **A Triggered message keeps its own phase.** Its [User Condition](conditions.md) is tested in the 5 ms slot whatever the message's rate is, so the trigger is acted on within 5 ms — and the period is then counted from the moment the condition became true rather than from the phase the message was given at load. See [Triggered transmit](communications.md#triggered).
 
 ## How often everything runs
 
@@ -96,9 +103,14 @@ Each transmit message runs on its own period — the section's Transmit Rate, 1 
 <tr><th>Operation</th><th>Rate / latency</th></tr>
 <tr><td>Evaluation pass (stages above)</td><td>Every 10 ms
 (100 Hz)</td></tr>
-<tr><td>Constants, tables, math, conditions</td><td>Every pass, <em>plus</em>
-immediately on every matched received frame</td></tr>
+<tr><td>Constants, tables, math, User Conditions</td><td>Every pass,
+<em>plus</em> immediately on every matched received frame</td></tr>
 <tr><td>Counters, timers, integrators</td><td>Every pass only</td></tr>
+<tr><td>A Momentary condition's hold</td><td>Spent every pass only — a received
+frame does not advance it</td></tr>
+<tr><td>Message events for a condition's <b>was received</b> /
+<b>was transmitted</b></td><td>A receive is seen by the evaluation the frame
+itself triggers; a transmit by the next pass, at most 10 ms later</td></tr>
 <tr><td>Device script <code>on_tick</code></td><td>Every pass, budgeted (see
 <a href="device-scripts.md">Device Scripts</a>)</td></tr>
 <tr><td>Message relays, routing</td><td>Immediately, per received
@@ -131,4 +143,4 @@ changed (see <a href="integrators.md">Integrators</a>)</td></tr>
 
 ## See also
 
-[Math Channels](math-channels.md) · [Conditions](conditions.md) · [Messages &amp; Sections](communications.md) · [Message Relays](relays.md) · [Device Scripts](device-scripts.md) · [Monitoring Live Values](monitor.md) · [Channels](channels.md)
+[Math Channels](math-channels.md) · [User Conditions](conditions.md) · [Messages &amp; Sections](communications.md) · [Message Relays](relays.md) · [Device Scripts](device-scripts.md) · [Monitoring Live Values](monitor.md) · [Channels](channels.md)

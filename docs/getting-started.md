@@ -8,7 +8,7 @@ To open the serial link, choose **Tools → Connection Settings…**:
 - **Port:** lists every serial port with its Windows description. The ST-Link virtual COM port is preselected automatically when its description contains "STLink". Click **Refresh** after plugging the cable in.
 - **Baud rate:** defaults to **7372800 (CAN Triple default — ST-Link V3)**. The field is editable, and slower standard rates down to 115200 are listed, but the device firmware runs its UART at 7,372,800 baud — an ST-Link **V3** is required at that rate.
 - Click **Connect**. The label below the buttons changes to "Connected to COM5 @ 7372800", and the main window's status bar shows "Connected: COM5 @ 7372800" on the right. The button becomes **Disconnect**.
-- Click **Test** to confirm the device answers: it requests the device status and shows uptime, per-bus receive/transmit counters, and how many messages, signals, math channels and conditions are active.
+- Click **Test** to confirm the device answers: it requests the device status and shows uptime, per-bus receive/transmit counters, and how many messages, signals, math channels and User Conditions are active.
 
 > **Note:** You do not have to visit this dialog first. Any **Online** command that needs a device — Send, Get, Monitor Channels and the rest — opens Connection Settings automatically when no link is open.
 
@@ -19,7 +19,7 @@ If the port refuses to open or the Test fails, see [Troubleshooting](troubleshoo
 Choose **File → New** (a new, empty document is also what the program starts with). Then define what travels on each bus:
 1. **Connections → Communications…** opens the Communications Setup dialog, with one tab per bus (CAN 1 / CAN 2 / CAN 3). Set each bus's mode and rate, and add *sections* — the receive and transmit messages — with **New…** or **Import DBC…**. See [Communications: Messages &amp; Sections](communications.md) and [DBC Import](dbc-import.md).
 2. Each message carries channel rows that place a channel's bits in the frame. Channels are created as you need them — there is no predefined catalogue. See [Channels](channels.md).
-3. Optionally add on-device calculations from the **Calculations** menu: [Math Channels](math-channels.md), [Conditions](conditions.md), [Constants](constants.md), [Lookup Tables](tables.md), [Up/Down Counters](counters.md), [Timers](timers.md) and [Integrators](integrators.md).
+3. Optionally add on-device calculations from the **Calculations** menu: [Math Channels](math-channels.md), [User Conditions](conditions.md), [Constants](constants.md), [Lookup Tables](tables.md), [Up/Down Counters](counters.md), [Timers](timers.md) and [Integrators](integrators.md).
 
 The window title shows the document name with an asterisk (**\***) while there are unsaved changes. Save with **File → Save**; see [Configuration Files (.ct3)](files.md) for the file formats.
 

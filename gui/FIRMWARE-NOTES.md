@@ -822,3 +822,145 @@ firmware unlocks a cleaner protocol; none block basic use.
     it remains a UTF-8 BYTE count, not a character count, because one non-ASCII
     character is 2-4 bytes and a legal-looking 31-character name can still
     overrun the label.*
+24. **Triggered transmit, `MAX_CONDITIONS` 100 → 250, and condition outputs
+    that finally survive a Get.** Three changes in one release because they
+    share one `FLASH_STORE_VERSION` bump — and only one of them costs
+    anything.
+
+    **Triggered transmit costs zero config flash.** "Cyclic / Triggered" was a
+    *document* field that reached the device nowhere and was forced back to
+    Cyclic by every Get. `CanMessageConfig` now carries `uint16_t
+    tx_trigger_cond` and `uint8_t tx_trigger_flags`, taken **in place** from
+    three of the four bytes of the retired v20 per-message key (`reserved[4]`
+    became a one-byte `reserved`). The record is still **14 bytes**, `PAD8(14)`
+    is still 16, so no offset moved, `CFG_TOTAL` is unchanged and every chunk
+    constant on both sides stayed exactly as it was. `PROTOCOL_VERSION` stays
+    **1**: the record is the same size, so an older host's write still
+    satisfies `4 + count*item_size` — and it writes zeros there, which decode
+    to "cyclic", the behaviour it intended.
+    - **The flags are their own byte because `flags` has no room left.**
+      `MSGFLAG_*` occupies 0x01–0x20 and 0x40/0x80 are the `MSGPROT_*` level,
+      whose values are pinned so shipped 2.2.x flash decodes to the right tier
+      and cannot be borrowed. So `TXTRIG_ENABLED` (0x01) and
+      `TXTRIG_RESET_ON_TX` (0x02) live in `tx_trigger_flags`, with
+      `TX_TRIGGER_COND_NONE` (0xFFFF) marking an unnamed condition — not a
+      magic "disabled" value, since `TXTRIG_ENABLED` decides that, but a
+      marker that survives a round trip so a Get cannot invent condition 0 out
+      of an unset field.
+    - **`serial_proto.c`'s two `reserved` scrubs narrowed from four bytes to
+      one**, and the narrowing is only safe because of the store bump below.
+      The scrub had two jobs. Erasing legacy PBKDF2 key material is **done**,
+      by the store version rather than by the loop: those bytes only ever held
+      key material on a 2.2.1 unit updated in place, such a unit's image is
+      store v6, this firmware is store v10, and a mismatched version is
+      refused at load — a refused image is read as absent, so nothing in it
+      reaches the engine or a Get whatever the loop does. Keeping a reserved
+      field actually reserved is still live, and that is why the last byte is
+      still zeroed on the way in and on the way out. Scrubbing the other three
+      now would silently delete every Triggered transmit on the way to flash,
+      and blank every one on the way back.
+    - **The engine gates on the condition's published value, read in the 5 ms
+      transmit slot.** `executeConditions` already runs on every calculation
+      tick *and* on every matching received frame, so a condition watching bus
+      data is fresher than 200 Hz already and one watching calculated data
+      cannot beat the 100 Hz that produced its inputs — re-evaluating the
+      expression here would cost a table pass every 5 ms and could not change
+      a single answer. Checking in the 5 ms slot is the feature: a condition
+      that comes true is acted on within 5 ms however slow the message's own
+      rate is.
+    - **The interval is phased from the trigger, not from a free-running
+      grid.** While disarmed the period accumulator is **parked at `period`**,
+      so the first slot after the condition goes true finds it already past
+      due and transmits at once; each triggered transmission then **zeroes**
+      the accumulator rather than subtracting the period, so the run restarts
+      from every send. A 1 Hz message whose condition becomes true at 1.2 s
+      sends at 1.2, 2.2, 3.2 — not at 2.0, 3.0, which is what keeping the
+      remainder would have given.
+    - **A broken reference makes the message SILENT, never cyclic.** Unset
+      sentinel, index past the used count, inactive condition record,
+      destination slot out of range: every one of them answers false. Falling
+      back to "no gate" would put frames on a customer's wire precisely when
+      the configuration says it does not know whether they belong there.
+      Silence is the recoverable failure; unexpected traffic is not.
+    - **`TXTRIG_RESET_ON_TX` needed the engine's first per-condition runtime
+      state.** Conditions were purely combinational — that is exactly what
+      lets `executeConditions` run from both the tick and the receive path
+      without caring how often — and `g_cond_consumed[MAX_CONDITIONS]` (250 B,
+      not persisted, cleared by `resetRuntime`) does not change that: it is
+      memory of the *transmission*, not of the expression, and it only ever
+      forces the published value down. It exists because a plain zero-write
+      into the value slot would be overwritten within milliseconds by the next
+      `executeConditions`. The latch clears on `!met` rather than on a timer,
+      which is what makes this an edge trigger instead of a rate limiter —
+      nothing has to agree on a duration — and it is set only after the frame
+      was **accepted** by the outgoing queue, since consuming the edge for a
+      frame a full ring refused would lose the transmission entirely rather
+      than delaying it. A power cycle re-arms everything, which is the only
+      defensible answer: the alternative is a unit that boots refusing to send
+      because of an edge it consumed before it was last switched off.
+
+    **`MAX_CONDITIONS` 100 → 250 is the half that costs something.**
+    `ConditionConfig` is 35 B and `PAD8(35)` is 40, so the table goes 4,000 →
+    **10,000 B** and `CFG_TOTAL` 120,368 → **126,368** of the 131,072 B region
+    — **4,704 B spare**, where 10,704 were. Conditions are the **fourth** table
+    in `FLASH_TABLE_LIST`, so counters, timers, constants, relays, both
+    lookup-table pairs, integrators, the script region and the CRC8 rules all
+    shift 6,000 bytes down: a v9 image read under this build would be misread
+    record-for-record before its CRC ever ran, not merely rejected.
+    **`FLASH_STORE_VERSION` 9 → 10**, with the consequence every bump since v6
+    has had — **a unit updated to this firmware reads its stored configuration
+    as absent and needs one re-Send.** Triggered transmit would have needed no
+    bump at all; shipping the two together means the field pays that price
+    once.
+    - **The real ceiling is the channel pool, not the region.** Each condition
+      owns an output slot, so 250 of them claim up to 250 of the 1,000
+      `MAX_SIGNALS` slots. Another 250 signals would cost 16,000 B against
+      4,704 spare, and this raise already spent more than half the slack the
+      layout had carried since the script table arrived. Read the remainder as
+      the constraint it now is: one more signal costs 64 B, one more message
+      16, and the next table that wants thousands has nowhere to come from but
+      another table.
+
+    **A condition output could not survive a Get, and the fix is not in the
+    signal record.** `mapToDevice` now stamps the destination slot with
+    `typeOutputSignal(destIdx, "boolean", 0)`, which it never used to do —
+    which is why a condition output came home with no data type at all, or
+    declared float while carrying nothing but 0 and 1. Constants, lookup-table
+    outputs and device channels all stamp their slot from the type the document
+    declares for them; a condition's type is knowable without being declared
+    anywhere, and that is exactly the case that got missed. That alone does not
+    fix the round trip, though: on the wire Boolean **is**
+    `SIGNAL_TYPE_UINT8`, the same eight bits as u8 and always was, so
+    `inferDataType` reads every condition output back as "u8" however carefully
+    it was written. The **condition table** is the one piece
+    of unambiguous evidence — a channel a condition writes is a boolean
+    because a condition writes it, whatever the type byte says — so
+    `Configuration::forceConditionOutputsBoolean()` re-types from the table
+    after the catalogue is installed. It rewrites dataType, minimum, maximum
+    and decimal places together (a "boolean" still holding a 0–100 range is
+    not one) and leaves device channels alone, those being the firmware's
+    definition rather than the document's.
+
+    *GUI side: "Conditions" is **User Conditions** everywhere — the
+    Calculations menu (mnemonic `o` → `C`, since Counters own U and Constants
+    own n), both dialog titles, every validation location ("User Condition 3")
+    and the Config Summary heading. The section editor gains a **Transmit
+    Condition** combo and a **Reset User Condition once Triggered** tickbox,
+    shown only while Triggered is selected. The combo lists the document's User
+    Conditions rather than opening the channel picker — the requirement is
+    literally "only User Conditions", and the picker has no filter and a New
+    Channel… button that would mean nothing here — and it stores the
+    condition's **output channel**, not its row index: a `ConditionRow` has no
+    name and no stable id, so an index would silently re-point the moment a row
+    above it was inserted, deleted or reordered. `mapToDevice` resolves name →
+    index in a deferred pass once the condition table is built (messages are
+    mapped long before it exists, and predicting the numbering would mean
+    duplicating the skip rules for inactive and malformed rows); `mapFromDevice`
+    resolves index → name, and a message whose index names nothing comes back
+    **cyclic** rather than carrying a dangling reference. Triggered with no
+    usable condition is an **Error** at both ends, never a silent fall back to
+    cyclic. `.ct3` schema 16 → **17**, and that bump is not optional either:
+    `"cyclic": false` has been a legal, inert value in every file since the
+    beginning, so an older Manager would read a Triggered section as an
+    ordinary message and send one that transmits continuously.
+    `EXPECTED_STORE_VERSION` moved 9 → **10** with the firmware.*

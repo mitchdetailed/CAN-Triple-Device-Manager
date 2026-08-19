@@ -11,7 +11,8 @@
 <p>A channel is a named value the device holds — "Engine RPM", "Coolant Temp" —
 with a data type, resolution, range and units. Channels are <i>written</i> by
 receive message rows and by calculations
-(<a href="math-channels.html">math</a>, <a href="conditions.html">conditions</a>,
+(<a href="math-channels.html">math</a>,
+<a href="conditions.html">User Conditions</a>,
 <a href="constants.html">constants</a>, <a href="tables.html">tables</a>,
 <a href="counters.html">counters</a>, <a href="timers.html">timers</a>,
 <a href="integrators.html">integrators</a>), and <i>read</i> by transmit message
@@ -255,7 +256,7 @@ Timeout <i>and</i> has "Default value on timeout" enabled (see
 <li><b>Source</b> names what generates the channel: the comms section that
 carries it ("CAN1 · Dash") or publishes its checksum to it ("CAN1 · Dash
 CRC8" — see <a href="communications.html#crc8">Transmit CRC8</a>), or Math,
-Condition, Counter, Timer, Integrator,
+User Condition, Counter, Timer, Integrator,
 Constant, Table 2x16, Table 8x8 — or "unused".</li>
 <li><b>New…</b> creates a channel; <b>Edit…</b> opens the selected one.
 Double-clicking a row also opens it.</li>
@@ -372,10 +373,37 @@ decodes the wrong bits without anything to object to. Changing an existing row
 keeps its values.</i></td></tr>
 <tr><td><b>DBC Type :</b></td><td><b>Unsigned</b>, <b>Signed</b> or
 <b>IEEE754</b> (32-bit float).</td></tr>
-<tr><td><b>DBC Factor :</b> / <b>DBC Offset :</b></td><td>The scaling:
-<b>Physical = raw × Factor + Offset</b>, previewed live under the
+<tr><td><b>Bit Resolution :</b></td><td>What one raw count is worth, in the
+channel's units. 0.1 means each count is a tenth. The same number reads both
+ways: a received count of 7 is 0.7, and transmitting 0.7 puts 7 on the
+wire.</td></tr>
+<tr><td><b>Offset :</b></td><td>Added to the scaled value to reach the
+channel's units — <b>-40</b> on a temperature whose counts start at -40 makes a
+raw 0 read as -40. Type the offset the channel HAS, in both directions; the
+device inverts it when transmitting. Previewed live under the
 fields.</td></tr>
+<tr><td><b>Clamp to Signal Limit :</b></td><td><b>Transmit rows
+only</b>, ticked by default. Ticked, a value too big for the field is sent as
+the biggest the field can hold — 256 into 8 bits sends <b>255</b>. Unticked,
+only the low bits are sent, so the count rolls over and 256 sends <b>0</b>.
+Under the fields the preview names the range the bits actually hold, in the
+channel's own units, so the choice is made against a number.</td></tr>
 </table>
+
+<p class="note">Unticked also stops the CHANNEL's range from clamping first.
+That is not a side effect, it is the point: the channel's Range Minimum…Maximum
+is applied before the field width is ever consulted, so a channel ranged 0…255
+would present 255 and an 8-bit field would have nothing left to roll over.
+Rolling over means the value goes out as it is and the field keeps its low
+bits.</p>
+
+<p>Roll-over is what a free-running counter, a wrapping angle, or a value
+feeding someone else's checksum wants — the count is <i>supposed</i> to return
+to zero. Clamping is what a measurement wants: a coolant temperature that
+briefly reads past the top of its field should report the top of its field, not
+suddenly report the bottom. Receive rows have no such choice and always clamp:
+a received field is as wide as it is, so nothing can overflow it, and the clamp
+on that side is the channel's declared range.</p>
 
 <p>The dialog validates the row as you type — a field that does not fit the frame
 blocks OK with the reason — and shows one informational line:</p>

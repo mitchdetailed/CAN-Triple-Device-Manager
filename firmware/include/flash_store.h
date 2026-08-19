@@ -172,7 +172,39 @@ extern "C" {
  * version instead.
  *
  * Same user-visible consequence as ever: one re-Send after the update. */
-#define FLASH_STORE_VERSION 9u
+/* v10: MAX_CONDITIONS 100 -> 250. Conditions are the FOURTH table in
+ * FLASH_TABLE_LIST, so the table grows 4,000 -> 10,000 bytes and every table
+ * after it — counters, timers, constants, relays, both lookup-table pairs,
+ * integrators, the script region and the CRC8 rules — shifts 6,000 bytes down.
+ * That is the v4 hazard exactly: a v9 image read under this build would be
+ * misread record-for-record before its CRC ever ran, so the version refuses it
+ * instead.
+ *
+ * Triggered transmit rides along and costs nothing. It claimed three of the four
+ * retired bytes inside CanMessageConfig in place, so item_size stays 14 and no
+ * offset moves on its account — by itself it would not have needed a bump at
+ * all. Shipping the two together means the field pays the re-Send once.
+ *
+ * Same user-visible consequence as ever: one re-Send after the update. */
+/* v11: User Conditions grew a second expression. ConditionConfig goes 35 -> 56
+ * bytes to carry a Reset alongside the Set, plus the mode, the two comparison
+ * counts, the two joiner sets and the Momentary latch frequency; ConditionTerm
+ * goes 10 -> 8 because input_b became a union, which is what kept the record at
+ * 56 rather than 72 and kept MAX_CONDITIONS at 250.
+ *
+ * Both hazards apply at once, so this is the least ambiguous bump in the list.
+ * The record SIZE changed, so imageCrc() hashes a different span per record
+ * (the v2 rule); and conditions are the fourth table, so every table after them
+ * shifts (the v4 rule). A v10 image would be misread twice over.
+ *
+ * v10 was BUILT but never released — it exists only on bench hardware — which
+ * is why this is a bump rather than a redefinition of 10. Reusing the number
+ * would leave those units silently misreading a stored configuration whose
+ * layout no longer matches, and "nothing shipped" is not the same as "nothing
+ * exists".
+ *
+ * Same user-visible consequence as ever: one re-Send after the update. */
+#define FLASH_STORE_VERSION 11u
 
 /* Config tables, in the order they are laid out in flash. Matches the engine's
  * EngineTable enum values (0..14) — 12 became 13 when the single 4x4 table was

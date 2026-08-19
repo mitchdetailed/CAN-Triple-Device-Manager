@@ -519,7 +519,7 @@ int dbcTypeFrom(lua_State *L, int idx, const char *key, int fallback)
 
 void pushRow(lua_State *L, const CommsChannelRow &r)
 {
-    lua_createtable(L, 0, 7);
+    lua_createtable(L, 0, 8);
     setStr(L, "channel", r.channelName);
     setInt(L, "startBit", r.startBit);
     setInt(L, "bitLength", r.bitLength);
@@ -531,6 +531,12 @@ void pushRow(lua_State *L, const CommsChannelRow &r)
     setNum(L, "factor", r.dbcFactor);
     setNum(L, "offset", r.dbcOffset);
     setNum(L, "default", r.defaultValue);
+    // Emitted even though it is usually true, and READ back below, because a
+    // script's natural edit is a read-modify-write: ct.setSection(b, n, s)
+    // after changing one field of what ct.section(b, n) returned. A key this
+    // side does not hand out is a key the write cannot preserve, and the row
+    // would come back clamping — silently, on a live bus.
+    setBool(L, "clampToRange", r.clampToRange);
 }
 
 CommsChannelRow readRow(lua_State *L, int idx)
@@ -544,6 +550,10 @@ CommsChannelRow readRow(lua_State *L, int idx)
     r.dbcFactor = fieldNumber(L, idx, "factor", r.dbcFactor);
     r.dbcOffset = fieldNumber(L, idx, "offset", r.dbcOffset);
     r.defaultValue = fieldNumber(L, idx, "default", r.defaultValue);
+    // Absent falls back to the struct's default of true, which is both the old
+    // behaviour and the right answer for a row a script builds without an
+    // opinion. See pushRow for why the read half alone is not enough.
+    r.clampToRange = fieldBool(L, idx, "clampToRange", r.clampToRange);
     if (r.bitLength < 1 || r.bitLength > 64) {
         luaL_error(L, "bitLength must be 1..64 (row for '%s')",
                    r.channelName.toUtf8().constData());
@@ -612,6 +622,9 @@ void pushSectionScalars(lua_State *L, const CommsSection &s)
     if (s.isTransmit()) {
         setBool(L, "cyclic", s.cyclic);
         setInt(L, "rateHz", s.transmitRateHz);
+        // Named by the condition's output channel, like everything else a
+        // section references — see CommsSection::transmitCondition.
+        setStr(L, "transmitCondition", s.transmitCondition);
     }
     if (s.isReceive()) {
         setInt(L, "timeoutMs", s.receiveTimeoutMs);
@@ -721,6 +734,7 @@ void applySectionFields(lua_State *L, int idx, CommsSection &s)
     }
     s.cyclic = fieldBool(L, idx, "cyclic", s.cyclic);
     s.transmitRateHz = fieldInt(L, idx, "rateHz", s.transmitRateHz);
+    s.transmitCondition = fieldString(L, idx, "transmitCondition", s.transmitCondition);
     s.receiveTimeoutMs = fieldInt(L, idx, "timeoutMs", s.receiveTimeoutMs);
     // `protection` is deliberately NOT settable from a script, IN EITHER
     // DIRECTION, and it is refused loudly rather than ignored — a script that
@@ -1013,9 +1027,18 @@ int l_conditions(lua_State *L)
     const QList<ConditionRow> &rows = cfg(L)->conditionRows;
     lua_createtable(L, rows.size(), 0);
     for (int i = 0; i < rows.size(); ++i) {
-        lua_createtable(L, 0, 3);
+        lua_createtable(L, 0, 5);
         setStr(L, "output", rows[i].outputChannel);
         setBool(L, "active", rows[i].active);
+        setStr(L, "mode", rows[i].mode == ConditionMode::Momentary
+                              ? QStringLiteral("momentary")
+                              : QStringLiteral("setreset"));
+        // Only meaningful in Momentary, but reported either way: a script
+        // filtering on mode should not have to guess whether the field exists.
+        setInt(L, "latchHz", rows[i].latchHz);
+        // Both expressions' channel references, flattened. A script asking what
+        // a condition reads wants everything it reads, and which side a name
+        // appears on is not a question this read-only view can usefully answer.
         const QStringList inputs = rows[i].inputChannels();
         lua_createtable(L, inputs.size(), 0);
         for (int j = 0; j < inputs.size(); ++j) {

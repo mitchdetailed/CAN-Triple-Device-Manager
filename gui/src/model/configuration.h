@@ -440,6 +440,26 @@ public:
     // channelRenamed afterwards — see the signal for who needs it and why.
     int renameChannelReferences(const QString &oldName, const QString &newName);
 
+    // Force every active User Condition's output channel to Boolean, and return
+    // how many catalogue entries it had to change.
+    //
+    // A condition writes 1 or 0 and has never written anything else — the engine
+    // assigns the literals — but the channel it writes into was an ordinary user
+    // channel that could be declared float, s32, anything, or (very commonly, in
+    // files written before channels had types at all) nothing. Declaring it
+    // boolean is therefore not a restriction on what conditions can do; it is
+    // the document finally saying what was already true.
+    //
+    // It rewrites minValue, maxValue and decimalPlaces along with dataType,
+    // because the four together are one statement. Setting dataType alone would
+    // leave a channel the Channel Editor immediately flags as a type that cannot
+    // hold its own range, and would still send -1e9..1e9 as the device's clamp
+    // for a value that is only ever 0 or 1.
+    //
+    // Idempotent and safe to call as often as convenient — load, Get, and every
+    // close of the User Conditions editor all do.
+    int forceConditionOutputsBoolean();
+
     // Is any section on any bus concealed from THIS viewer? The honest question
     // for anything that DESCRIBES the document's state — the status line's
     // "concealed" / "revealed", and the tests. Not the same as

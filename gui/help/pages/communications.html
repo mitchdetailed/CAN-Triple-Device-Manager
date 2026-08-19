@@ -335,7 +335,15 @@ messages only — a transmit message is the frame it composes, while a receive
 message's length comes from the sender. Classic frames are 0–8 bytes; FD frames
 also allow 12, 16, 20, 24, 32, 48 and 64.</td></tr>
 <tr><td><b>Transmission :</b></td><td><b>Cyclic</b> or <b>Triggered</b>. Transmit
-messages only.</td></tr>
+messages only. <b>Cyclic</b> transmits every period, as it always has;
+<b>Triggered</b> transmits only while a chosen
+<a href="conditions.html">User Condition</a> is true — see
+<a href="#triggered">below</a>.</td></tr>
+<tr><td><b>Transmit Condition :</b></td><td>Appears only while
+<b>Triggered</b> is selected. It lists the document's active
+<a href="conditions.html">User Conditions</a>, and only a User Condition can be
+chosen — no other channel is offered, however boolean it happens to
+be.</td></tr>
 <tr><td><b>Transmit Rate :</b></td><td>1, 2, 5, 10, 20, 50, 100 or 200 Hz. A
 rate read back from the device that falls outside the presets is inserted into
 the list rather than snapped to the nearest. When each transmission actually
@@ -352,6 +360,104 @@ with a checkbox per bus — forwards this one message's frames to other buses. T
 source bus is never routed back and stays disabled. For forwarding whole ranges
 of IDs by mask, use a <a href="relays.html">Message Relay</a> instead; in relay
 mode this group is replaced by the <b>Message Relay</b> group.</p>
+
+<h3 id="triggered">Triggered transmit</h3>
+
+<p><b>Cyclic</b> transmits every period, which is what a transmit message has
+always done. <b>Triggered</b> transmits only while the chosen
+<a href="conditions.html">User Condition</a> is true — the rest of the time the
+message is silent, and nothing else about it changes.</p>
+
+<p><b>Transmit Condition :</b> appears only while Triggered is selected, and it
+lists the document's active <a href="conditions.html">User Conditions</a>. Only
+a User Condition can be chosen; the ordinary channel picker is not offered
+here, so no other channel can be named however boolean its values happen to be.
+The condition is identified by its output channel rather than by its row
+number,
+which is what keeps the binding pointing at the same condition when rows above
+it are added, removed or reordered — and renaming that channel carries the
+binding along with it.</p>
+
+<p>The control is hidden outright on a Cyclic message rather than greyed out:
+it has no meaning without a trigger, and a disabled control only invites you to
+wonder what reaching it would do.</p>
+
+<p><b>Sending once per event, rather than once per period, is done in the
+condition.</b> Triggered transmits for as long as its condition holds, so a
+condition that comes up and stays up produces a frame every period until it
+drops. When what you want is <em>one</em> frame — a reply to a request, a
+one-shot announcement — the place to say so is the
+<a href="conditions.html">User Condition</a> itself, which has two shapes that
+do it:</p>
+
+<ul>
+<li>A <b>Set / Reset</b> condition <b>set on Message Received</b> and <b>reset
+on Message Transmitted</b>. The condition comes up when the request arrives,
+this message answers it, and the transmission itself puts the condition away
+again. One reply per request — see
+<a href="conditions.html#messages">the message operators</a>. The reset lands on
+the next calculation pass rather than the instant the frame leaves, so at
+100&nbsp;Hz or 200&nbsp;Hz the message can come due again before it arrives and
+send a second frame; at every slower rate the reset is there first.</li>
+<li>A <b>Momentary</b> condition, whose output pulses for one period of its
+Latch Frequency on each rising edge and then drops on its own.</li>
+</ul>
+
+<p>Writing it in the condition rather than beside the message is the better
+answer for three reasons: it reads where you can see it, next to the thing it
+resets; the reset can name a <em>different</em> message than the one it gates,
+which a per-message tick box could never do; and nothing reaches sideways from a
+transmit message to rewrite a calculation's output.</p>
+
+<p class="note">A tick box on this tab, <b>Reset User Condition once
+Triggered</b>, used to do the first of those by force — it set the named
+condition's output channel back to 0 after each frame. It is gone, and it never
+shipped, so no configuration in the field carries it. With it gone, two messages
+triggered on one User Condition simply both transmit while it holds, which is
+what sharing a condition ought to mean and needs no warning of its own.</p>
+
+<p><b>When the frame actually goes out</b> is the part worth reading twice. The
+device tests the condition in its <b>5&nbsp;ms transmit slot</b>
+(200&nbsp;Hz), whatever the message's own Transmit Rate is, so a condition that
+becomes true is acted on within 5&nbsp;ms even for a 1&nbsp;Hz message. A slow
+message is not a slow trigger.</p>
+
+<p>The message then transmits at its configured <b>Transmit Rate</b>, and the
+interval is measured <b>from the moment the condition became true</b> — not
+from a free-running clock the message was already keeping. A 1&nbsp;Hz message
+whose condition becomes true at 1.2&nbsp;s transmits at 1.2&nbsp;s, 2.2&nbsp;s,
+3.2&nbsp;s and so on for as long as the condition holds. It does <em>not</em>
+transmit at 2.0&nbsp;s and 3.0&nbsp;s, and it does not sit out the remaining
+0.8&nbsp;s waiting for a tick that was already on its way.</p>
+
+<p>Dropping the condition stops transmission immediately, mid-period if that is
+where it falls — there is no closing frame to round the period off. Arming it
+again starts a fresh interval with an immediate frame, exactly as the first
+arming did.</p>
+
+<p class="note">A Triggered message with <b>no User Condition selected</b>, or
+naming one the document no longer has — deleted since, or since made inactive —
+is an <b>error</b>: Check Channels reports it and Send is blocked until it is
+fixed. It is deliberately not treated as Cyclic. Falling back that way would
+turn a message configured to
+speak only on a condition into one that never stops — frames on somebody's bus
+that nobody asked for, from a configuration that looked like it mapped cleanly.
+A condition that has gone missing is kept as a selectable entry in the combo
+and marked "(missing)", so what the section names stays visible rather than
+being quietly rewritten to some other trigger the next time the message is
+opened.</p>
+
+<p>The Config Summary prints such a message as "triggered on <i>channel</i>". A
+cyclic message says nothing there, because cyclic is what a transmit message has
+always been and every line would otherwise carry a word meaning "normal". See
+<a href="validation-report.html">Validation &amp; the Config Summary</a>.</p>
+
+<p class="note">Earlier releases stored <b>Transmission</b> in the file and then
+ignored it: a message set to Triggered transmitted cyclically like any other.
+That is why a file using a transmit condition is refused by an older build of
+the program rather than opened — the older build would read the section as a
+perfectly ordinary message, find nothing missing, and send one that transmits
+continuously where you had configured it to transmit only on a condition.</p>
 
 <h3>Channels tab</h3>
 
@@ -374,6 +480,14 @@ and <b>Clear</b> empties a slot. A received frame decodes an identifier's
 channels only while the frame's selector window at that byte offset matches
 (selector &amp; mask) == (ID &amp; mask). The channel list and frame map show one
 identifier at a time — variants may legitimately reuse the same bits.</p>
+
+<p><b>An identifier with no channels is still transmitted.</b> Give a slot an
+Offset, ID and ID Mask and leave it empty, and the device sends that variant
+each period carrying its selector over an all-zero payload — which is the whole
+message for a request or a ping frame, where the ID byte IS the content. Both
+cadences honour it: Batch sends it alongside the others, and Sequential gives it
+its turn in the rotation. Only slots you have actually set count; an untouched
+slot sends nothing.</p>
 
 <h3>The frame layout map</h3>
 
@@ -518,12 +632,36 @@ value would never be seen — the composer re-stamps on every transmit.</p>
 
 <h2>Scaling</h2>
 
-<p>Channel rows are DBC-native: <b>physical = raw × DBC Factor + DBC Offset</b>,
-stored on the device as two float32 values, so a Get Configuration reconstructs
-each row verbatim. The channel's range becomes the device's clamp — every
-reading is clamped to the channel's Range Minimum…Maximum. See
+<p>Channel rows are DBC-native: <b>physical = raw × Bit Resolution +
+Offset</b>, stored on the device as two float32 values, so a Get Configuration
+reconstructs each row verbatim. The channel's range becomes the device's clamp —
+every reading is clamped to the channel's Range Minimum…Maximum. See
 <a href="channels.html">Channels</a> for how storage types and ranges are
 chosen.</p>
+
+<p><b>You enter the same two numbers whichever way the message goes</b>, and the
+device inverts them for you when transmitting. A row with Bit Resolution 0.1 and
+Offset -40 reads a raw 7 as -39.3 on receive; transmitting -39.3 puts 7 back on
+the wire. That is what makes a pair of CAN Triples talking to each other work
+from one set of numbers, and it is why a transmit row is not entered with the
+signs reversed.</p>
+
+<p>A transmit row also chooses what happens when the value will not fit:
+<b>Clamp to Signal Limit</b>, ticked by default, sends the nearest value the
+signal's bits can carry, while unticking it sends the low bits and
+lets the count roll over. 256 into an 8-bit field is 255 ticked and 0 unticked.
+Unticking also skips the channel's own range clamp, which would otherwise
+decide the answer before the field width came into it. See
+<a href="channels.html">Channels</a> for the full note. The Config Summary marks
+such a row <b>rolls over</b>, and so does the channel list in the section
+editor.</p>
+
+<p class="note">The consequence worth knowing: on a transmit row the offset is
+SUBTRACTED on the way out, because it was added on the way in. A channel sitting
+at 0 with an Offset of 1 has nothing to send — raw would be -1, which an unsigned
+field cannot carry, so it pins to 0. If a transmitted value comes out flat at
+zero, check whether the channel's value is below the lowest the row can
+represent, which is the Offset itself.</p>
 
 <p class="note">OK validates the section before closing: the base address must be
 valid hex within its 11/29-bit range, the message length must fit the frame kind,
@@ -537,6 +675,7 @@ Config Summary</a>.</p>
 <p>See also: <a href="channels.html">Channels</a> ·
 <a href="dbc-import.html">DBC Import</a> ·
 <a href="relays.html">Message Relays</a> ·
+<a href="conditions.html">User Conditions</a> ·
 <a href="monitor.html">Monitoring Live Values</a> ·
 <a href="online.html">Online: Send, Get &amp; Flash</a></p>
 

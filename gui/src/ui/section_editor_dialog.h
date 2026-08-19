@@ -85,6 +85,10 @@ private:
     // protected?", so the two passes cannot disagree.
     void applyDeviceKindEnablement(bool editable);
     void updateTxModeControls(); // show Transmit Mode only for compound transmit
+    // Show the Transmit Condition row only for a Triggered transmit message. A
+    // separate pass from updateTxModeControls, which despite its name governs
+    // the COMPOUND cadence combo and nothing to do with Cyclic/Triggered.
+    void updateTriggerControls();
     void updateRelayControls();  // show relay group only for Message Relay
     void onAddressEdited();
     void reformatAddress(); // 0x%03X standard / 0x%08X extended
@@ -256,6 +260,8 @@ private:
     QRadioButton *m_cyclicRadio;
     QRadioButton *m_triggeredRadio;
     QComboBox *m_rateCombo;
+    QLabel *m_txConditionLabel;        // Triggered transmit: the gating User Condition
+    QComboBox *m_txConditionCombo;     // userData is the condition's output channel name
     QLabel *m_txModeLabel;   // compound transmit cadence (Batch / Sequential)
     QComboBox *m_txModeCombo;
     QGroupBox *m_routeGroup;

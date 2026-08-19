@@ -12,7 +12,7 @@ as a function of two channels, 64 cells.</td></tr>
 
 > **Note:** The 8x8 replaced the earlier **4x4** table, which held 4 sites per axis and 16 cells. Configurations saved with 4x4 tables still open: each one loads into the top-left of an 8x8, keeping its sites, its cells and its interpolation modes, and simply leaves the extra sites unused. Nothing needs re-entering, and re-saving writes the file in the new form.
 
-Tables are evaluated right after [constants](constants.md) in every pass, before [math](math-channels.md) and [conditions](conditions.md), so a table output can feed a math channel or a condition in the same pass. The output is a generated channel typed like a [constant](constants.md) (name, data type, decimal places) and registered in the document, so it can be picked anywhere a channel can.
+Tables are evaluated right after [constants](constants.md) in every pass, before [math](math-channels.md) and [User Conditions](conditions.md), so a table output can feed a math channel or a condition in the same pass. The output is a generated channel typed like a [constant](constants.md) (name, data type, decimal places) and registered in the document, so it can be picked anywhere a channel can.
 
 ## The Tables dialog
 
@@ -77,4 +77,4 @@ In an 8x8 table the two axes may mix modes freely; the output blends bilinearly 
 
 ## See also
 
-[Math Channels](math-channels.md) · [Conditions](conditions.md) · [Constants](constants.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md)
+[Math Channels](math-channels.md) · [User Conditions](conditions.md) · [Constants](constants.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md)

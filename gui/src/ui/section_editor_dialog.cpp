@@ -154,19 +154,28 @@ private:
 // is display only: a row is identified by its POSITION (currentRow() indexes
 // activeRowList()), never by an item's text, so the decorated string has nowhere
 // to leak into. row.channelName remains the identity.
-QString rowSummary(const CommsChannelRow &row, const ChannelCatalog &catalog)
+QString rowSummary(const CommsChannelRow &row, const ChannelCatalog &catalog, bool receive)
 {
     static const char *const kType[] = {"unsigned", "signed", "ieee754"};
     const int t = qBound(0, row.dbcType, 2);
     const int len = row.dbcType == int(DbcType::IEEE754) ? 32 : row.bitLength;
-    return QObject::tr("%1   (bit %2, %3-bit %4, ×%5 %6%7)")
+    // The roll-over note rides inside the bracket only where it does something.
+    // `receive` is passed rather than inferred because a hand-edited .ct3 CAN
+    // put the flag on a receive row, and the device ignores it there — the
+    // Config Summary withholds it on the same test, and two views of one row
+    // disagreeing is worse than either answer alone. Validation is what tells
+    // the user about the contradiction.
+    const QString wrap =
+        (receive || row.clampToRange) ? QString() : QObject::tr(", rolls over");
+    return QObject::tr("%1   (bit %2, %3-bit %4, ×%5 %6%7%8)")
         .arg(catalog.labelFor(row.channelName))
         .arg(row.startBit)
         .arg(len)
         .arg(QLatin1String(kType[t]))
         .arg(row.dbcFactor)
         .arg(row.dbcOffset >= 0 ? QStringLiteral("+") : QString())
-        .arg(row.dbcOffset);
+        .arg(row.dbcOffset)
+        .arg(wrap);
 }
 
 } // namespace
@@ -516,6 +525,45 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
     canGrid->addWidget(m_rateCombo, r, 1);
     ++r;
 
+    // Triggered transmit. A combo listing the document's User Conditions rather
+    // than the channel picker, because the requirement is literally "only User
+    // Conditions": the picker offers the whole catalogue by design and has no
+    // filter, and adding one would put a New Channel… button in front of a
+    // choice where creating a channel means nothing.
+    //
+    // The value stored is the condition's OUTPUT CHANNEL — see CommsSection —
+    // so the combo's userData is a channel name, not a row index.
+    m_txConditionLabel = new QLabel(tr("Transmit Condition :"));
+    canGrid->addWidget(m_txConditionLabel, r, 0);
+    m_txConditionCombo = new QComboBox;
+    for (int i = 0; i < m_config->conditionRows.size(); ++i) {
+        const ct::ConditionRow &c = m_config->conditionRows[i];
+        if (!c.active || c.outputChannel.isEmpty())
+            continue;
+        m_txConditionCombo->addItem(tr("%1 — %2").arg(i + 1).arg(
+                                        m_config->catalog().labelFor(c.outputChannel)),
+                                    c.outputChannel);
+    }
+    // A condition this document no longer has — deleted since, or a Get from a
+    // device whose conditions this build could not name. Kept as a selectable
+    // entry rather than silently dropped: losing it here would quietly rewrite
+    // the section to a different trigger the next time anyone opened it, and
+    // validation is where a dangling reference should be reported.
+    if (!m_section.transmitCondition.isEmpty()
+        && m_txConditionCombo->findData(m_section.transmitCondition) < 0)
+        m_txConditionCombo->addItem(tr("%1 (missing)").arg(m_section.transmitCondition),
+                                    m_section.transmitCondition);
+    if (m_txConditionCombo->count() == 0)
+        m_txConditionCombo->addItem(tr("(no User Conditions defined)"), QString());
+    m_txConditionCombo->setCurrentIndex(
+        qMax(0, m_txConditionCombo->findData(m_section.transmitCondition)));
+    canGrid->addWidget(m_txConditionCombo, r, 1, 1, 3);
+    ++r;
+
+
+    connect(m_triggeredRadio, &QRadioButton::toggled, this,
+            &SectionEditorDialog::updateTriggerControls);
+
     // Compound transmit cadence: Batch (all variants each period) vs Sequential
     // (one variant per period, round-robin). Shown only for compound transmit.
     m_txModeLabel = new QLabel(tr("Transmit Mode :"));
@@ -631,6 +679,12 @@ void SectionEditorDialog::applyDeviceKindEnablement(bool editable)
     m_cyclicRadio->setEnabled(editable && transmit);
     m_triggeredRadio->setEnabled(editable && transmit);
     m_rateCombo->setEnabled(editable && transmit);
+    // Enabled by message kind and tier here; SHOWN or hidden by
+    // updateTriggerControls according to Cyclic/Triggered. Both passes have to
+    // name these, or a tier dropping back to None re-enables a control the
+    // message kind never allowed.
+    m_txConditionLabel->setEnabled(editable && transmit);
+    m_txConditionCombo->setEnabled(editable && transmit);
     m_timeoutSpin->setEnabled(editable && !transmit && !relay);
     m_defaultTimeoutCheck->setEnabled(editable && !transmit && !relay);
     m_alignmentCombo->setEnabled(editable && !relay);
@@ -680,6 +734,7 @@ void SectionEditorDialog::applyDeviceKindEnablement(bool editable)
 void SectionEditorDialog::onDeviceChanged()
 {
     updateTxModeControls();
+    updateTriggerControls();
     updateRelayControls();
     // Receive and transmit lay the frame out differently (see refreshBitTable),
     // so switching between them redraws the map. Null on the first call: the
@@ -701,6 +756,21 @@ void SectionEditorDialog::updateRelayControls()
     // only one applies at a time, so hide gateway routing in relay mode.
     if (m_routeGroup)
         m_routeGroup->setVisible(!relay);
+}
+
+void SectionEditorDialog::updateTriggerControls()
+{
+    const auto device = SectionDevice(m_deviceCombo->currentData().toInt());
+    const bool transmit =
+        device == SectionDevice::TransmitMessage || device == SectionDevice::TransmitCrc8;
+    // Hidden rather than merely disabled on a Cyclic message: the two settings
+    // have no meaning at all without a trigger, and a greyed-out control invites
+    // the reader to wonder what would happen if they could reach it.
+    const bool show = transmit && m_triggeredRadio && m_triggeredRadio->isChecked();
+    if (m_txConditionLabel)
+        m_txConditionLabel->setVisible(show);
+    if (m_txConditionCombo)
+        m_txConditionCombo->setVisible(show);
 }
 
 void SectionEditorDialog::updateTxModeControls()
@@ -1227,6 +1297,11 @@ void SectionEditorDialog::syncParametersFromUi()
     if (newRate != m_section.transmitRateHz)
         m_section.transmitPeriodMs = 0;
     m_section.transmitRateHz = newRate;
+    // Read back whatever the combo holds, even on a Cyclic message where the row
+    // is hidden. Clearing it here would throw away the user's choice the moment
+    // they flipped to Cyclic and back, and mapToDevice ignores the field unless
+    // the section is Triggered anyway.
+    m_section.transmitCondition = m_txConditionCombo->currentData().toString();
     m_section.routeEnable = m_routeEnableCheck->isChecked();
     m_section.compound = m_compoundRadio->isChecked();
     m_section.compoundTxMode = CompoundTxMode(m_txModeCombo->currentData().toInt());
@@ -1894,9 +1969,10 @@ void SectionEditorDialog::rebuildChannelList()
     // uncoloured — ColorItemDelegate passes anything without a background
     // straight through to the stock painter.
     const auto addRows = [this](const QList<CommsChannelRow> &rows) {
+        const bool receive = m_section.isReceive();
         for (int i = 0; i < rows.size(); ++i) {
-            auto *item =
-                new QListWidgetItem(rowSummary(rows[i], m_config->catalog()), m_channelList);
+            auto *item = new QListWidgetItem(rowSummary(rows[i], m_config->catalog(), receive),
+                                             m_channelList);
             const QColor fill = BitLayoutTable::signalColour(i, palette());
             item->setBackground(fill);
             item->setForeground(BitLayoutTable::signalTextColour(fill));

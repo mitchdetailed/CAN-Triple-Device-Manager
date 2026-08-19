@@ -5,6 +5,8 @@
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
+
+#include <cmath>
 #include <QElapsedTimer>
 
 #include <cstdio>
@@ -46,13 +48,14 @@ static int failures = 0;
 // re-reading something this build just WROTE passes it: the pre-14 legacy
 // protection keys migrate only when the file actually predates 14, so handing
 // such a call a stale number would ratchet a Read Only section into Hidden.
-static constexpr int kCurrentSchemaVersion = 16;
+static constexpr int kCurrentSchemaVersion = 19;
 // A .ct3 fileVersion this build has never heard of, for checking that a file
 // from a NEWER release is refused rather than half-read. DERIVED, not typed:
 // it was the literal 14 until 2.3.0, the 13 -> 14 schema bump caught it up, and
 // the test then asserted that the CURRENT version is rejected — precisely the
 // failure the previous comment predicted here and did not prevent.
 static constexpr int kFutureSchemaProbe = kCurrentSchemaVersion + 1;
+
 
 #define CHECK(cond)                                                                              \
     do {                                                                                         \
@@ -61,6 +64,14 @@ static constexpr int kFutureSchemaProbe = kCurrentSchemaVersion + 1;
             ++failures;                                                                          \
         }                                                                                        \
     } while (0)
+
+// Give a condition the Reset that makes it behave like the level these tests
+// were written against: the exact inverse of its Set, which is also what the
+// migration writes into every configuration loaded from an older file.
+static void giveInverseReset(ct::ConditionRow &c)
+{
+    CHECK(ct::invertConditionExpr(c.setTerms, c.setJoiners, &c.resetTerms, &c.resetJoiners));
+}
 
 using namespace ct;
 
@@ -1666,7 +1677,12 @@ SIG_VALTYPE_ 1600 BoostF : 1;
                                  QStringLiteral("OR"))
               == QStringLiteral("(A OR B) AND C"));
 
-        // A pre-v14 file holds one comparison inline on the condition object.
+        // A pre-modes file holds one expression and no mode, and MIGRATES to a
+        // Set/Reset whose Reset is the logical inverse of its Set. That pairing
+        // is what makes the migrated condition behave exactly like the level it
+        // used to be — it sets whenever the expression holds and resets whenever
+        // it does not — and testMigratedResetIsTheExactInverse proves the
+        // inversion itself over every operator and joiner combination.
         QJsonObject legacy;
         legacy["aChannel"] = QStringLiteral("Engine RPM");
         legacy["op"] = int(COND_OP_GT);
@@ -1675,14 +1691,20 @@ SIG_VALTYPE_ 1600 BoostF : 1;
         legacy["outputChannel"] = QStringLiteral("RPM High");
         legacy["active"] = true;
         const ConditionRow fromOld = ConditionRow::fromJson(legacy);
-        CHECK(fromOld.terms.size() == 1);
-        CHECK(fromOld.joiners.isEmpty());
-        CHECK(fromOld.terms[0].aChannel == QStringLiteral("Engine RPM"));
-        CHECK(fromOld.terms[0].op == int(COND_OP_GT));
-        CHECK(qFuzzyCompare(fromOld.terms[0].bConst, 5000.0));
+        CHECK(fromOld.mode == ConditionMode::SetReset);
+        CHECK(fromOld.setTerms.size() == 1);
+        CHECK(fromOld.setJoiners.isEmpty());
+        CHECK(fromOld.setTerms[0].aChannel == QStringLiteral("Engine RPM"));
+        CHECK(fromOld.setTerms[0].op == int(COND_OP_GT));
+        CHECK(qFuzzyCompare(fromOld.setTerms[0].bConst, 5000.0));
+        // > inverts to <=, on the same operands.
+        CHECK(fromOld.resetTerms.size() == 1);
+        CHECK(fromOld.resetTerms[0].op == int(COND_OP_LTE));
+        CHECK(fromOld.resetTerms[0].aChannel == QStringLiteral("Engine RPM"));
+        CHECK(qFuzzyCompare(fromOld.resetTerms[0].bConst, 5000.0));
         CHECK(fromOld.outputChannel == QStringLiteral("RPM High"));
 
-        // A v14 row round-trips through JSON with its joiners intact.
+        // A modes row round-trips through JSON with both expressions intact.
         ConditionRow multi;
         ConditionTermRow t1, t2, t3;
         t1.aChannel = QStringLiteral("RPM");
@@ -1694,32 +1716,55 @@ SIG_VALTYPE_ 1600 BoostF : 1;
         t3.aChannel = QStringLiteral("TPS");
         t3.op = int(COND_OP_LT);
         t3.bConst = 1;
-        multi.terms = {t1, t2, t3};
-        multi.joiners = {int(COND_JOIN_AND), int(COND_JOIN_OR)};
+        multi.setTerms = {t1, t2, t3};
+        multi.setJoiners = {int(COND_JOIN_AND), int(COND_JOIN_OR)};
+        multi.resetTerms = {t3};
+        multi.resetJoiners = {};
         multi.outputChannel = QStringLiteral("InBand");
         const ConditionRow back = ConditionRow::fromJson(multi.toJson());
-        CHECK(back.terms.size() == 3);
-        CHECK(back.joiners == multi.joiners);
-        CHECK(back.terms[2].aChannel == QStringLiteral("TPS"));
+        CHECK(back.mode == ConditionMode::SetReset);
+        CHECK(back.setTerms.size() == 3);
+        CHECK(back.setJoiners == multi.setJoiners);
+        CHECK(back.setTerms[2].aChannel == QStringLiteral("TPS"));
+        CHECK(back.resetTerms.size() == 1);
+        CHECK(back.resetTerms[0].aChannel == QStringLiteral("TPS"));
         CHECK(back.inputChannels().contains(QStringLiteral("TPS")));
+
+        // A Momentary carries its latch frequency, clamped to what the device
+        // can spend against its 10 ms pass.
+        ConditionRow mom;
+        mom.mode = ConditionMode::Momentary;
+        mom.latchHz = 20;
+        mom.setTerms = {t1};
+        mom.outputChannel = QStringLiteral("Pulse");
+        const ConditionRow momBack = ConditionRow::fromJson(mom.toJson());
+        CHECK(momBack.mode == ConditionMode::Momentary);
+        CHECK(momBack.latchHz == 20);
+        QJsonObject silly = mom.toJson();
+        silly["latchHz"] = 5000;
+        CHECK(ConditionRow::fromJson(silly).latchHz == int(COND_LATCH_MAX_HZ));
 
         // The joiner-per-gap invariant is repaired on load, so a hand-edited or
         // truncated file can't produce an expression the mapper can't emit.
         QJsonObject ragged = multi.toJson();
-        ragged["joiners"] = QJsonArray{}; // gaps with no joiners
+        QJsonObject raggedSet = ragged["set"].toObject();
+        raggedSet["joiners"] = QJsonArray{}; // gaps with no joiners
+        ragged["set"] = raggedSet;
         const ConditionRow fixed = ConditionRow::fromJson(ragged);
-        CHECK(fixed.terms.size() == 3);
-        CHECK(fixed.joiners.size() == 2);
-        CHECK(fixed.joiners[0] == int(COND_JOIN_AND)); // defaults to AND
+        CHECK(fixed.setTerms.size() == 3);
+        CHECK(fixed.setJoiners.size() == 2);
+        CHECK(fixed.setJoiners[0] == int(COND_JOIN_AND)); // defaults to AND
 
-        // Renaming a channel reaches every comparison, not just the first.
+        // Renaming a channel reaches every comparison of BOTH expressions, not
+        // just the first, and not just the Set.
         Configuration rn;
         rn.conditionRows.append(multi);
         rn.renameChannelReferences(QStringLiteral("TPS"), QStringLiteral("Throttle"));
-        CHECK(rn.conditionRows[0].terms[2].aChannel == QStringLiteral("Throttle"));
+        CHECK(rn.conditionRows[0].setTerms[2].aChannel == QStringLiteral("Throttle"));
+        CHECK(rn.conditionRows[0].resetTerms[0].aChannel == QStringLiteral("Throttle"));
         rn.renameChannelReferences(QStringLiteral("RPM"), QStringLiteral("EngineSpeed"));
-        CHECK(rn.conditionRows[0].terms[0].aChannel == QStringLiteral("EngineSpeed"));
-        CHECK(rn.conditionRows[0].terms[1].aChannel == QStringLiteral("EngineSpeed"));
+        CHECK(rn.conditionRows[0].setTerms[0].aChannel == QStringLiteral("EngineSpeed"));
+        CHECK(rn.conditionRows[0].setTerms[1].aChannel == QStringLiteral("EngineSpeed"));
     }
 
     // --- Storage type is sized from the PHYSICAL range, not the bit width ---
@@ -2212,6 +2257,293 @@ SIG_VALTYPE_ 1600 BoostF : 1;
     }
 }
 
+// The clamp/roll-over choice, all the way out and all the way back.
+//
+// Four journeys, because the flag has four chances to be dropped: the .ct3, the
+// device record, the read back from a device, and a file written before the
+// option existed.
+// An identifier the user filled in but gave no channels to must reach the
+// device, survive a Get, and come back still empty.
+static void testChannellessIdentifierStillTransmits()
+{
+    Configuration cfg;
+    cfg.bus[0].enabled = true;
+    Channel ch;
+    ch.name = QStringLiteral("Payload Byte");
+    ch.dataType = QStringLiteral("u8");
+    ch.userDefined = true;
+    ch.minValue = 0;
+    ch.maxValue = 255;
+    cfg.catalog().addOrUpdateUserChannel(ch);
+
+    CommsSection tx;
+    tx.device = SectionDevice::TransmitMessage;
+    tx.name = QStringLiteral("Request Frames");
+    tx.baseAddress = 0x400;
+    tx.messageLengthBytes = 8;
+    tx.transmitRateHz = 10;
+    tx.compound = true;
+    const auto ident = [](int id, bool withRow, const QString &chName) {
+        CompoundIdentifier ci;
+        ci.byteOffset = 0;
+        ci.id = quint32(id);
+        ci.idMask = 0xFF;
+        ci.configured = true;
+        if (withRow) {
+            CommsChannelRow r;
+            r.channelName = chName;
+            r.startBit = 8;
+            r.bitLength = 8;
+            r.dbcType = int(DbcType::Unsigned);
+            r.dbcFactor = 1.0;
+            ci.rows.append(r);
+        }
+        return ci;
+    };
+    tx.identifiers.append(ident(1, false, {}));            // selector only
+    tx.identifiers.append(ident(2, true, ch.name));        // a real channel
+    tx.identifiers.append(ident(3, false, {}));            // selector only
+    // A slot the user never touched must NOT become a frame.
+    CompoundIdentifier untouched;
+    untouched.idMask = 0xFF;
+    untouched.id = 4;
+    untouched.configured = false;
+    tx.identifiers.append(untouched);
+    cfg.bus[0].sections.append(tx);
+
+    const MappingResult mapped = mapToDevice(cfg);
+    CHECK(mapped.errors.isEmpty());
+
+    int selectorOnly = 0, realFields = 0;
+    QList<int> declaredIds;
+    for (const CanSignalConfig &sig : mapped.tables.signalConfigs) {
+        if (sigMsgIdx(sig) == SIG_MSG_NONE)
+            continue;
+        if (sigSelectorOnly(sig)) {
+            ++selectorOnly;
+            declaredIds.append(int(sig.mux_id));
+            CHECK(sig.mux_mask == 0xFF);
+            CHECK(sigIsActive(sig) == 1);
+        } else {
+            ++realFields;
+            CHECK(sig.mux_id == 2);
+        }
+    }
+    // Two declared, one real field — and the unconfigured slot produced nothing.
+    CHECK(selectorOnly == 2);
+    CHECK(realFields == 1);
+    std::sort(declaredIds.begin(), declaredIds.end());
+    CHECK(declaredIds == (QList<int>{1, 3}));
+
+    // Get: the identifiers come back, the empty ones still empty, and no
+    // phantom channel is invented for a signal that names none.
+    Configuration back;
+    mapFromDevice(mapped.tables, back, nullptr);
+    CHECK(back.bus[0].sections.size() == 1);
+    const CommsSection &got = back.bus[0].sections[0];
+    CHECK(got.compound);
+    CHECK(got.identifiers.size() == 3); // 1, 2, 3 — never the untouched 4
+    int emptyBack = 0;
+    for (const CompoundIdentifier &ci : got.identifiers) {
+        CHECK(ci.idMask == 0xFF);
+        if (ci.rows.isEmpty()) {
+            ++emptyBack;
+            CHECK(ci.id == 1 || ci.id == 3);
+        } else {
+            CHECK(ci.id == 2);
+            CHECK(ci.rows.size() == 1);
+            CHECK(ci.rows[0].channelName == ch.name);
+        }
+    }
+    CHECK(emptyBack == 2);
+    for (const Channel &c : back.catalog().userChannels())
+        CHECK(!c.name.startsWith(QStringLiteral("Signal ")));
+
+    // And re-sending what came back produces the same thing — the round trip is
+    // stable, not merely lossless once.
+    const MappingResult again = mapToDevice(back);
+    CHECK(again.errors.isEmpty());
+    int againSelectorOnly = 0;
+    for (const CanSignalConfig &sig : again.tables.signalConfigs)
+        if (sigMsgIdx(sig) != SIG_MSG_NONE && sigSelectorOnly(sig))
+            ++againSelectorOnly;
+    CHECK(againSelectorOnly == 2);
+}
+
+static void testClampToRangeSurvivesEveryTrip()
+{
+    Configuration cfg;
+    cfg.bus[0].enabled = true;
+    Channel ch;
+    ch.name = QStringLiteral("Rolling Count");
+    ch.dataType = QStringLiteral("u16");
+    ch.userDefined = true;
+    ch.minValue = 0;
+    ch.maxValue = 255;
+    cfg.catalog().addOrUpdateUserChannel(ch);
+
+    CommsSection tx;
+    tx.device = SectionDevice::TransmitMessage;
+    tx.name = QStringLiteral("Counter Out");
+    tx.baseAddress = 0x300;
+    tx.messageLengthBytes = 8;
+    tx.transmitRateHz = 10;
+    CommsChannelRow rolling;
+    rolling.channelName = ch.name;
+    rolling.startBit = 0;
+    rolling.bitLength = 8;
+    rolling.dbcType = int(DbcType::Unsigned);
+    rolling.dbcFactor = 1.0;
+    rolling.clampToRange = false; // the whole point of the row
+    tx.rows.append(rolling);
+    CommsChannelRow clamped = rolling;
+    clamped.channelName = ch.name;
+    clamped.startBit = 8;
+    clamped.clampToRange = true;
+    tx.rows.append(clamped);
+    cfg.bus[0].sections.append(tx);
+
+    // 1. Through a real file.
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("clamp.ct3"));
+    QString err;
+    CHECK(cfg.saveToFile(path, &err));
+    {
+        Configuration back;
+        CHECK(back.loadFromFile(path, &err));
+        CHECK(back.bus[0].sections.size() == 1);
+        const QList<CommsChannelRow> &rows = back.bus[0].sections[0].rows;
+        CHECK(rows.size() == 2);
+        CHECK(!rows[0].clampToRange);
+        CHECK(rows[1].clampToRange);
+    }
+
+    // 2. Into the device record — and INVERTED, because the wire bit means
+    //    wrap so that an all-zero legacy record means clamp.
+    const MappingResult mapped = mapToDevice(cfg);
+    CHECK(mapped.errors.isEmpty());
+    int wrapping = 0, clamping = 0;
+    for (const CanSignalConfig &sig : mapped.tables.signalConfigs) {
+        if (sigMsgIdx(sig) == SIG_MSG_NONE)
+            continue; // the channel's own value slot, not a field in the frame
+        if (sigTxWrap(sig)) {
+            ++wrapping;
+            CHECK(sigStartBit(sig) == 0);
+        } else {
+            ++clamping;
+            CHECK(sigStartBit(sig) == 8);
+        }
+        // The flag must not have disturbed the fields sharing its word.
+        CHECK(sigIsActive(sig) == 1);
+        CHECK(sigBitLength(sig) == 8);
+    }
+    CHECK(wrapping == 1);
+    CHECK(clamping == 1);
+
+    // 3. Back out of a device.
+    {
+        Configuration fromDevice;
+        mapFromDevice(mapped.tables, fromDevice, nullptr);
+        CHECK(fromDevice.bus[0].sections.size() == 1);
+        const QList<CommsChannelRow> &rows = fromDevice.bus[0].sections[0].rows;
+        CHECK(rows.size() == 2);
+        for (const CommsChannelRow &r : rows)
+            CHECK(r.clampToRange == (r.startBit == 8));
+    }
+
+    // 4. A row from before the option existed. An absent key is not "false" and
+    //    not undefined — it is a file that could only ever clamp, and it has to
+    //    keep clamping or a saved configuration changes behaviour on load.
+    {
+        QJsonObject legacy;
+        legacy["channel"] = ch.name;
+        legacy["startBit"] = 0;
+        legacy["bitLength"] = 8;
+        legacy["dbcType"] = int(DbcType::Unsigned);
+        legacy["dbcFactor"] = 1.0;
+        legacy["dbcOffset"] = 0.0;
+        CHECK(!legacy.contains(QStringLiteral("clampToRange")));
+        CHECK(CommsChannelRow::fromJson(legacy).clampToRange);
+    }
+
+    // And the key really is written, so a file that STATES it can be told from
+    // one that predates it.
+    CHECK(rolling.toJson().contains(QStringLiteral("clampToRange")));
+    CHECK(!rolling.toJson()[QStringLiteral("clampToRange")].toBool(true));
+
+    // 5. A receive row never carries it, whatever the model says, because the
+    //    device would ignore it — and validation says so rather than letting
+    //    the file and the device quietly disagree.
+    Configuration rxCfg;
+    rxCfg.bus[0].enabled = true;
+    rxCfg.catalog().addOrUpdateUserChannel(ch);
+    CommsSection rx;
+    rx.device = SectionDevice::ReceiveMessage;
+    rx.name = QStringLiteral("Counter In");
+    rx.baseAddress = 0x301;
+    rx.messageLengthBytes = 8;
+    CommsChannelRow rxRow = rolling; // clampToRange == false, on a receive row
+    rx.rows.append(rxRow);
+    rxCfg.bus[0].sections.append(rx);
+    const MappingResult rxMapped = mapToDevice(rxCfg);
+    CHECK(rxMapped.errors.isEmpty());
+    for (const CanSignalConfig &sig : rxMapped.tables.signalConfigs)
+        CHECK(!sigTxWrap(sig));
+    // That loop alone cannot fail — nothing in a receive map ever sets the bit —
+    // so the falsifiable half is asserted directly: the receive emit CLEARS a
+    // bit rather than trusting the slot to arrive clean, because the slot it
+    // writes is one signalFor() may have created earlier. Drop the
+    // sigSetTxWrap(sig, false) from device_mapper and this is what notices.
+    CanSignalConfig dirty{};
+    sigSetTxWrap(dirty, true);
+    CHECK(sigTxWrap(dirty));
+    sigSetHeader(dirty, 3, 0, 1);
+    CHECK(sigTxWrap(dirty)); // a header write must not silently clean it either
+    sigSetTxWrap(dirty, false);
+    CHECK(!sigTxWrap(dirty));
+    CHECK(sigMsgIdx(dirty) == 3);
+    bool warned = false;
+    for (const ValidationIssue &i : validateConfiguration(rxCfg))
+        if (i.message.contains(QStringLiteral("receive row")))
+            warned = true;
+    CHECK(warned);
+
+    // 6. The other contradiction: roll-over asked for on an IEEE754 field,
+    //    which has no range to roll over.
+    Configuration floatCfg;
+    floatCfg.bus[0].enabled = true;
+    floatCfg.catalog().addOrUpdateUserChannel(ch);
+    CommsSection ftx;
+    ftx.device = SectionDevice::TransmitMessage;
+    ftx.name = QStringLiteral("Float Out");
+    ftx.baseAddress = 0x302;
+    ftx.messageLengthBytes = 8;
+    ftx.transmitRateHz = 10;
+    CommsChannelRow fRow;
+    fRow.channelName = ch.name;
+    fRow.startBit = 0;
+    fRow.bitLength = 32;
+    fRow.dbcType = int(DbcType::IEEE754);
+    fRow.clampToRange = false;
+    ftx.rows.append(fRow);
+    floatCfg.bus[0].sections.append(ftx);
+    bool floatWarned = false;
+    for (const ValidationIssue &i : validateConfiguration(floatCfg))
+        if (i.message.contains(QStringLiteral("IEEE754")))
+            floatWarned = true;
+    CHECK(floatWarned);
+
+    // 7. And the two places a human is told about it. The Config Summary says
+    //    so for a transmit row and stays quiet for a receive row, which is the
+    //    same test the section editor's channel list applies — the two views of
+    //    one row must not disagree.
+    const QString txReport = configSummaryText(cfg);
+    CHECK(txReport.contains(QStringLiteral("rolls over")));
+    const QString rxReport = configSummaryText(rxCfg);
+    CHECK(!rxReport.contains(QStringLiteral("rolls over")));
+}
+
 static void testConfigReport()
 {
     Configuration cfg;
@@ -2328,9 +2660,10 @@ static void testConfigReport()
     m.destChannel = QStringLiteral("Half RPM");
     cfg.mathRows.append(m);
     ConditionRow c;
-    c.terms[0].aChannel = QStringLiteral("Half RPM");
-    c.terms[0].op = COND_OP_GT;
-    c.terms[0].bConst = 1000;
+    c.setTerms[0].aChannel = QStringLiteral("Half RPM");
+    c.setTerms[0].op = COND_OP_GT;
+    c.setTerms[0].bConst = 1000;
+    giveInverseReset(c);
     c.outputChannel = QStringLiteral("RPM High");
     cfg.conditionRows.append(c);
     ConstantRow k;
@@ -2370,14 +2703,14 @@ static void testConfigReport()
     CHECK(text.contains(QStringLiteral("Orphan Channel")));
     CHECK(text.contains(QStringLiteral("Ghost Output")));
     // Extraction detail line for Engine RPM (factor 0.25, timeout default 1234).
-    CHECK(text.contains(QStringLiteral("bit: 0, len: 16, unsigned, x: 0.25, +: 0, dflt: 1234")));
-    CHECK(text.contains(QStringLiteral("bit: 16, len: 16, signed, x: 0.1, +: -40")));
+    CHECK(text.contains(QStringLiteral("bit: 0, len: 16, unsigned, res: 0.25, +: 0, dflt: 1234")));
+    CHECK(text.contains(QStringLiteral("bit: 16, len: 16, signed, res: 0.1, +: -40")));
     // Compound identifier group.
     CHECK(text.contains(QStringLiteral("Id[1]  offset 0, id 0x1, mask 0xFF")));
     CHECK(text.contains(QStringLiteral("[mask 0 - skipped, not sent to the device]")));
     // Calculation headline + constants table.
     CHECK(text.contains(QStringLiteral("Half RPM = Engine RPM * 0.5")));
-    CHECK(text.contains(QStringLiteral("RPM High = (Half RPM > 1000)")));
+    CHECK(text.contains(QStringLiteral("RPM High = set (Half RPM > 1000)")));
     CHECK(text.contains(QStringLiteral("constant 12.5 (float, 1 dp)")));
     // Off section is listed but contributes no channel tables.
     CHECK(text.contains(QStringLiteral("[off]")));
@@ -2549,6 +2882,240 @@ static void testMessageRelay()
     CHECK(!usage.unused.contains(QStringLiteral("StrayCh")));     // dormant -> not cleanup-flagged
 }
 
+// Triggered transmit, host side: the .ct3 round trip, the device round trip,
+// and the two refusals.
+//
+// The device round trip is the one with teeth. A section names its User
+// Condition by the condition's OUTPUT CHANNEL; the wire carries an INDEX. So the
+// document -> device -> document path has to survive two translations, and a
+// SECOND, EARLIER condition sits in front of the one under test on purpose —
+// with a single condition, a mapper that hard-wired index 0 would pass.
+static void testTriggeredTransmit()
+{
+    Configuration cfg;
+    cfg.bus[0].enabled = true;
+
+    // The channels the conditions read and write.
+    for (const char *name : {"Oil Pressure", "Decoy Flag", "Send Now"}) {
+        Channel ch;
+        ch.name = QString::fromLatin1(name);
+        ch.userDefined = true;
+        cfg.catalog().addOrUpdateUserChannel(ch);
+    }
+
+    // Condition 1 (index 0 on the device) — the decoy.
+    ConditionRow decoy;
+    decoy.setTerms[0].aChannel = QStringLiteral("Oil Pressure");
+    decoy.setTerms[0].op = COND_OP_LT;
+    decoy.setTerms[0].bConst = 10.0;
+    giveInverseReset(decoy);
+    decoy.outputChannel = QStringLiteral("Decoy Flag");
+    cfg.conditionRows.append(decoy);
+
+    // Condition 2 (index 1) — the one the message is triggered on.
+    ConditionRow trigger;
+    trigger.setTerms[0].aChannel = QStringLiteral("Oil Pressure");
+    trigger.setTerms[0].op = COND_OP_GT;
+    trigger.setTerms[0].bConst = 90.0;
+    giveInverseReset(trigger);
+    trigger.outputChannel = QStringLiteral("Send Now");
+    cfg.conditionRows.append(trigger);
+
+    CommsSection tx;
+    tx.name = QStringLiteral("Alarm");
+    tx.device = SectionDevice::TransmitMessage;
+    tx.baseAddress = 0x420;
+    tx.messageLengthBytes = 8;
+    tx.transmitRateHz = 1;
+    tx.cyclic = false;
+    tx.transmitCondition = QStringLiteral("Send Now");
+    cfg.bus[0].sections.append(tx);
+
+    // ---- The file ----
+    QString error;
+    QTemporaryFile f;
+    CHECK(f.open());
+    const QString path = f.fileName();
+    f.close();
+    CHECK(cfg.saveToFile(path, &error));
+    Configuration loaded;
+    CHECK(loaded.loadFromFile(path, &error));
+    CHECK(loaded.bus[0].sections.size() == 1);
+    if (!loaded.bus[0].sections.isEmpty()) {
+        const CommsSection &s = loaded.bus[0].sections[0];
+        CHECK(!s.cyclic);
+        CHECK(s.transmitCondition == QStringLiteral("Send Now"));
+    }
+
+    // ---- The device ----
+    const MappingResult mr = mapToDevice(cfg);
+    CHECK(mr.ok());
+    CHECK(mr.tables.conditions.size() == 2);
+    CHECK(mr.tables.messages.size() == 1);
+    if (!mr.tables.messages.isEmpty()) {
+        const CanMessageConfig &m = mr.tables.messages[0];
+        CHECK(m.tx_trigger_flags == TXTRIG_ENABLED);
+        // The SECOND condition, not the first — the decoy is what makes this
+        // assertion mean something.
+        CHECK(m.tx_trigger_cond == 1);
+        // And the one retired byte is still scrubbed to zero beside them.
+        CHECK(m.reserved == 0);
+    }
+
+    Configuration back;
+    mapFromDevice(mr.tables, back);
+    CHECK(back.bus[0].sections.size() == 1);
+    if (!back.bus[0].sections.isEmpty()) {
+        const CommsSection &s = back.bus[0].sections[0];
+        // Triggered used to be destroyed by every Get — forced back to Cyclic
+        // because it reached the device nowhere. It survives now.
+        CHECK(!s.cyclic);
+        CHECK(s.transmitCondition == QStringLiteral("Send Now"));
+    }
+
+    // ---- A Cyclic message carries no trigger, and says so with the sentinel
+    // rather than a bare zero: 0 is a perfectly good condition index. ----
+    {
+        Configuration plain;
+        cfg.copyContentTo(plain);
+        plain.bus[0].sections[0].cyclic = true;
+        const MappingResult pr = mapToDevice(plain);
+        CHECK(pr.ok());
+        if (!pr.tables.messages.isEmpty()) {
+            CHECK(pr.tables.messages[0].tx_trigger_flags == 0);
+            CHECK(pr.tables.messages[0].tx_trigger_cond == TX_TRIGGER_COND_NONE);
+        }
+    }
+
+    // ---- Both refusals. A message set to speak only on a condition must never
+    // silently become one that never stops, so each of these is an ERROR that
+    // blocks the Send rather than a fallback to cyclic. ----
+    {
+        Configuration noneNamed;
+        cfg.copyContentTo(noneNamed);
+        noneNamed.bus[0].sections[0].transmitCondition.clear();
+        CHECK(!mapToDevice(noneNamed).ok());
+        bool flagged = false;
+        for (const ValidationIssue &v : validateConfiguration(noneNamed))
+            if (v.severity == ValidationIssue::Error && v.message.contains(QStringLiteral("no User Condition")))
+                flagged = true;
+        CHECK(flagged);
+    }
+    {
+        Configuration dangling;
+        cfg.copyContentTo(dangling);
+        dangling.bus[0].sections[0].transmitCondition = QStringLiteral("Gone Away");
+        CHECK(!mapToDevice(dangling).ok());
+        bool flagged = false;
+        for (const ValidationIssue &v : validateConfiguration(dangling))
+            if (v.severity == ValidationIssue::Error && v.message.contains(QStringLiteral("Gone Away")))
+                flagged = true;
+        CHECK(flagged);
+    }
+
+    // ---- Renaming the condition's output channel repoints the message. This
+    // is the whole reason the binding is a channel name and not a row index. ----
+    {
+        Configuration renamed;
+        cfg.copyContentTo(renamed);
+        renamed.renameChannelReferences(QStringLiteral("Send Now"),
+                                        QStringLiteral("Fire When Ready"));
+        CHECK(renamed.bus[0].sections[0].transmitCondition
+              == QStringLiteral("Fire When Ready"));
+        CHECK(renamed.conditionRows[1].outputChannel == QStringLiteral("Fire When Ready"));
+        CHECK(mapToDevice(renamed).ok());
+    }
+}
+
+// Every User Condition's output channel is Boolean, including in documents
+// written before that was true, and including after a Get.
+//
+// The Get half is the one that used to fail in a way nobody would notice.
+// Boolean and u8 are the same eight bits on the wire, so the type cannot be
+// recovered from the signal record — it is recovered from the CONDITION TABLE,
+// which is unambiguous evidence that the channel is a condition output.
+static void testConditionOutputsAreBoolean()
+{
+    Configuration cfg;
+    cfg.bus[0].enabled = true;
+
+    // A channel typed the way a pre-existing document would have it: float, with
+    // the wide default range, and decimals it has no business having.
+    Channel wrong;
+    wrong.name = QStringLiteral("Over Temp");
+    wrong.userDefined = true;
+    wrong.dataType = QStringLiteral("float");
+    wrong.minValue = -1000.0;
+    wrong.maxValue = 1000.0;
+    wrong.decimalPlaces = 2;
+    cfg.catalog().addOrUpdateUserChannel(wrong);
+
+    Channel src;
+    src.name = QStringLiteral("Coolant");
+    src.userDefined = true;
+    cfg.catalog().addOrUpdateUserChannel(src);
+
+    ConditionRow c;
+    c.setTerms[0].aChannel = QStringLiteral("Coolant");
+    c.setTerms[0].op = COND_OP_GT;
+    c.setTerms[0].bConst = 105.0;
+    giveInverseReset(c);
+    c.outputChannel = QStringLiteral("Over Temp");
+    cfg.conditionRows.append(c);
+
+    const auto isBoolean = [](const Configuration &doc, const char *name) {
+        const Channel ch = doc.catalog().findByName(QString::fromLatin1(name));
+        return ch.isValid() && ch.dataType == QLatin1String("boolean")
+               && ch.minValue == 0.0 && ch.maxValue == 1.0 && ch.decimalPlaces == 0;
+    };
+
+    // Directly.
+    CHECK(cfg.forceConditionOutputsBoolean() == 1);
+    CHECK(isBoolean(cfg, "Over Temp"));
+    // Idempotent: a second call changes nothing.
+    CHECK(cfg.forceConditionOutputsBoolean() == 0);
+    // And it leaves other channels alone.
+    CHECK(cfg.catalog().findByName(QStringLiteral("Coolant")).dataType != QLatin1String("boolean"));
+
+    // On load, for a file that stored the wrong type.
+    {
+        Configuration stale;
+        stale.bus[0].enabled = true;
+        stale.catalog().addOrUpdateUserChannel(wrong);
+        stale.catalog().addOrUpdateUserChannel(src);
+        stale.conditionRows.append(c);
+        QString error;
+        QTemporaryFile f;
+        CHECK(f.open());
+        const QString path = f.fileName();
+        f.close();
+        // Saved without coercion, so the file genuinely holds "float".
+        CHECK(stale.saveToFile(path, &error));
+        Configuration loaded;
+        CHECK(loaded.loadFromFile(path, &error));
+        CHECK(isBoolean(loaded, "Over Temp"));
+    }
+
+    // Through the device. The slot goes out typed, and comes back boolean —
+    // which it could not do from the wire alone.
+    {
+        const MappingResult mr = mapToDevice(cfg);
+        CHECK(mr.ok());
+        CHECK(mr.tables.conditions.size() == 1);
+        if (!mr.tables.conditions.isEmpty()) {
+            const int dest = mr.tables.conditions[0].dest_signal_idx;
+            CHECK(dest < mr.tables.signalConfigs.size());
+            // Conditions used to leave this at 0, the "untyped" marker, which
+            // is what made a condition output come home with no type at all.
+            CHECK(sigValueType(mr.tables.signalConfigs[dest]) == SIGNAL_TYPE_UINT8);
+        }
+        Configuration back;
+        mapFromDevice(mr.tables, back);
+        CHECK(back.conditionRows.size() == 1);
+        CHECK(isBoolean(back, "Over Temp"));
+    }
+}
+
 // A Transmit CRC8 section is a transmit message that stamps a checksum, and it
 // must survive both round trips whole: the .ct3 (the schema-16 recipe keys) and
 // the device (one Crc8Config bound to its message record by index). The recipe
@@ -2557,6 +3124,151 @@ static void testMessageRelay()
 // section does not carry. A plain transmit message sits AHEAD of the stamped
 // one on purpose: msg_idx must be the stamped message's own record index (1),
 // and with a single message a mapper that hard-wired zero would still pass.
+// Every configuration in the field is migrated by inverting its one expression
+// into a Reset, so the inversion has to be EXACTLY right: the migrated Reset
+// must be true precisely when the Set is false, for every shape of expression
+// a pre-modes file could contain. "De Morgan says so" is a proof about algebra,
+// not about this code.
+//
+// So this evaluates both expressions against every combination that matters —
+// all 6 operators in each of up to 3 comparison slots, both joiners in each of
+// up to 2 gaps, and a spread of operand values chosen to straddle every
+// boundary — and asserts the two never agree. 6^3 x 2^2 x 5^3 term-value
+// combinations for the three-term case alone.
+//
+// The evaluator here is deliberately written OUT OF THE FIRMWARE'S SOURCE
+// rather than calling it: if both sides shared an implementation, a fold that
+// bracketed right-to-left would satisfy the test while disagreeing with the
+// device. This mirrors engine_core.c's foldConditionExpr by hand, including
+// the epsilon on equality, and the firmware-link test is what pins the device
+// to the same shape.
+static bool evalTermHere(const ct::ConditionTermRow &t, double a)
+{
+    const double b = t.bConst;
+    switch (t.op) {
+    case int(ct::COND_OP_EQ):  return std::fabs(a - b) < 0.0001;
+    case int(ct::COND_OP_NEQ): return std::fabs(a - b) >= 0.0001;
+    case int(ct::COND_OP_LT):  return a < b;
+    case int(ct::COND_OP_LTE): return a <= b;
+    case int(ct::COND_OP_GT):  return a > b;
+    case int(ct::COND_OP_GTE): return a >= b;
+    }
+    return false;
+}
+
+static bool evalExprHere(const QList<ct::ConditionTermRow> &terms, const QList<int> &joiners,
+                         const QList<double> &values)
+{
+    bool met = evalTermHere(terms[0], values[0]);
+    for (int i = 1; i < terms.size(); ++i) {
+        const bool rhs = evalTermHere(terms[i], values[i]);
+        const bool isOr = joiners.value(i - 1, int(ct::COND_JOIN_AND)) == int(ct::COND_JOIN_OR);
+        met = isOr ? (met || rhs) : (met && rhs);
+    }
+    return met;
+}
+
+
+static void testMigratedResetIsTheExactInverse()
+{
+    const QList<int> ops = {int(ct::COND_OP_EQ),  int(ct::COND_OP_NEQ), int(ct::COND_OP_LT),
+                            int(ct::COND_OP_LTE), int(ct::COND_OP_GT),  int(ct::COND_OP_GTE)};
+    const QList<int> joins = {int(ct::COND_JOIN_AND), int(ct::COND_JOIN_OR)};
+    // Straddling the constant on both sides, exactly on it, and well clear —
+    // the equality epsilon and the four inequalities all change answer here.
+    const QList<double> values = {-1.0, 9.9999, 10.0, 10.0001, 42.0};
+    const double kConst = 10.0;
+
+    int checked = 0;
+    // One, two and three comparisons: the fold has a different shape at each
+    // length, and the two-gap case is the only one where the bracketing of the
+    // accumulated left side can be got wrong.
+    for (int n = 1; n <= COND_MAX_TERMS; ++n) {
+        QList<int> opIdx(n, 0);
+        while (true) {
+            QList<int> joinIdx(qMax(0, n - 1), 0);
+            while (true) {
+                QList<ct::ConditionTermRow> setTerms;
+                QList<int> setJoiners;
+                for (int i = 0; i < n; ++i) {
+                    ct::ConditionTermRow t;
+                    t.aChannel = QStringLiteral("A%1").arg(i);
+                    t.op = ops[opIdx[i]];
+                    t.bIsChannel = false;
+                    t.bConst = kConst;
+                    setTerms.append(t);
+                }
+                for (int g = 0; g < n - 1; ++g)
+                    setJoiners.append(joins[joinIdx[g]]);
+
+                QList<ct::ConditionTermRow> resetTerms;
+                QList<int> resetJoiners;
+                CHECK(ct::invertConditionExpr(setTerms, setJoiners, &resetTerms, &resetJoiners));
+                CHECK(resetTerms.size() == setTerms.size());
+                CHECK(resetJoiners.size() == setJoiners.size());
+
+                // Every combination of operand values across the n slots.
+                QList<int> valIdx(n, 0);
+                while (true) {
+                    QList<double> vals;
+                    for (int i = 0; i < n; ++i)
+                        vals.append(values[valIdx[i]]);
+                    const bool s = evalExprHere(setTerms, setJoiners, vals);
+                    const bool inv = evalExprHere(resetTerms, resetJoiners, vals);
+                    // THE assertion: never both, never neither.
+                    CHECK(s != inv);
+                    ++checked;
+                    int k = n - 1;
+                    for (; k >= 0; --k) {
+                        if (++valIdx[k] < values.size())
+                            break;
+                        valIdx[k] = 0;
+                    }
+                    if (k < 0)
+                        break;
+                }
+
+                int g = n - 2;
+                for (; g >= 0; --g) {
+                    if (++joinIdx[g] < joins.size())
+                        break;
+                    joinIdx[g] = 0;
+                }
+                if (g < 0 || n < 2)
+                    break;
+            }
+            int i = n - 1;
+            for (; i >= 0; --i) {
+                if (++opIdx[i] < ops.size())
+                    break;
+                opIdx[i] = 0;
+            }
+            if (i < 0)
+                break;
+        }
+    }
+    // A guard on the guard: a loop that fell through would pass every CHECK
+    // above by never running one.
+    CHECK(checked == 5 * 6 + 25 * 36 * 2 + 125 * 216 * 4);
+
+    // Inverting twice is the identity, which is a different claim from the one
+    // above and catches an operator whose negation is not its own inverse.
+    for (int op : ops)
+        CHECK(int(ct::condOpNegate(ct::condOpNegate(quint8(op)))) == op);
+
+    // A message operator has no negation, so the migration REFUSES rather than
+    // producing an expression that is quietly wrong. Unreachable for a real
+    // pre-modes file — the operators did not exist then — but the refusal is
+    // what makes that true by construction rather than by history.
+    ct::ConditionTermRow msg;
+    msg.op = int(ct::COND_OP_MSG_RX);
+    msg.aMessageBus = 1;
+    msg.aMessage = QStringLiteral("Engine Data");
+    QList<ct::ConditionTermRow> outT;
+    QList<int> outJ;
+    CHECK(!ct::invertConditionExpr({msg}, {}, &outT, &outJ));
+}
+
 static void testTransmitCrc8()
 {
     Configuration cfg;
@@ -3193,9 +3905,10 @@ static void testChannelReferenceVsWrite()
     cfg.mathRows.append(m);
 
     ConditionRow cond;
-    cond.terms[0].aChannel = rpm;
-    cond.terms[0].op = COND_OP_GT;
-    cond.terms[0].bConst = 6000;
+    cond.setTerms[0].aChannel = rpm;
+    cond.setTerms[0].op = COND_OP_GT;
+    cond.setTerms[0].bConst = 6000;
+    giveInverseReset(cond);
     cond.outputChannel = QStringLiteral("Over Rev");
     cfg.conditionRows.append(cond);
 
@@ -3242,7 +3955,7 @@ static void testChannelReferenceVsWrite()
     }
     CHECK(many.tables.conditions.size() == 1);
     if (many.tables.conditions.size() == 1)
-        CHECK(many.tables.conditions[0].terms[0].input_a_signal_idx == rpmSlot);
+        CHECK(many.tables.conditions[0].set_terms[0].input_a_signal_idx == rpmSlot);
     CHECK(many.tables.counters.size() == 1);
     if (many.tables.counters.size() == 1)
         CHECK(many.tables.counters[0].up_signal_idx == rpmSlot);
@@ -5601,10 +6314,15 @@ int main(int argc, char *argv[])
     testConstants();
     testIntegrators();
     testDbcImport();
+    testChannellessIdentifierStillTransmits();
+    testClampToRangeSurvivesEveryTrip();
     testConfigReport();
     testTransmitOrder();
     testMessageRelay();
     testTransmitCrc8();
+    testMigratedResetIsTheExactInverse();
+    testTriggeredTransmit();
+    testConditionOutputsAreBoolean();
     testBusRates();
     testLookupTables();
     testChannelReferenceVsWrite();

@@ -201,6 +201,52 @@ void testSectionBindingsAndRename()
     // Bus index range is enforced.
     CHECK(!runScript(config, "ct.sections(4)").ok);
     CHECK(!runScript(config, "ct.setBus(0, {})").ok);
+
+    // A row's clamp/roll-over choice survives the read-modify-write this API
+    // invites — ct.setSection(b, n, ct.section(b, n)) after changing one field.
+    // It is the shape the binding's own comment blesses by name, and a key the
+    // read half does not hand out is a key the write half cannot preserve: the
+    // row would come back clamping, silently, and the next Send would put a
+    // counter that should roll 255 -> 0 on the bus stuck at 255 instead.
+    ct::Configuration txCfg;
+    const ct::ScriptResult mk = runScript(txCfg, R"lua(
+        ct.addChannel{ name = 'Rolling Count', dataType = 'u16' }
+        ct.addSection(1, {
+            name = 'Counter Out', device = 'transmit', id = 0x300,
+            lengthBytes = 8, rateHz = 10,
+            rows = { { channel = 'Rolling Count', startBit = 0, bitLength = 8,
+                       dbcType = 'unsigned', factor = 1, offset = 0,
+                       clampToRange = false } },
+        })
+    )lua");
+    CHECK(mk.ok);
+    CHECK(txCfg.bus[0].sections.size() == 1);
+    // 1. A script can ASK for roll-over in the first place.
+    CHECK(!txCfg.bus[0].sections[0].rows[0].clampToRange);
+    // 2. It can SEE it.
+    CHECK(runScript(txCfg,
+                    "print(tostring(ct.section(1, 'Counter Out').rows[1].clampToRange))").ok);
+    CHECK(g_output.trimmed() == QLatin1String("false"));
+    // 3. And editing something else does not quietly take it away.
+    const ct::ScriptResult rmw = runScript(txCfg, R"lua(
+        local s = ct.section(1, 'Counter Out')
+        s.rateHz = 20
+        ct.setSection(1, 'Counter Out', s)
+    )lua");
+    CHECK(rmw.ok);
+    CHECK(txCfg.bus[0].sections[0].transmitRateHz == 20);
+    CHECK(!txCfg.bus[0].sections[0].rows[0].clampToRange);
+    // 4. A row that says nothing about it clamps, as every row did before the
+    //    option existed.
+    ct::Configuration plainCfg;
+    CHECK(runScript(plainCfg, R"lua(
+        ct.addChannel{ name = 'Plain', dataType = 'u16' }
+        ct.addSection(1, { name = 'Plain Out', device = 'transmit', id = 0x301,
+            lengthBytes = 8, rateHz = 10,
+            rows = { { channel = 'Plain', startBit = 0, bitLength = 8,
+                       dbcType = 'unsigned', factor = 1, offset = 0 } } })
+    )lua").ok);
+    CHECK(plainCfg.bus[0].sections[0].rows[0].clampToRange);
 }
 
 void testProtectedComms()

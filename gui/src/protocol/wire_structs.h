@@ -255,7 +255,11 @@ constexpr uint8_t FW_RESULT_GAVE_UP        = 10;
 constexpr int MAX_MESSAGES          = 500; // receive AND transmit share this table
 constexpr int MAX_SIGNALS           = 1000; // 96 KB of config flash bought the room
 constexpr int MAX_MATH_COMPUTATIONS = 100;
-constexpr int MAX_CONDITIONS        = 100;
+// 100 -> 250 at store v10. PAD8(35) is 40, so the table costs 10,000 B and
+// CFG_TOTAL lands at 126,368 of 131,072. Each active condition also owns one of
+// the MAX_SIGNALS slots above, so 250 conditions can claim a quarter of the
+// signal table — that, not flash, is what caps the next raise.
+constexpr int MAX_CONDITIONS        = 250;
 constexpr int MAX_COUNTERS          = 50;  // firmware v3+
 constexpr int MAX_TIMERS            = 50;  // firmware v3+ (20 -> 50)
 constexpr int MAX_CONSTANTS         = 100; // firmware v6+
@@ -316,6 +320,23 @@ constexpr uint8_t MSGFLAG_ROUTING  = 0x04;
 constexpr uint8_t MSGFLAG_ACTIVE   = 0x08;
 constexpr uint8_t MSGFLAG_TRANSMIT = 0x10; // v3: transmit (compose+send) vs receive
 constexpr uint8_t MSGFLAG_TX_SEQUENTIAL = 0x20; // v10: compound tx one-variant-per-period (else batch)
+
+// CanMessageConfig::tx_trigger_flags — Triggered transmit. A separate byte and
+// not two more MSGFLAG_* bits because this byte is full: 0x01..0x20 are taken
+// and 0x40/0x80 are the protection level, whose values are pinned.
+//
+// Clear TXTRIG_ENABLED means Cyclic — transmit every period_ms, as always.
+constexpr uint8_t TXTRIG_ENABLED     = 0x01; // transmit only while the condition holds
+// 0x02 was TXTRIG_RESET_ON_TX — "Reset User Condition once Triggered". Retired
+// before it ever shipped, superseded by the Reset expression a Set/Reset
+// condition now carries: "send once when the request arrives" is a condition
+// set on Message Received and reset on Message Transmitted, which says so where
+// the user can see it instead of reaching across from a transmit message to
+// rewrite a calculation's output. See protocol.h.
+// tx_trigger_cond when no condition is named. TXTRIG_ENABLED is what decides
+// whether the message is gated; this only stops an unset field from reading as
+// condition 0 after a round trip.
+constexpr uint16_t TX_TRIGGER_COND_NONE = 0xFFFFu;
 // 2.3.0: bits 6-7 are ONE ORDERED PROTECTION LEVEL, not two independent flags.
 // level = (flags & MSGPROT_MASK) >> 6, and that number IS CommsProtection:
 //
@@ -531,13 +552,57 @@ constexpr int mathOpArity(int op)
 enum ConditionOp : uint8_t {
     COND_OP_EQ = 0, COND_OP_NEQ = 1, COND_OP_LT = 2, COND_OP_LTE = 3,
     COND_OP_GT = 4, COND_OP_GTE = 5,
+    // The two MESSAGE operators. A term carrying one of these is not a
+    // comparison: input_a_signal_idx holds a MESSAGE index, and input_b is
+    // unused and written zero. True only on the evaluation pass in which a
+    // frame actually happened — see protocol.h for the receive/transmit
+    // asymmetry, which is visible to a user.
+    COND_OP_MSG_RX = 6,
+    COND_OP_MSG_TX = 7,
 };
+
+// Does this operator take a MESSAGE index in input_a rather than a signal? The
+// bounds check differs, so every site validating a term has to ask.
+inline bool condOpIsMessage(uint8_t op)
+{
+    return op == COND_OP_MSG_RX || op == COND_OP_MSG_TX;
+}
+
+// The logical negation of a comparison, which is what migrates a pre-modes
+// condition into a Set/Reset: the Reset expression is the inverse of the Set,
+// and inverting an expression means flipping every operator and every joiner.
+//
+// All six comparisons invert WITHIN the set, so the migration is lossless. The
+// message operators have no negation — "a frame did not arrive this pass" is
+// not a thing a Set/Reset wants to latch on — and are returned unchanged;
+// callers must not offer them to the migration.
+inline uint8_t condOpNegate(uint8_t op)
+{
+    switch (op) {
+    case COND_OP_EQ:  return COND_OP_NEQ;
+    case COND_OP_NEQ: return COND_OP_EQ;
+    case COND_OP_LT:  return COND_OP_GTE;
+    case COND_OP_GTE: return COND_OP_LT;
+    case COND_OP_LTE: return COND_OP_GT;
+    case COND_OP_GT:  return COND_OP_LTE;
+    default:          return op;
+    }
+}
 
 // v14: how one comparison of a condition joins to the next.
 enum ConditionJoin : uint8_t {
     COND_JOIN_AND = 0, COND_JOIN_OR = 1,
 };
-constexpr int COND_MAX_TERMS = 3; // comparisons per condition
+constexpr int COND_MAX_TERMS = 3; // comparisons per condition, per expression
+
+// ConditionConfig::flags
+constexpr uint8_t CONDFLAG_ACTIVE   = 0x01;
+constexpr uint8_t CONDFLAG_SETRESET = 0x02; // set = Set/Reset latch, clear = Momentary
+
+// Momentary hold ceiling. The hold is spent against elapsed_ms on the device's
+// 10 ms calculation pass, so 100 Hz is the frequency whose period is one tick
+// and nothing finer can be represented.
+constexpr uint8_t COND_LATCH_MAX_HZ = 100;
 
 
 #pragma pack(push, 1)
@@ -550,17 +615,20 @@ struct CanMessageConfig {
     uint8_t dlc;
     uint16_t period_ms;     // transmit: send period >= 10. receive (v4): receive
                             // timeout in ms (0 = no timeout / defaults off)
-    uint8_t reserved[ACCESS_KEY_LEN]; // was the v20 per-message key; RETIRED in
-                                 // 2.3.0. Always written zero by this host, and
-                                 // zeroed by the device on both the write and
-                                 // the read path.
-                                 //
-                                 // NOT removed: PAD8(14) == PAD8(10) == 16, so
-                                 // shrinking the record frees no flash while
-                                 // moving every stored table after `messages` —
-                                 // which would force the store version up and
-                                 // cost every field unit its configuration. The
-                                 // struct stays 14 bytes; see protocol.h.
+    // Triggered transmit (store v10). Three of the four retired per-message key
+    // bytes, claimed in place: the record is still 14 bytes, so no offset moved,
+    // no chunk constant changed and the feature cost no config flash at all.
+    // TXTRIG_ENABLED clear — an all-zero field — means Cyclic, which is exactly
+    // what every message did before this existed.
+    uint16_t tx_trigger_cond;  // condition index gating this message, or
+                               // TX_TRIGGER_COND_NONE
+    uint8_t tx_trigger_flags;  // TXTRIG_*
+    uint8_t reserved;          // the last byte of the v20 per-message key, still
+                               // retired. Written zero by this host and zeroed by
+                               // the device on both the write and the read path —
+                               // a reserved field that is only usually zero stops
+                               // being reserved. See protocol.h for why the other
+                               // three became safe to claim only at store v10.
 };
 
 // 64 bytes: label 32 + five floats 20 + four u16 8 + one u32 4.
@@ -587,6 +655,8 @@ struct CanSignalConfig {
                              // (2-byte LE window at mux_byte_offset & mux_mask)
                              //   == (mux_id & mux_mask)
     uint16_t msg_and_flags;  // msg_idx(9) | byte_order<<9 | is_active<<10
+                             //   | tx_wrap<<11 | selector_only<<12.
+                             //   Bits 13-15 are free.
     uint16_t tx_source;      // transmit source signal index + 1; 0 = own slot
     uint32_t bits;           // start_bit(9) | (bit_length-1)(6)<<9 | value_type(6)<<15
                              //   | decimal_places(4)<<21 | mux_byte_offset(6)<<25
@@ -651,27 +721,56 @@ inline uint16_t mathInputCIdx(const MathConfig &m)
     return uint16_t(uint16_t(m.input_c_val[0]) | (uint16_t(m.input_c_val[1]) << 8));
 }
 
-// One "A op B" comparison of a condition (v14).
+// One "A op B" comparison of a condition — or, for the message operators, one
+// event test.
+//
+// B IS A UNION, and that is what pays for the second expression. The members
+// were always mutually exclusive (input_b_type says which is live) so
+// overlapping them takes the term 10 -> 8 bytes, which takes a six-term
+// ConditionConfig 72 -> 56 and is the difference between 250 conditions fitting
+// and not fitting.
+//
+// ZERO THE WHOLE UNION BEFORE WRITING input_b_idx. The upper two bytes travel
+// on the wire and are otherwise whatever the writer left there; value-
+// initialising the record does it.
 struct ConditionTerm {
-    uint16_t input_a_signal_idx;
+    uint16_t input_a_signal_idx; // signal index — or MESSAGE index for the
+                                 // message operators
     uint8_t op;
-    uint8_t input_b_type;   // 0 = const, 1 = signal
-    uint16_t input_b_idx;
-    float input_b_const;
+    uint8_t input_b_type;   // 0 = const, 1 = signal; ignored for message ops
+    union {
+        uint16_t input_b_idx;
+        float input_b_const;
+    } b;
 };
 
-// v5: a condition is a boolean logic channel â€” writes 1.0 to dest_signal_idx
-// while it holds, else 0.0 (replaced the v2-v4 action model).
-// v14: up to COND_MAX_TERMS comparisons joined by AND/OR. `joiners` holds one
-// ConditionJoin BIT per gap (bit 0 joins terms[0]â†’[1], bit 1 joins [1]â†’[2]),
-// and the fold is STRICTLY LEFT TO RIGHT â€” ((t0 J0 t1) J1 t2) â€” matching the
-// bracketing the editor shows rather than C's precedence for &&.
+// A User Condition drives a boolean output slot, in one of TWO MODES. See
+// protocol.h for the full contract; the short version:
+//
+//   MOMENTARY (CONDFLAG_SETRESET clear) — the RISING EDGE of the Set expression
+//     drives the output to 1 and it holds for one period of latch_hz (10 Hz is
+//     100 ms), then drops on its own. Retriggerable: a fresh edge RELOADS the
+//     hold. reset_terms unused.
+//   SET / RESET (CONDFLAG_SETRESET set) — a latch. Set drives 1, Reset drives 0,
+//     it HOLDS in between, and RESET IS DOMINANT. latch_hz unused.
+//
+// The plain level a condition used to be is gone, and every configuration
+// written before the modes was migrated to a Set/Reset whose Reset expression is
+// the logical inverse of its Set — which behaves identically. See condOpNegate.
+//
+// Both expressions fold up to COND_MAX_TERMS comparisons STRICTLY LEFT TO RIGHT
+// — ((t0 J0 t1) J1 t2) — matching the bracketing the editor shows rather than
+// C's precedence for &&. Each joiner byte holds one ConditionJoin BIT per gap.
 struct ConditionConfig {
-    ConditionTerm terms[COND_MAX_TERMS];
-    uint16_t dest_signal_idx; // boolean output: 1.0 when met, else 0.0
-    uint8_t term_count;       // comparisons in use, 1..COND_MAX_TERMS
-    uint8_t joiners;
-    uint8_t is_active;
+    ConditionTerm set_terms[COND_MAX_TERMS];
+    ConditionTerm reset_terms[COND_MAX_TERMS];
+    uint16_t dest_signal_idx; // boolean output: 1.0 while held, else 0.0
+    uint8_t flags;            // CONDFLAG_*
+    uint8_t set_count;        // 1..COND_MAX_TERMS
+    uint8_t set_joiners;
+    uint8_t reset_count;      // Set/Reset only
+    uint8_t reset_joiners;
+    uint8_t latch_hz;         // Momentary only, 1..COND_LATCH_MAX_HZ
 };
 
 // v16: rate accumulator — `out += input` (or `-=` with COUNT_DOWN, v17),
@@ -1128,7 +1227,19 @@ struct FwUpdateStatus {
 // HEADER — the v7 hazard exactly: ten extra bytes shove every table offset
 // along, so a v8 image would be misread wholesale and is refused by version
 // instead. Same consequence as ever: one re-Send after the update.
-constexpr uint16_t EXPECTED_STORE_VERSION = 9;
+//
+// 10: MAX_CONDITIONS 100 -> 250. Conditions are the fourth table, so the 6,000
+// extra bytes shift counters, timers, constants, relays, the lookup tables,
+// integrators, the script region and the CRC8 rules all down — a v9 image would
+// be misread record-for-record. Triggered transmit shipped in the same release
+// and needed no bump of its own: it claimed three retired bytes inside
+// CanMessageConfig in place, so the record is still 14 bytes and nothing moved
+// on its account. Same consequence as ever: one re-Send after the update.
+// 11: the condition record grew a second expression (35 -> 56 bytes) and
+// ConditionTerm shrank 10 -> 8 to pay for it. Both store hazards at once —
+// the record size changed AND every table after conditions shifted — so a
+// v10 image would be misread twice over. v10 was built but never released.
+constexpr uint16_t EXPECTED_STORE_VERSION = 11;
 
 #pragma pack(pop)
 
@@ -1145,6 +1256,19 @@ constexpr uint32_t SIG_BITLEN_MASK    = 0x3F;  // stored as length-1, so 1..64
 constexpr uint32_t SIG_VALTYPE_MASK   = 0x3F;  // SignalDataType 0x01..0x38
 constexpr uint32_t SIG_DECIMALS_MASK  = 0xF;   // 0..8
 constexpr uint32_t SIG_MUXOFF_MASK    = 0x3F;  // 0..63
+// msg_and_flags bit 11: on TRANSMIT, send the low bit_length bits of the
+// converted value rather than clamping it to what the field can hold. Clear
+// is the old behaviour AND the default, which is why the bit means WRAP and
+// not CLAMP — every record written before it existed has a zero there and
+// keeps clamping exactly as it did. Receive ignores it. See the firmware's
+// protocol.h for why wrapping skips the channel-range clamp as well.
+constexpr uint16_t SIG_FLAG_TX_WRAP   = 0x0800;
+// msg_and_flags bit 12: declares its compound identifier and packs nothing, so
+// a transmit variant with no channels of its own still reaches the wire. The
+// device infers a compound message's variants by walking its signals, so an
+// identifier with nothing bound to it used to infer nothing and never went out.
+// See the firmware's protocol.h.
+constexpr uint16_t SIG_FLAG_SELECTOR_ONLY = 0x1000;
 
 inline uint16_t sigMsgIdx(const CanSignalConfig &s)
 {
@@ -1153,6 +1277,9 @@ inline uint16_t sigMsgIdx(const CanSignalConfig &s)
 }
 inline uint8_t sigByteOrder(const CanSignalConfig &s) { return uint8_t((s.msg_and_flags >> 9) & 1); }
 inline uint8_t sigIsActive(const CanSignalConfig &s)  { return uint8_t((s.msg_and_flags >> 10) & 1); }
+inline bool sigTxWrap(const CanSignalConfig &s) { return (s.msg_and_flags & SIG_FLAG_TX_WRAP) != 0; }
+inline bool sigSelectorOnly(const CanSignalConfig &s)
+{ return (s.msg_and_flags & SIG_FLAG_SELECTOR_ONLY) != 0; }
 inline uint16_t sigStartBit(const CanSignalConfig &s) { return uint16_t(s.bits & SIG_START_BIT_MASK); }
 inline uint8_t sigBitLength(const CanSignalConfig &s)
 { return uint8_t(((s.bits >> 9) & SIG_BITLEN_MASK) + 1); }
@@ -1167,7 +1294,21 @@ inline void sigSetHeader(CanSignalConfig &s, uint16_t msgIdx, uint8_t byteOrder,
 {
     const uint16_t m = msgIdx == SIG_MSG_NONE ? SIG_MSG_IDX_MASK
                                               : uint16_t(msgIdx & SIG_MSG_IDX_MASK);
-    s.msg_and_flags = uint16_t(m | uint16_t((byteOrder & 1) << 9) | uint16_t((isActive & 1) << 10));
+    // Preserves the rest of the word so sigSetTxWrap may be called on either
+    // side of this — mirroring the firmware, where assigning the whole word
+    // made the two setters order-dependent.
+    s.msg_and_flags = uint16_t((s.msg_and_flags & uint16_t(~0x07FF)) | m
+                               | uint16_t((byteOrder & 1) << 9) | uint16_t((isActive & 1) << 10));
+}
+inline void sigSetTxWrap(CanSignalConfig &s, bool wrap)
+{
+    s.msg_and_flags = uint16_t(wrap ? (s.msg_and_flags | SIG_FLAG_TX_WRAP)
+                                    : (s.msg_and_flags & uint16_t(~SIG_FLAG_TX_WRAP)));
+}
+inline void sigSetSelectorOnly(CanSignalConfig &s, bool on)
+{
+    s.msg_and_flags = uint16_t(on ? (s.msg_and_flags | SIG_FLAG_SELECTOR_ONLY)
+                                  : (s.msg_and_flags & uint16_t(~SIG_FLAG_SELECTOR_ONLY)));
 }
 inline void sigSetBits(CanSignalConfig &s, uint16_t startBit, uint8_t bitLength, uint8_t valueType,
                        int8_t decimals, uint8_t muxByteOffset)
@@ -1204,8 +1345,8 @@ inline void sigSetMsgIdx(CanSignalConfig &s, uint16_t msgIdx)
 }
 
 static_assert(sizeof(MathConfig) == 24, "must match firmware");
-static_assert(sizeof(ConditionTerm) == 10, "must match firmware");
-static_assert(sizeof(ConditionConfig) == 35, "must match firmware");
+static_assert(sizeof(ConditionTerm) == 8, "must match firmware");
+static_assert(sizeof(ConditionConfig) == 56, "must match firmware");
 static_assert(sizeof(DeviceStatus) == 39, "must match firmware");
 static_assert(sizeof(InjectCanPayload) == 71, "must match firmware");
 static_assert(sizeof(MonitorStreamPayload) == 76, "must match firmware");
@@ -1281,7 +1422,11 @@ constexpr int WRITE_CHUNK_SIGNALS    = 7;  // 4 + 7*64  = 452 (64 B signal; 8 ->
                                            // 2/frame at the old 112-byte cap, so a
                                            // full-table Send is 3.5x fewer round trips
 constexpr int WRITE_CHUNK_MATH       = 20; // 4 + 20*24 = 484 (21 -> 508)
-constexpr int WRITE_CHUNK_CONDITIONS = 14; // 4 + 14*35 = 494 (15 -> 529)
+// 14 -> 8 with the record's growth to 56 bytes: 4 + 8*56 = 452, where 9 would
+// be 508 and overrun MAX_TX_PAYLOAD. Not a free choice, and the device would
+// NACK ERR_INVALID_LEN rather than misread it — but a Send that cannot deliver
+// a condition table is not a failure mode worth discovering in the field.
+constexpr int WRITE_CHUNK_CONDITIONS = 8;  // 4 + 8*56 = 452 (9 -> 508)
 constexpr int WRITE_CHUNK_COUNTERS   = 15; // 4 + 15*31 = 469 (16 -> 500)
 constexpr int WRITE_CHUNK_TIMERS     = 24; // 4 + 24*20 = 484 (25 -> 504)
 constexpr int WRITE_CHUNK_CONSTANTS  = 70; // 4 + 70*7  = 494 (71 -> 501)
@@ -1311,7 +1456,9 @@ constexpr int READ_CHUNK_MESSAGES   = 125; // 4 + 125*14 = 1754; the cap allows 
 constexpr int READ_CHUNK_SIGNALS    = 31;  // 4 + 31*64  = 1988 (64 B signal;
                                            // 32 -> 2052 > 2030)
 constexpr int READ_CHUNK_MATH       = 84;  // 4 + 84*24  = 2020 (24 B with operand C)
-constexpr int READ_CHUNK_CONDITIONS = 50;  // 4 + 50*35  = 1754 (v14 condition is 35 B)
+// 50 -> 36 for the same reason: 4 + 36*56 = 2020 against the device's
+// MAX_RESPONSE_PAYLOAD of 2030, where 37 would be 2076 and be refused.
+constexpr int READ_CHUNK_CONDITIONS = 36;  // 4 + 36*56 = 2020 (37 -> 2076)
 constexpr int READ_CHUNK_COUNTERS   = 50;  // 4 + 50*31  = 1554 (the whole table)
 constexpr int READ_CHUNK_TIMERS     = 50;  // 4 + 50*20  = 1004 (the whole table now
                                            // that MAX_TIMERS is 50)

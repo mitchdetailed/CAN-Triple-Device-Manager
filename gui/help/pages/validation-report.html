@@ -81,12 +81,12 @@ excess.</li>
 <p>The channel-level warning that matters most is <b>two things writing the
 same channel</b>. The device has one value slot per channel, so two writers
 overwrite each other and whichever runs last wins. Every writer counts —
-receive rows, math, conditions, counters, timers, integrators, constants,
+receive rows, math, User Conditions, counters, timers, integrators, constants,
 table outputs and the channel a Transmit CRC8 message publishes its checksum
 to — an inactive row counts as no writer at all, and one warning is
 raised per channel naming all of its writers. See
 <a href="math-channels.html">Math Channels</a>,
-<a href="conditions.html">Conditions</a>,
+<a href="conditions.html">User Conditions</a>,
 <a href="constants.html">Constants</a> and
 <a href="tables.html">Lookup Tables</a>.</p>
 
@@ -151,7 +151,7 @@ termination.</li>
 order.</li>
 <li><b>Channels By Function</b> — Communications first (each section with its
 type, ID, length, alignment, timing, routing and its per-row bit/length/
-type/factor/offset detail), then Calculations (math, conditions, counters,
+type/factor/offset detail), then Calculations (math, User Conditions, counters,
 timers, integrators, constants and tables, each with what it uses and what it
 generates).</li>
 <li><b>Incomplete Channels</b> — channels something consumes but nothing

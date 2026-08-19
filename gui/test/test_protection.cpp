@@ -78,7 +78,7 @@ static int failures = 0;
 // re-reading something this build just WROTE has to be handed this number:
 // passing a stale one re-runs the pre-14 migration and ratchets a Read Only
 // section into Hidden, which is property 2 above failing silently.
-static constexpr int kCurrentSchemaVersion = 16;
+static constexpr int kCurrentSchemaVersion = 19;
 // The last schema that spelled protection with the legacy boolean keys.
 static constexpr int kLegacySchemaVersion = 13;
 
@@ -2059,9 +2059,11 @@ static void testWireRoundTripPreservesTier()
     CHECK(mr.tables.relays.size() == 3);
 
     // Outbound: the level is in the flags, and the retired key field is zero in
-    // every record. The device scrubs reserved[] on the way in as well, but a
+    // every record. The device scrubs `reserved` on the way in as well, but a
     // host that filled it would still be putting private data on a wire other
-    // hosts read.
+    // hosts read. One byte rather than four since store v10 claimed the other
+    // three for Triggered transmit; none of these cases is triggered, so their
+    // trigger fields read as the unset sentinel.
     for (const CanMessageConfig &m : mr.tables.messages) {
         bool matched = false;
         for (const Case &k : cases) {
@@ -2071,8 +2073,9 @@ static void testWireRoundTripPreservesTier()
             CHECK((m.flags & MSGPROT_MASK) == commsProtectionToWire(k.tier));
         }
         CHECK(matched);
-        CHECK(m.reserved[0] == 0 && m.reserved[1] == 0 && m.reserved[2] == 0
-              && m.reserved[3] == 0);
+        CHECK(m.reserved == 0);
+        CHECK(m.tx_trigger_flags == 0);
+        CHECK(m.tx_trigger_cond == TX_TRIGGER_COND_NONE);
     }
     for (const RelayConfig &rl : mr.tables.relays) {
         bool matched = false;

@@ -206,8 +206,27 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                         add(ValidationIssue::Error, rloc, reason);
                     if (row.dbcFactor == 0.0)
                         add(ValidationIssue::Warning, rloc,
-                            QStringLiteral("DBC factor is zero — the channel is fixed at the "
-                                           "DBC offset"));
+                            QStringLiteral("bit resolution is zero — the channel is fixed at "
+                                           "the offset"));
+                    if (!row.clampToRange) {
+                        // Two ways the roll-over box can be ticked on a row that
+                        // will not honour it. Neither is reachable through the
+                        // editor — it offers the box only on a transmit row, and
+                        // the preview goes quiet on IEEE754 — but a .ct3 is
+                        // hand-editable text and a Get can hand back a foreign
+                        // configuration, so both are worth naming rather than
+                        // letting the device quietly disagree with the file.
+                        if (s.isReceive())
+                            add(ValidationIssue::Warning, rloc,
+                                QStringLiteral("set to roll over, but this is a receive row — "
+                                               "the device always clamps on receive and will "
+                                               "ignore it"));
+                        else if (row.dbcType == int(DbcType::IEEE754))
+                            add(ValidationIssue::Warning, rloc,
+                                QStringLiteral("set to roll over, but an IEEE754 field has no "
+                                               "range to roll over; only the channel's own "
+                                               "clamp is skipped"));
+                    }
                     if (!config.catalog().findByName(row.channelName).isValid())
                         add(ValidationIssue::Warning, rloc,
                             QStringLiteral("channel is not in the catalogue (base resolution "
@@ -264,6 +283,40 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                 if (s.transmitRateHz < 1 || s.transmitRateHz > 200)
                     add(ValidationIssue::Error, loc,
                         QStringLiteral("transmit rate must be 1–200 Hz"));
+                // Triggered transmit. Errors, not warnings, in both directions:
+                // a message set to speak only on a condition and given no usable
+                // condition would otherwise map to one that transmits
+                // continuously, which is the opposite of what was configured and
+                // puts frames on a bus nobody asked for.
+                if (!s.cyclic) {
+                    if (s.transmitCondition.isEmpty()) {
+                        add(ValidationIssue::Error, loc,
+                            QStringLiteral("Triggered transmission with no User Condition "
+                                           "selected"));
+                    } else {
+                        bool found = false;
+                        for (const ConditionRow &c : config.conditionRows) {
+                            if (c.active
+                                && c.outputChannel.compare(s.transmitCondition,
+                                                           Qt::CaseInsensitive) == 0) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found)
+                            add(ValidationIssue::Error, loc,
+                                QStringLiteral("transmit condition '%1' is not the output of "
+                                               "any active User Condition")
+                                    .arg(s.transmitCondition));
+                    }
+                } else if (!s.transmitCondition.isEmpty()) {
+                    // Harmless — the mapper ignores the field on a Cyclic
+                    // message — but worth saying, because it is still on
+                    // screen and reads as if it were doing something.
+                    add(ValidationIssue::Info, loc,
+                        QStringLiteral("transmission is Cyclic, so the transmit condition is "
+                                       "not used"));
+                }
                 if (s.compound) {
                     bool anyIdentRows = false;
                     for (const CompoundIdentifier &ident : s.identifiers)
@@ -271,16 +324,94 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                             anyIdentRows = true;
                             break;
                         }
-                    if (!anyIdentRows)
-                        // Not "it sends its always-present channels": a compound
-                        // section's channels outside identifiers are never mapped
-                        // (mapToDevice emits identifier rows only — the warning
-                        // above says so), so this message reaches the device with
-                        // no signals at all and transmits zeros.
-                        add(ValidationIssue::Warning, loc,
-                            QStringLiteral("compound transmit message has no identifier "
-                                           "channels — the device transmits an empty "
-                                           "(all-zero) frame each period"));
+                    if (!anyIdentRows) {
+                        // Still worth saying, but it no longer means one blank
+                        // frame: every CONFIGURED identifier now emits its own
+                        // variant, carrying its selector over a zeroed payload.
+                        // That is a legitimate configuration — a request or ping
+                        // frame is exactly this — so the warning says what will
+                        // go out rather than implying a mistake.
+                        int declared = 0;
+                        for (const CompoundIdentifier &ident : s.identifiers)
+                            if (ident.configured && ident.idMask != 0)
+                                ++declared;
+                        if (declared > 0)
+                            add(ValidationIssue::Info, loc,
+                                QStringLiteral("no identifier has channels — each period the "
+                                               "device sends %1 frame(s) carrying only their "
+                                               "selectors, over an all-zero payload")
+                                    .arg(declared));
+                        else
+                            add(ValidationIssue::Warning, loc,
+                                QStringLiteral("compound transmit message has no identifier "
+                                               "channels and no usable identifier — the device "
+                                               "transmits an empty (all-zero) frame each "
+                                               "period"));
+                    }
+
+                    // Two identifiers that select the same value ARE one
+                    // variant, and the device says so by sending one frame
+                    // where the author expected several. Nothing downstream can
+                    // separate them either: the engine collects DISTINCT
+                    // (byte, masked id, mask) triples, and a receiver reading
+                    // the selector out of the frame has exactly the same
+                    // problem. Compared on the MASKED value, because that is
+                    // what both the gate and the wire actually carry.
+                    for (int i = 0; i < s.identifiers.size(); ++i) {
+                        const CompoundIdentifier &a = s.identifiers[i];
+                        if (!a.configured || a.rows.isEmpty())
+                            continue;
+                        for (int j = i + 1; j < s.identifiers.size(); ++j) {
+                            const CompoundIdentifier &b = s.identifiers[j];
+                            if (!b.configured || b.rows.isEmpty())
+                                continue;
+                            if (a.byteOffset != b.byteOffset || a.idMask != b.idMask)
+                                continue;
+                            if ((a.id & a.idMask) != (b.id & b.idMask))
+                                continue;
+                            add(ValidationIssue::Error, loc,
+                                QStringLiteral("compound identifiers %1 and %2 both select "
+                                               "0x%3 — the device treats them as ONE variant "
+                                               "and sends a single frame, not one per "
+                                               "identifier")
+                                    .arg(i + 1)
+                                    .arg(j + 1)
+                                    .arg(a.id & a.idMask, 2, 16, QLatin1Char('0')));
+                        }
+                    }
+
+                    // The selector is written into the frame LAST, after the
+                    // channels, so a channel sharing those bits is silently
+                    // overwritten by the identifier value — the frame goes out
+                    // carrying the selector where the data should be, which
+                    // reads on a trace as a channel that is always zero.
+                    for (int i = 0; i < s.identifiers.size(); ++i) {
+                        const CompoundIdentifier &ident = s.identifiers[i];
+                        if (!ident.configured)
+                            continue;
+                        // The selector window is the 2 bytes at byteOffset; only
+                        // the bits the mask names are actually written.
+                        const int selFirst = ident.byteOffset * 8;
+                        for (const CommsChannelRow &row : ident.rows) {
+                            const int rowFirst = row.startBit;
+                            const int rowLast = row.startBit + qMax(1, row.bitLength) - 1;
+                            bool clash = false;
+                            for (int bit = 0; bit < 16 && !clash; ++bit) {
+                                if (!((ident.idMask >> bit) & 1u))
+                                    continue;
+                                const int selBit = selFirst + bit;
+                                clash = selBit >= rowFirst && selBit <= rowLast;
+                            }
+                            if (clash)
+                                add(ValidationIssue::Error, loc,
+                                    QStringLiteral("identifier %1 writes its selector over "
+                                                   "channel '%2' — the selector is written "
+                                                   "last, so that channel arrives as the "
+                                                   "identifier value instead of its own")
+                                        .arg(i + 1)
+                                        .arg(row.channelName));
+                        }
+                    }
                 }
             }
             if (s.isCrc8()) {
@@ -444,7 +575,7 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
     for (int i = 0; i < config.conditionRows.size(); ++i)
         if (config.conditionRows[i].active)
             addWriter(config.conditionRows[i].outputChannel,
-                      QStringLiteral("Condition %1").arg(i + 1));
+                      QStringLiteral("User Condition %1").arg(i + 1));
     for (int i = 0; i < config.counterRows.size(); ++i)
         if (config.counterRows[i].active)
             addWriter(config.counterRows[i].outputChannel,
@@ -547,33 +678,84 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
         const ConditionRow &c = config.conditionRows[i];
         if (!c.active)
             continue;
-        const QString loc = QStringLiteral("Condition %1").arg(i + 1);
-        // Every comparison is checked, and the message names which one so a
-        // three-part expression doesn't leave the user hunting for the bad ref.
-        // An EMPTY left side is still an error — that is a comparison the user
-        // never finished, not a reference to something ungenerated.
-        for (int t = 0; t < c.terms.size(); ++t) {
-            const ConditionTermRow &term = c.terms[t];
-            const QString which = c.terms.size() > 1
-                                      ? QStringLiteral("comparison %1: ").arg(t + 1)
-                                      : QString();
-            if (term.aChannel.isEmpty())
+        const QString loc = QStringLiteral("User Condition %1").arg(i + 1);
+        // Both expressions, each checked the same way and each named in its own
+        // findings — a Reset with a dangling reference is a latch that never
+        // clears, which is worth as much of the user's attention as a broken Set.
+        //
+        // A Momentary's Reset half is NOT checked: it is kept in the document so
+        // switching modes does not destroy what was typed, but it reaches no
+        // device and a half-finished expression there is not a fault.
+        struct ExprToCheck {
+            const QList<ConditionTermRow> *terms;
+            const QList<int> *joiners;
+            const char *label;
+        };
+        QList<ExprToCheck> exprs{{&c.setTerms, &c.setJoiners, "Set"}};
+        if (c.mode == ConditionMode::SetReset)
+            exprs.append({&c.resetTerms, &c.resetJoiners, "Reset"});
+
+        for (const ExprToCheck &e : exprs) {
+            const QString side = QString::fromLatin1(e.label) + QLatin1Char(' ');
+            for (int t = 0; t < e.terms->size(); ++t) {
+                const ConditionTermRow &term = e.terms->at(t);
+                const QString which = e.terms->size() > 1
+                                          ? QStringLiteral("comparison %1: ").arg(t + 1)
+                                          : QString();
+                if (term.isMessageOp()) {
+                    // A message operand is not a channel reference, so it is
+                    // checked against the document's messages instead. An empty
+                    // one is a comparison the user never finished.
+                    if (term.aMessage.isEmpty()) {
+                        add(ValidationIssue::Error, loc,
+                            QStringLiteral("%1%2no message selected").arg(side, which));
+                    } else {
+                        bool found = false;
+                        const int b = term.aMessageBus - 1;
+                        if (b >= 0 && b <= 2)
+                            for (const CommsSection &ms : config.bus[b].sections)
+                                if (ms.device != SectionDevice::Off && !ms.isRelay()
+                                    && ms.name.compare(term.aMessage, Qt::CaseInsensitive) == 0) {
+                                    found = true;
+                                    break;
+                                }
+                        if (!found)
+                            add(ValidationIssue::Error, loc,
+                                QStringLiteral("%1%2CAN %3 has no message named '%4'")
+                                    .arg(side, which)
+                                    .arg(term.aMessageBus)
+                                    .arg(term.aMessage));
+                    }
+                    continue;
+                }
+                // An EMPTY left side is still an error — that is a comparison
+                // the user never finished, not a reference to something
+                // ungenerated.
+                if (term.aChannel.isEmpty())
+                    add(ValidationIssue::Error, loc,
+                        QStringLiteral("%1%2no input channel selected").arg(side, which));
+                else
+                    noteReference(term.aChannel, loc, side + which + QStringLiteral("input"));
+                if (term.bIsChannel)
+                    noteReference(term.bChannel, loc, side + which + QStringLiteral("input"));
+            }
+            if (e.terms->isEmpty())
                 add(ValidationIssue::Error, loc,
-                    QStringLiteral("%1no input channel selected").arg(which));
-            else
-                noteReference(term.aChannel, loc, which + QStringLiteral("input"));
-            if (term.bIsChannel)
-                noteReference(term.bChannel, loc, which + QStringLiteral("input"));
+                    QStringLiteral("%1expression has no comparisons").arg(side));
+            if (e.joiners->size() != qMax(0, int(e.terms->size()) - 1))
+                add(ValidationIssue::Error, loc,
+                    QStringLiteral("%1expression is malformed (%2 comparisons but %3 AND/OR "
+                                   "joins)")
+                        .arg(side).arg(e.terms->size()).arg(e.joiners->size()));
         }
-        if (c.terms.isEmpty())
-            add(ValidationIssue::Error, loc, QStringLiteral("no comparisons"));
-        if (c.joiners.size() != qMax(0, int(c.terms.size()) - 1))
+        if (c.mode == ConditionMode::Momentary
+            && (c.latchHz < 1 || c.latchHz > int(COND_LATCH_MAX_HZ)))
             add(ValidationIssue::Error, loc,
-                QStringLiteral("expression is malformed (%1 comparisons but %2 AND/OR joins)")
-                    .arg(c.terms.size()).arg(c.joiners.size()));
+                QStringLiteral("latch frequency must be 1–%1 Hz").arg(int(COND_LATCH_MAX_HZ)));
         if (c.outputChannel.isEmpty())
             add(ValidationIssue::Error, loc, QStringLiteral("no output channel"));
     }
+
     const auto &checkInput = noteReference; // trigger/enable/reset inputs are references
     for (int i = 0; i < config.counterRows.size(); ++i) {
         const CounterRow &c = config.counterRows[i];

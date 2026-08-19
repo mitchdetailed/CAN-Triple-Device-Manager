@@ -62,7 +62,7 @@ Firmware Update status names the specific reason. See
 
 ## "Two writers" warning in Check Channels
 
-The warning that two (or more) things write the same channel means exactly that: the device has one value slot per channel, so the writers overwrite each other and whichever runs last wins. Every writer counts — receive message rows, math channels, conditions, counters, timers, integrators, constants and table outputs — and one warning is raised per channel, naming all of them. An inactive row counts as no writer.
+The warning that two (or more) things write the same channel means exactly that: the device has one value slot per channel, so the writers overwrite each other and whichever runs last wins. Every writer counts — receive message rows, math channels, User Conditions, counters, timers, integrators, constants and table outputs — and one warning is raised per channel, naming all of them. An inactive row counts as no writer.
 
 It is a **Warning**, never an Error, so it does not block Send: there are configurations where last-writer-wins is intended. If it is not what you meant, re-point one of the named writers at its own channel. *Reading* a channel in many places is always fine — transmitting it, using it in math or as a table axis never alters the value. See [Validation &amp; the Config Summary](validation-report.md).
 

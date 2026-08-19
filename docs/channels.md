@@ -1,6 +1,6 @@
 # Channels
 
-A channel is a named value the device holds — "Engine RPM", "Coolant Temp" — with a data type, resolution, range and units. Channels are *written* by receive message rows and by calculations ([math](math-channels.md), [conditions](conditions.md), [constants](constants.md), [tables](tables.md), [counters](counters.md), [timers](timers.md), [integrators](integrators.md)), and *read* by transmit message rows, calculation inputs and the [channel monitor](monitor.md). A channel received in one message can be re-transmitted in another.
+A channel is a named value the device holds — "Engine RPM", "Coolant Temp" — with a data type, resolution, range and units. Channels are *written* by receive message rows and by calculations ([math](math-channels.md), [User Conditions](conditions.md), [constants](constants.md), [tables](tables.md), [counters](counters.md), [timers](timers.md), [integrators](integrators.md)), and *read* by transmit message rows, calculation inputs and the [channel monitor](monitor.md). A channel received in one message can be re-transmitted in another.
 
 Almost every channel is one you create. The exception is the **device channels** below, which the CAN Triple produces about itself and which are always available.
 
@@ -154,7 +154,7 @@ Because the device writes it, nothing else should. Pointing a calculation's outp
 **Tools &gt; Channel Editor…** lists every channel in the document in one sortable table with columns **Channel**, **Data Type**, **Dec**, **Resolution**, **Minimum**, **Maximum**, **Unit**, **Default on Timeout** and **Source**.
 - **Search :** filters as you type — any part of the name, or a regular expression (^Cruise, Speed$, set|limit).
 - **Default on Timeout** shows the value a channel reverts to when its receive message times out — filled in only when that message declares a Receive Timeout *and* has "Default value on timeout" enabled (see [Communications](communications.md)).
-- **Source** names what generates the channel: the comms section that carries it ("CAN1 · Dash") or publishes its checksum to it ("CAN1 · Dash CRC8" — see [Transmit CRC8](communications.md#crc8)), or Math, Condition, Counter, Timer, Integrator, Constant, Table 2x16, Table 8x8 — or "unused".
+- **Source** names what generates the channel: the comms section that carries it ("CAN1 · Dash") or publishes its checksum to it ("CAN1 · Dash CRC8" — see [Transmit CRC8](communications.md#crc8)), or Math, User Condition, Counter, Timer, Integrator, Constant, Table 2x16, Table 8x8 — or "unused".
 - **New…** creates a channel; **Edit…** opens the selected one. Double-clicking a row also opens it.
 
 > **Warning:** A row drawn in the warning colour has a data type too small for its own range — the device clamps every reading to what the type can represent, so such a channel reads as stuck at its ceiling. The Data Type column shows the suggested replacement (e.g. "u16  ⚠ → u32") and the summary line counts the affected channels. Fix it by editing the channel's type.
@@ -237,10 +237,26 @@ decodes the wrong bits without anything to object to. Changing an existing row
 keeps its values.</i></td></tr>
 <tr><td><b>DBC Type :</b></td><td><b>Unsigned</b>, <b>Signed</b> or
 <b>IEEE754</b> (32-bit float).</td></tr>
-<tr><td><b>DBC Factor :</b> / <b>DBC Offset :</b></td><td>The scaling:
-<b>Physical = raw × Factor + Offset</b>, previewed live under the
+<tr><td><b>Bit Resolution :</b></td><td>What one raw count is worth, in the
+channel's units. 0.1 means each count is a tenth. The same number reads both
+ways: a received count of 7 is 0.7, and transmitting 0.7 puts 7 on the
+wire.</td></tr>
+<tr><td><b>Offset :</b></td><td>Added to the scaled value to reach the
+channel's units — <b>-40</b> on a temperature whose counts start at -40 makes a
+raw 0 read as -40. Type the offset the channel HAS, in both directions; the
+device inverts it when transmitting. Previewed live under the
 fields.</td></tr>
+<tr><td><b>Clamp to Signal Limit :</b></td><td><b>Transmit rows
+only</b>, ticked by default. Ticked, a value too big for the field is sent as
+the biggest the field can hold — 256 into 8 bits sends <b>255</b>. Unticked,
+only the low bits are sent, so the count rolls over and 256 sends <b>0</b>.
+Under the fields the preview names the range the bits actually hold, in the
+channel's own units, so the choice is made against a number.</td></tr>
 </table>
+
+> **Note:** Unticked also stops the CHANNEL's range from clamping first. That is not a side effect, it is the point: the channel's Range Minimum…Maximum is applied before the field width is ever consulted, so a channel ranged 0…255 would present 255 and an 8-bit field would have nothing left to roll over. Rolling over means the value goes out as it is and the field keeps its low bits.
+
+Roll-over is what a free-running counter, a wrapping angle, or a value feeding someone else's checksum wants — the count is *supposed* to return to zero. Clamping is what a measurement wants: a coolant temperature that briefly reads past the top of its field should report the top of its field, not suddenly report the bottom. Receive rows have no such choice and always clamp: a received field is as wide as it is, so nothing can overflow it, and the clamp on that side is the channel's declared range.
 
 The dialog validates the row as you type — a field that does not fit the frame blocks OK with the reason — and shows one informational line:
 - A **transmit** row naming a channel nothing writes yet transmits its default value until a receive row or a calculation writes it — information, not an error.

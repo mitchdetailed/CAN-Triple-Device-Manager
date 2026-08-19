@@ -52,13 +52,20 @@ the real application, v6.51, on this machine).
   requires, and nothing else would ever report it.)
 - Table capacities, declared in both `protocol.h` and `wire_structs.h` and
   asserted equal in `test_firmware_link`: messages **500** (see the 9-bit
-  ceiling in §3), signals **1000**, math 100, conditions 100, counters 50,
+  ceiling in §3), signals **1000**, math 100, conditions **250**, counters 50,
   timers **50**, constants 100, relays 32, 2x16 tables 8, 8x8 tables **8**
   (and therefore 64 grid-row records — table `t` owns rows `t*8 .. t*8+7`),
-  integrators 8. Together they are 86,800 B of the 98,304 B (96 KB) config
+  integrators 8. Together they are 126,368 B of the 131,072 B (128 KB) config
   region; `CFG_TOTAL` in `flash_store.c` is generated from `FLASH_TABLE_LIST`
   and `_Static_assert`ed against the region size, so that total is derived
   rather than quoted.
+- **Conditions went 100 → 250**, and that is where most of the layout's slack
+  went: `ConditionConfig` is 35 B, `PAD8(35)` is 40, so the table costs
+  10,000 B where it cost 4,000 and only **4,704 B** of the region are left.
+  What caps the next raise is not flash, though — it is the shared channel
+  pool. Every condition owns an output slot, so 250 of them claim up to 250 of
+  the 1000 signal slots, and another 250 signals would cost 16,000 B against
+  4,704 spare.
 
 Commands (see `../include/protocol.h`): GET_STATUS 0x01, WRITE/READ
 MSG 0x02/0x03, SIG 0x04/0x05, MATH 0x06/0x07, COND 0x08/0x09,
@@ -111,11 +118,12 @@ replacing the 4x4) is the most recent.
 Known firmware gaps are collected in `FIRMWARE-NOTES.md`.
 
 **The version numbers were reset.** `PROTOCOL_VERSION` and `FLASH_STORE_VERSION`
-are both **1**, and the dead `PROTOCOL_VERSION_V2`…`_V17` ladder is deleted — it
-was never compared against anything, so it recorded a release history no customer
-ever saw. Nothing has shipped; a version whose only two readers are halves of one
-repository that are always rebuilt together is a liability, not a compatibility
-guarantee. v1 is the first protocol anyone outside this repo will meet. The
+were both set to **1**, and the dead `PROTOCOL_VERSION_V2`…`_V17` ladder is
+deleted — it was never compared against anything, so it recorded a release
+history no customer ever saw. Nothing has shipped; a version whose only two
+readers are halves of one repository that are always rebuilt together is a
+liability, not a compatibility guarantee. v1 is the first protocol anyone
+outside this repo will meet. The
 `v6`/`v8`/`v13`… tags above and throughout this document therefore read as
 **development milestones** — the order features arrived in — and no longer as a
 number that crosses the wire. The practical consequence is the same one every
@@ -123,14 +131,32 @@ number that crosses the wire. The practical consequence is the same one every
 rejected rather than misread, so the first boot after flashing comes up on
 bring-up defaults and the configuration has to be sent again.
 
+The two numbers have not stayed together since, and that asymmetry is the
+point. `PROTOCOL_VERSION` is **still 1** — the length check
+(`4 + count*item_size`) is what makes a version mismatch fail cleanly, so the
+wire number buys nothing a record size does not. A stored *layout*, on the
+other hand, really does move, and `FLASH_STORE_VERSION` is **10**: most
+recently for `MAX_CONDITIONS` 100 → 250, which shifts every table below the
+conditions and would otherwise have a v9 image misread record-for-record
+before its CRC ever ran. The GUI's `EXPECTED_STORE_VERSION` is the same
+number, and Send Configuration checks it against the unit **before it writes
+anything**, so a mismatch is named up front rather than discovered as a
+part-written device.
+
 **The `.ct3` FILE schema was deliberately NOT reset with it.**
-`kConfigSchemaVersion` keeps counting — it is **15**, the schema in which a
-document can carry a device's compiled script (`scriptBytecode`: the image a Get
-retained, for which no source exists anywhere, so the file is the only copy) —
-and files written at 2 through 14 are on people's disks right now. What each
-bump was for lives beside the constant in `configuration.cpp`; the one the
-migration below is about is **12**, the schema in which the two-axis lookup
-table became an 8x8 (the `tables4x4` key became `tables8x8`). Those keep
+`kConfigSchemaVersion` keeps counting — it is **17**, the schema in which a
+transmit section can name the User Condition that triggers it
+(`transmitCondition` / `resetConditionOnTransmit`) — and files written at 2
+through 16 are on people's disks right now. 17 is additive, and the bump is
+mandatory for the familiar reason: `"cyclic": false` has been a legal, inert
+value in every file since the beginning, so an older Manager reads a Triggered
+section as a perfectly ordinary message, finds nothing missing, and sends one
+that transmits **continuously** — traffic on a customer's bus nobody asked
+for, out of a file that looked like it loaded cleanly. Refusing the file names
+the real remedy instead. What each bump was for lives beside the constant in
+`configuration.cpp`; the one the migration below is about is **12**, the schema
+in which the two-axis lookup table became an 8x8 (the `tables4x4` key became
+`tables8x8`). Those keep
 loading: a schema-11 `tables4x4` entry is read and placed in the top-left of an
 8x8, counts and cells intact, because a 4x4 row always carried variable-length
 site lists and an `outputs` grid strided by its own X width, never a fixed 4.
@@ -906,9 +932,39 @@ that password either, which is the trade its author made.
     has an FD Data rate set), Base Address (hex,
     `0x%03X` when Standard / `0x%08X` when Extended), Message Length (plain
     text field, default 8; 0–8 classic or 0–8/12/16/20/24/32/48/64 with FD),
-    Transmission (Cyclic/Triggered), Transmit Rate (Hz dropdown); *Gateway
+    Transmission (Cyclic/Triggered), Transmit Rate (Hz dropdown), and — shown
+    only while **Triggered** is selected — **Transmit Condition** and a
+    **Reset User Condition once Triggered** tickbox; *Gateway
     Routing*: bus checkboxes selectable only while "Route this message to"
     is checked. Load…/Save As… template buttons.
+
+    **What Triggered means, and why the combo stores a channel name.** A
+    Triggered message goes out only while its User Condition's output is true;
+    the rate still caps how often, so the two settings are deliberately
+    independent — the condition decides *whether*, the period decides *how
+    often*. Transmit Condition is a combo listing the document's User
+    Conditions rather than the channel picker, because the requirement is
+    literally "only User Conditions": the picker offers the whole catalogue by
+    design and has no filter, and adding one would put a **New Channel…**
+    button in front of a choice where creating a channel means nothing. What
+    it stores is the condition's **output channel**, not its row number,
+    because a `ConditionRow` has no name and no stable id — an index would
+    silently re-point at a different condition the moment a row above it was
+    inserted, deleted or reordered. The output channel is the one handle a
+    condition really has, it is unique (two conditions writing one channel is
+    already a validation warning), and it comes free with the rename walk that
+    repoints every other channel reference. `mapToDevice` resolves the name to
+    the index the wire wants and `mapFromDevice` resolves it back.
+
+    A condition the document no longer holds stays in the list marked
+    **"(missing)"** rather than being dropped: losing it here would quietly
+    rewrite the section to a different trigger the next time anyone opened the
+    dialog, and a dangling reference is validation's to report. It reports it
+    as an **Error**, both for a missing condition and for Triggered with none
+    selected — mapping either to a message that transmits continuously is the
+    one outcome the author certainly did not ask for. Leaving the two fields
+    filled in on a *Cyclic* section is only an **Info**: the mapper ignores
+    them, but they are still on screen reading as though they did something.
   - *Received (or Transmitted) Channels*: Message Type (Single/Compound);
     Single → checkbox list of channel rows + **Add… / Change… / Remove**;
     Compound → `Identifiers` table (Number | Offset | ID | ID Mask,
@@ -978,8 +1034,13 @@ that password either, which is the trade its author made.
   step invisibly or by a whole unit. Disabled until
   a channel is selected); **Start Bit** (0–511), **Bit Length** (1–64), **DBC
   Type** (Unsigned / Signed / IEEE754 — IEEE754 forces a 32-bit length and
-  disables the field), **DBC Factor** and **DBC Offset** (`physical = raw ×
-  Factor + Offset`, live preview). These map 1:1 onto the device signal record,
+  disables the field), **Bit Resolution** and **Offset** (`physical = raw ×
+  Resolution + Offset`, live preview — the same two numbers whichever way the
+  message goes; the device inverts them when transmitting, so a transmit row is
+  NOT entered with the signs reversed), and on a TRANSMIT row **Clamp to Signal
+  Limit** (ticked by default — unticked, the field carries the low `bitLength`
+  bits and the count rolls over: 256 into 8 bits is 0, not 255).
+  These map 1:1 onto the signal record,
   so Get Configuration reads them back exactly. Numeric fields are plain inputs
   without spin arrows. OK/Cancel.
 - **Select Channel** — single searchable list of the document's channels
@@ -1082,7 +1143,7 @@ that password either, which is the trade its author made.
   Without Preserve, validation warns about a row with no reset channel; *with*
   Preserve and no reset channel it warns harder, since nothing can ever clear
   it.
-- **Calculations → Math Channels… / Conditions… / Timers… / Up / Down
+- **Calculations → Math Channels… / User Conditions… / Timers… / Up / Down
   Counters… / Constants…** — grid editors mapping 1:1 onto firmware
   `MathConfig` (op, A, B, C, dest), `ConditionConfig` (A op B → boolean output
   channel), `TimerConfig` (start/stop channel, count up/down, limit + rollover,
@@ -1100,6 +1161,41 @@ that password either, which is the trade its author made.
   pure boolean logic channel: its output is true (1) while its expression
   holds, false (0) otherwise (v5 — the earlier block/force-routing, set-value
   and mute-bus actions were removed).
+
+  **They are called User Conditions in the interface.** The menu item, both
+  dialog titles, every validation location ("User Condition 3") and the Config
+  Summary heading all say so; the wire, the firmware and this document's
+  structure names still say `conditions`, because the record and the table did
+  not change. The menu mnemonic moved `o` → `C` with the rename — "Up / Down
+  Counters" already owns U and "Constants" owns n, so C is the letter left.
+  The device holds **250** of them (was 100).
+
+  **Every User Condition output is forced to Boolean.**
+  `Configuration::forceConditionOutputsBoolean()` rewrites dataType, minimum,
+  maximum and decimal places *together* — a "boolean" still carrying a 0–100
+  range is not one — and runs on file load, on close of the User Conditions
+  editor (whether it was accepted or cancelled, since the picker's **Edit…**
+  reaches the full Channel Editor from inside it), and at the end of a Get. It
+  is idempotent and needs no schema version to key off; a document already
+  holding boolean outputs loads bit-identical. It skips device channels, which
+  are the firmware's definition rather than the document's and are the
+  mapper's to refuse, not this function's to silently rewrite.
+
+  The Get case is the one that is not cosmetic. `mapToDevice` now stamps a
+  condition's destination slot with `typeOutputSignal(destIdx, "boolean", 0)`,
+  which it never used to do — which is why a condition output came back from a
+  device with no data type at all, or declared float while carrying nothing but
+  0 and 1. Constants, lookup-table outputs and device channels each stamp their
+  slot from the data type the document declares for them; a condition's type is
+  **knowable without being declared anywhere**, and that is precisely the case
+  that got missed. Stamping it is not enough on its own: on the wire Boolean
+  **is** `SIGNAL_TYPE_UINT8`, the same eight bits as u8 and always was, so
+  `inferDataType` reads every condition output back as "u8" however carefully
+  it was written. The **condition table** is the one piece of unambiguous
+  evidence — a channel a condition writes is a boolean because a condition
+  writes it, whatever the signal record's type byte says — so the re-type runs
+  from the table after the catalogue is installed. Without it, one Get would
+  un-type every condition output in the document.
 
   **v14: a condition holds up to `COND_MAX_TERMS` (3) comparisons joined by
   AND/OR.** The editor has a *Number of comparisons* dropdown (1/2/3) that shows
@@ -1201,9 +1297,37 @@ codepoint boundary rather than leaving half of one behind.
 roughly a third of the round trips on signals that v15 needed. `READ_CHUNK_SIGNALS`
 went the other way, 42 → **31**: the read cap did not move and the record grew.
 
-Comms rows are **DBC-native**: `physical = raw × DBC Factor + DBC Offset`,
+A compound transmit identifier that the author configured but gave no channels
+to still reaches the wire. The device has no stored identifier list — it infers a
+compound message's variants by walking that message's SIGNALS
+(`collectMuxIdentifiers`), which is why an empty identifier used to infer nothing
+and never transmit. The mapper emits one **selector-only** signal per such
+identifier (`SIG_FLAG_SELECTOR_ONLY`, msg_and_flags bit 12); `composeVariant`
+skips it when packing, so the frame carries its selector over a zeroed payload.
+Storing the list per message instead would have cost `MAX_MESSAGES ×
+MAX_TX_MUX_IDS` records for something the signals already imply. On Get the flag
+is what rebuilds the identifier without inventing a channel row for it — the
+signal carries no label, and a blank label would otherwise reconstruct as a
+phantom "Signal 12" channel.
+
+Comms rows are **DBC-native**: `physical = raw × Bit Resolution + Offset`,
 which is exactly what the device stores (`factor`/`offset` as two IEEE-754
-binary32 values). The mapper writes `sig.factor = float(dbcFactor)`,
+binary32 values). The labels lost their `DBC` prefix in v18 — the number says
+how much one raw count is worth and reads the same in both directions, which
+"Factor" left ambiguous — but the model fields and the `.ct3` keys keep
+`dbcFactor`/`dbcOffset`, because renaming a stored key would invalidate every
+saved configuration to no purpose.
+
+The row's `clampToRange` is the one field stored INVERTED: the wire bit is
+`SIG_FLAG_TX_WRAP` (msg_and_flags bit 11), set to mean *wrap*, so that a record
+written before the flag existed — all zeros there — means *clamp*, which is what
+it did. `device_mapper` inverts once in each direction and nothing else in the
+GUI knows about the polarity. Wrapping skips BOTH clamps in the firmware's
+`inverseSignalScaling`, the channel-range one included, because that one runs
+first and would otherwise settle the answer before the field width mattered.
+Receive ignores the bit entirely.
+
+The mapper writes `sig.factor = float(dbcFactor)`,
 `sig.offset = float(dbcOffset)`, `decimal_places = 0`, and uses the channel's
 range for min/max (the firmware **always clamps**; defaults would clip to
 0…255). Because the row fields map 1:1 onto the signal record, Get
@@ -1269,6 +1393,58 @@ same scaling) and the frame is composed and sent on schedule. A transmit
 signal's value slot is the channel's canonical slot, encoded in the signal's
 `unit_type`/`unit_val` as "source index + 1", so a channel received in one
 message can be re-transmitted in another.
+
+**Triggered transmit:** a transmit message carries `tx_trigger_cond` (the index
+of the condition whose boolean output gates it; `TX_TRIGGER_COND_NONE` = 0xFFFF
+when unset, so a Get cannot invent condition 0 out of an empty field) and
+`tx_trigger_flags` (`TXTRIG_ENABLED` 0x01, `TXTRIG_RESET_ON_TX` 0x02). Both were
+taken **in place** from three of the four bytes of the retired per-message key,
+so `CanMessageConfig` is still **14 bytes**, `PAD8(14)` is still 16, no table
+offset moved, `CFG_TOTAL` is unchanged, every chunk constant stands, and the
+feature cost **zero config flash**. `PROTOCOL_VERSION` stays 1 for the same
+reason: the record is the same size, so an older host's write still satisfies
+the length check — and it writes zeros there, which decode to "cyclic", exactly
+the behaviour it intended. The flags need a byte of their own because
+`CanMessageConfig.flags` has none free: 0x01–0x20 are the `MSGFLAG_*` set and
+0x40/0x80 are the `MSGPROT_*` level, whose values are pinned.
+
+`engine_service_transmit` reads the condition's **published value slot** at the
+5 ms transmit slot rather than re-evaluating the expression. That is what makes
+the 200 Hz claim true and cheap: `executeConditions` already runs on every
+calculation tick *and* on every matching received frame, so a condition watching
+bus data is fresher than 200 Hz already and one watching calculated data cannot
+beat the 100 Hz that produced its inputs — re-running it here would cost a table
+pass every 5 ms and could not change an answer. While the condition is false the
+message's period accumulator is **parked at `period`**, so the first slot after
+it goes true transmits immediately; each triggered transmission then **zeroes**
+the accumulator instead of subtracting the period, so the run is phased from the
+trigger rather than dragged back onto a free-running grid. A 1 Hz message whose
+condition becomes true at 1.2 s sends at 1.2, 2.2, 3.2 — not at 2.0, 3.0.
+
+Anything that is not plainly a satisfied, active, in-range condition — the unset
+sentinel, an index past the used count, an inactive record, a destination slot
+out of range — makes the message **silent, never cyclic**. Treating a broken
+reference as "no gate" would put frames on a customer's wire precisely when the
+configuration says it does not know whether they belong there; silence is the
+recoverable failure.
+
+`TXTRIG_RESET_ON_TX` turns that into one frame per rising edge, and it needed
+the engine's **first and only per-condition runtime state**:
+`g_cond_consumed[MAX_CONDITIONS]` (250 B, not persisted, cleared by
+`resetRuntime`). Conditions were purely combinational, which is what lets
+`executeConditions` run from both the tick and the receive path without caring
+how often, and the latch does not change that — it is memory of the
+*transmission*, not of the expression, and it only ever forces the published
+value down. It exists because a plain zero-write into the value slot would be
+overwritten within milliseconds by the next `executeConditions`. A consumed
+condition publishes 0 even while its expression holds and re-arms the instant
+the expression goes false; clearing on `!met` rather than on a timer is what
+makes this an edge trigger and not a rate limiter, and nothing has to agree on a
+duration. The latch is set only after `composeAndTransmit` **accepted** the
+frame, so a full outgoing ring costs one transmission rather than the whole
+edge, and a power cycle re-arms everything — the alternative is a unit that
+boots refusing to send because of an edge it consumed before it was last
+switched off.
 
 **Receive timeout defaults (v4):** a receive message reuses its otherwise-unused
 `period_ms` field as a receive timeout in milliseconds ("Receive Timeout" +

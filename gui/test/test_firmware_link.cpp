@@ -105,6 +105,7 @@ constexpr int kMaxMessages = MAX_MESSAGES;
 constexpr int kMaxSignals = MAX_SIGNALS;
 constexpr int kMaxTimers = MAX_TIMERS;
 constexpr int kMaxCounters = MAX_COUNTERS;
+constexpr int kMaxConditions = MAX_CONDITIONS;
 constexpr int kMaxTables2x16 = MAX_TABLES_2X16;
 // The 8x8 replaces the 4x4. Def + one record per grid ROW, so two capacities:
 // the number of tables, and the number of rows (MAX_TABLES_8X8 * TABLE_8X8_SITES).
@@ -271,6 +272,11 @@ static_assert(commandIdsDistinct(),
 #undef TABLE_2X16_SITES
 #undef TABLE_8X8_SITES
 #undef COND_MAX_TERMS
+// Condition modes: firmware macros, GUI ct:: constexprs of the same name.
+#undef CONDFLAG_ACTIVE
+#undef CONDFLAG_SETRESET
+#undef COND_LATCH_MAX_HZ
+#undef COND_OP_IS_MESSAGE
 // Shared by both table shapes, and declared under these names on both sides.
 #undef TABLEFLAG_ACTIVE
 #undef TABLEFLAG_X_INTERP
@@ -329,6 +335,9 @@ static_assert(commandIdsDistinct(),
 #undef MSGFLAG_ACTIVE
 #undef MSGFLAG_TRANSMIT
 #undef MSGFLAG_TX_SEQUENTIAL
+// Triggered transmit: firmware macros, GUI ct:: constexprs of the same name.
+#undef TXTRIG_ENABLED
+#undef TX_TRIGGER_COND_NONE
 // The monitor flags need the same sweep for the same reason: the firmware
 // defines them as macros and wire_structs.h as ct:: constexprs of identical
 // name, so `ct::MONFLAG_GAP` expands to `ct::0x10` without this.
@@ -2129,6 +2138,570 @@ static void testTxDeadBusDoesNotSilenceOthers()
     engine_clear_config();
 }
 
+// ---- Triggered transmit: a message that speaks only while a User Condition
+// holds, at no more than its own rate.
+//
+// Driven through the two engine halves SEPARATELY — engine_tick_calc at 10 ms,
+// engine_service_transmit at 5 ms — because that is what the device's own glue
+// does (user_code.c events_100Hz / events_200Hz) and the whole claim of the
+// feature is about the difference between the two rates. Calling engine_tick()
+// would drive both at one cadence and prove nothing about the 5 ms check.
+//
+// The condition's input arrives as a received signal, which is not incidental:
+// it is the case a trigger is actually for, and engine_process_can re-evaluates
+// conditions on every matching frame, so the value under test moves the way it
+// moves in service rather than only on a calculation tick. ----
+namespace trig {
+constexpr quint16 kSrc = 0, kCondOut = 1;
+constexpr quint32 kRxId = 0x300, kTxId = 0x301;
+constexpr int kPeriodMs = 1000; // 1 Hz on purpose: 200x the slot the gate is checked in
+
+// One comparison of a Set or Reset expression, against a constant.
+static ct::ConditionTerm cmpTerm(quint16 signalIdx, quint8 op, float k)
+{
+    ct::ConditionTerm t{};
+    t.input_a_signal_idx = signalIdx;
+    t.op = op;
+    t.input_b_type = 0;
+    t.b.input_b_const = k;
+    return t;
+}
+
+// One term that asks whether a message happened. input_a is a MESSAGE index
+// here, and b is left zero.
+static ct::ConditionTerm msgTerm(quint16 msgIdx, quint8 op)
+{
+    ct::ConditionTerm t{};
+    t.input_a_signal_idx = msgIdx;
+    t.op = op;
+    return t;
+}
+
+// A Set/Reset latch on one comparison each, or a Momentary if latchHz > 0.
+static ct::ConditionConfig makeCondition(quint16 dest, const ct::ConditionTerm &set,
+                                         const ct::ConditionTerm *reset, quint8 latchHz)
+{
+    ct::ConditionConfig c{};
+    c.flags = ct::CONDFLAG_ACTIVE;
+    c.dest_signal_idx = dest;
+    c.set_terms[0] = set;
+    c.set_count = 1;
+    if (reset) {
+        c.flags |= ct::CONDFLAG_SETRESET;
+        c.reset_terms[0] = *reset;
+        c.reset_count = 1;
+    }
+    c.latch_hz = latchHz;
+    return c;
+}
+
+// One receive message feeding one 8-bit signal, one transmit message gated on
+// condition 0, and the condition itself — a Set/Reset whose Reset is the
+// inverse of its Set, which is what a migrated pre-modes condition looks like
+// and therefore what a triggered message has always been gated on.
+static bool install(const ct::ConditionConfig *condition = nullptr)
+{
+    ct::CanMessageConfig msgs[2]{};
+    msgs[0].can_id = kRxId;
+    msgs[0].flags = ct::MSGFLAG_ACTIVE;
+    msgs[0].src_bus = 1;
+    msgs[0].dlc = 8;
+    msgs[0].tx_trigger_cond = ct::TX_TRIGGER_COND_NONE;
+
+    msgs[1].can_id = kTxId;
+    msgs[1].flags = ct::MSGFLAG_ACTIVE | ct::MSGFLAG_TRANSMIT;
+    msgs[1].src_bus = 1;
+    msgs[1].dlc = 8;
+    msgs[1].period_ms = kPeriodMs;
+    msgs[1].tx_trigger_cond = 0;
+    msgs[1].tx_trigger_flags = ct::TXTRIG_ENABLED;
+
+    ct::CanSignalConfig sig[2]{};
+    for (auto &s : sig) {
+        s.factor = 1.0f;
+        s.min_val = -1.0e9f;
+        s.max_val = 1.0e9f;
+        ct::sigSetBits(s, 0, 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    }
+    ct::sigSetHeader(sig[kSrc], 0, 0, 1); // message 0 (receive), Intel, active
+    std::memcpy(sig[kSrc].label, "Src", 4);
+    ct::sigSetHeader(sig[kCondOut], ct::SIG_MSG_NONE, 0, 1);
+    std::memcpy(sig[kCondOut].label, "Cond", 5);
+
+    // The default is a Set/Reset whose Reset is the inverse of its Set — a
+    // migrated pre-modes condition, and what a triggered message has always
+    // been gated on. A caller wanting a different shape passes it in rather
+    // than writing over slot 0 afterwards: the flash model programs each
+    // doubleword once per erase, so an in-place rewrite fails before anything
+    // under test can run.
+    const ct::ConditionTerm set = cmpTerm(kSrc, ct::COND_OP_GT, 0.5f);
+    const ct::ConditionTerm reset = cmpTerm(kSrc, ct::COND_OP_LTE, 0.5f);
+    const ct::ConditionConfig fallback = makeCondition(kCondOut, set, &reset, 0);
+    const ct::ConditionConfig cond = condition ? *condition : fallback;
+
+    return engine_table_write(ENGINE_TABLE_MESSAGES, 0, 2,
+                              reinterpret_cast<const uint8_t *>(msgs))
+           && engine_table_write(ENGINE_TABLE_SIGNALS, 0, 2,
+                                 reinterpret_cast<const uint8_t *>(sig))
+           && engine_table_write(ENGINE_TABLE_CONDITIONS, 0, 1,
+                                 reinterpret_cast<const uint8_t *>(&cond));
+}
+
+static void arm(bool on)
+{
+    const uint8_t f[8] = {uint8_t(on ? 1 : 0), 0, 0, 0, 0, 0, 0, 0};
+    engine_process_can(1, kRxId, 0, 0, f, 8);
+}
+
+// `count` five-millisecond transmit services, with a calculation tick folded in
+// every second one so the 10 ms chain keeps running underneath — exactly the
+// interleaving events_100Hz and events_200Hz produce.
+//
+// Not named `slots`: Qt defines that as an empty macro for moc, so a parameter
+// by that name vanishes and the loop stops compiling for reasons that read like
+// nonsense.
+static void run(int count)
+{
+    for (int i = 0; i < count; ++i) {
+        if (i % 2 == 1)
+            engine_tick_calc(10);
+        engine_service_transmit(5);
+    }
+}
+
+static int sent()
+{
+    int n = 0;
+    for (const CapturedTx &t : std::as_const(g_txFrames))
+        if (t.id == kTxId)
+            ++n;
+    return n;
+}
+} // namespace trig
+
+static void testTriggeredTransmit()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    CHECK(trig::install());
+
+    // ---- Disarmed is SILENT, not slow. Two full periods with the condition
+    // false produce nothing at all — the message's own rate never gets a look
+    // in, which is the difference between a trigger and a rate limit. ----
+    g_txFrames.clear();
+    trig::arm(false);
+    trig::run(400); // 2,000 ms
+    CHECK(trig::sent() == 0);
+
+    // ---- The rising edge transmits AT ONCE, not at the next grid boundary.
+    // One 5 ms slot after the condition goes true, the frame is out — for a
+    // 1 Hz message. That is the 200 Hz check doing its job. ----
+    g_txFrames.clear();
+    trig::arm(true);
+    trig::run(1);
+    CHECK(trig::sent() == 1);
+
+    // ---- Then the rate governs, and the interval is phased from the TRIGGER.
+    // 995 ms later there is still exactly one frame; at 1,000 ms there are two.
+    // A free-running grid would have fired somewhere inside that window. ----
+    trig::run(199); // 995 ms since the frame that the trigger sent
+    CHECK(trig::sent() == 1);
+    trig::run(1); // 1,000 ms — the period, measured from the trigger
+    CHECK(trig::sent() == 2);
+
+    // ---- Dropping the condition stops it, mid-period and permanently. ----
+    trig::arm(false);
+    g_txFrames.clear();
+    trig::run(600); // 3,000 ms
+    CHECK(trig::sent() == 0);
+
+    // ---- And re-arming starts a fresh interval rather than resuming the old
+    // phase: immediate frame, then one period later. ----
+    trig::arm(true);
+    trig::run(1);
+    CHECK(trig::sent() == 1);
+    trig::run(199);
+    CHECK(trig::sent() == 1);
+    trig::run(1);
+    CHECK(trig::sent() == 2);
+
+    // ---- The run continues for as long as the condition holds. ----
+    trig::run(1200);
+    CHECK(trig::sent() == 8);
+    CHECK(engine_signal_value(trig::kCondOut) == 1.0f);
+
+    engine_clear_config();
+}
+
+// A Set/Reset condition is a LATCH: it holds its output between edges, and a
+// Reset beats a Set that is still true.
+//
+// The hold is the whole difference from the level a condition used to be, and
+// it is what a migrated configuration must NOT accidentally acquire — which is
+// why the migration pairs a Set with its exact inverse, so the two can never
+// both be false and the latch can never hold anything.
+static void testConditionSetResetLatch()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+
+    // Two independent inputs, so Set and Reset can be driven separately —
+    // which a migrated condition, whose Reset is the inverse of its Set, cannot
+    // do. Both arrive on one receive message.
+    constexpr quint16 kSetIn = 0, kResetIn = 1, kOut = 2;
+    ct::CanMessageConfig msg{};
+    msg.can_id = trig::kRxId;
+    msg.flags = ct::MSGFLAG_ACTIVE;
+    msg.src_bus = 1;
+    msg.dlc = 8;
+    msg.tx_trigger_cond = ct::TX_TRIGGER_COND_NONE;
+
+    ct::CanSignalConfig sig[3]{};
+    for (auto &s : sig) {
+        s.factor = 1.0f;
+        s.min_val = -1.0e9f;
+        s.max_val = 1.0e9f;
+        ct::sigSetBits(s, 0, 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    }
+    ct::sigSetHeader(sig[kSetIn], 0, 0, 1);
+    ct::sigSetBits(sig[kSetIn], 0, 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    ct::sigSetHeader(sig[kResetIn], 0, 0, 1);
+    ct::sigSetBits(sig[kResetIn], 8, 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    ct::sigSetHeader(sig[kOut], ct::SIG_MSG_NONE, 0, 1);
+
+    const ct::ConditionTerm set = trig::cmpTerm(kSetIn, ct::COND_OP_GT, 0.5f);
+    const ct::ConditionTerm reset = trig::cmpTerm(kResetIn, ct::COND_OP_GT, 0.5f);
+    const ct::ConditionConfig cond = trig::makeCondition(kOut, set, &reset, 0);
+
+    CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&msg)));
+    CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 3,
+                             reinterpret_cast<const uint8_t *>(sig)));
+    CHECK(engine_table_write(ENGINE_TABLE_CONDITIONS, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&cond)));
+
+    const auto feed = [](int setIn, int resetIn) {
+        const uint8_t f[8] = {uint8_t(setIn), uint8_t(resetIn), 0, 0, 0, 0, 0, 0};
+        engine_process_can(1, trig::kRxId, 0, 0, f, 8);
+    };
+
+    feed(0, 0);
+    CHECK(engine_signal_value(kOut) == 0.0f);
+    feed(1, 0); // set
+    CHECK(engine_signal_value(kOut) == 1.0f);
+    // THE LATCH: Set goes away and the output STAYS. A level would have dropped.
+    feed(0, 0);
+    CHECK(engine_signal_value(kOut) == 1.0f);
+    engine_tick_calc(10); // and it survives a calculation pass too
+    CHECK(engine_signal_value(kOut) == 1.0f);
+    feed(0, 1); // reset
+    CHECK(engine_signal_value(kOut) == 0.0f);
+    feed(0, 0); // and stays reset
+    CHECK(engine_signal_value(kOut) == 0.0f);
+
+    // RESET IS DOMINANT: both true, output 0, whichever order they arrived in.
+    feed(1, 0);
+    CHECK(engine_signal_value(kOut) == 1.0f);
+    feed(1, 1);
+    CHECK(engine_signal_value(kOut) == 0.0f);
+    feed(1, 1);
+    CHECK(engine_signal_value(kOut) == 0.0f);
+    // Dropping the Reset with the Set still true sets it again — the Set is a
+    // level, not an edge, on this side.
+    feed(1, 0);
+    CHECK(engine_signal_value(kOut) == 1.0f);
+
+    engine_clear_config();
+}
+
+// A Momentary condition pulses: the rising edge of Set drives the output to 1
+// and it drops on its own one period of latch_hz later, whatever Set does in
+// between.
+static void testConditionMomentaryHold()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    // A Momentary on the same input. 10 Hz, so the hold is 100 ms — ten
+    // calculation passes.
+    const ct::ConditionTerm set = trig::cmpTerm(trig::kSrc, ct::COND_OP_GT, 0.5f);
+    const ct::ConditionConfig mom = trig::makeCondition(trig::kCondOut, set, nullptr, 10);
+    CHECK(trig::install(&mom));
+
+    trig::arm(false);
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(trig::kCondOut) == 0.0f);
+
+    // Rising edge: high at once.
+    trig::arm(true);
+    CHECK(engine_signal_value(trig::kCondOut) == 1.0f);
+
+    // Still high 90 ms in, with the input HELD — the hold is a duration, not a
+    // follower, so nothing about the input matters until it goes false and true
+    // again.
+    for (int i = 0; i < 9; ++i)
+        engine_tick_calc(10);
+    CHECK(engine_signal_value(trig::kCondOut) == 1.0f);
+    // 100 ms: dropped by itself, while the Set expression is STILL TRUE. This
+    // is the assertion that separates Momentary from every other mode.
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(trig::kCondOut) == 0.0f);
+    for (int i = 0; i < 50; ++i)
+        engine_tick_calc(10);
+    CHECK(engine_signal_value(trig::kCondOut) == 0.0f);
+
+    // Re-arming needs a real edge: false, then true.
+    trig::arm(false);
+    engine_tick_calc(10);
+    trig::arm(true);
+    CHECK(engine_signal_value(trig::kCondOut) == 1.0f);
+
+    // RETRIGGER RELOADS rather than extends. Half way through the hold, a fresh
+    // edge restarts the full 100 ms — so it is high 90 ms after the SECOND
+    // edge, which it would not be if the remainder had merely been topped up.
+    for (int i = 0; i < 5; ++i)
+        engine_tick_calc(10); // 50 ms in
+    trig::arm(false);
+    trig::arm(true); // fresh edge, no time passing
+    for (int i = 0; i < 9; ++i)
+        engine_tick_calc(10); // 90 ms after it
+    CHECK(engine_signal_value(trig::kCondOut) == 1.0f);
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(trig::kCondOut) == 0.0f);
+
+    // A receive pass carries no time, so bus traffic cannot shorten a hold.
+    trig::arm(false);
+    engine_tick_calc(10);
+    trig::arm(true);
+    for (int i = 0; i < 200; ++i)
+        trig::arm(true); // 200 receive passes, zero elapsed
+    CHECK(engine_signal_value(trig::kCondOut) == 1.0f);
+
+    engine_clear_config();
+}
+
+// "was received" and "was transmitted": true only on the pass the frame
+// actually happened.
+static void testConditionMessageEvents()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    // Condition 0 latches on "message 0 was received" and clears on "message 1
+    // was transmitted" — the request/response pattern the operators exist for,
+    // and the reason the transmit-side tickbox could be retired.
+    const ct::ConditionTerm set = trig::msgTerm(0, ct::COND_OP_MSG_RX);
+    const ct::ConditionTerm reset = trig::msgTerm(1, ct::COND_OP_MSG_TX);
+    const ct::ConditionConfig cond = trig::makeCondition(trig::kCondOut, set, &reset, 0);
+    CHECK(trig::install(&cond));
+
+    g_txFrames.clear();
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(trig::kCondOut) == 0.0f);
+
+    // A frame for message 0 arrives. The event is recorded and evaluated in the
+    // same call, so the latch sets immediately.
+    trig::arm(false); // any frame for kRxId; the payload is irrelevant here
+    CHECK(engine_signal_value(trig::kCondOut) == 1.0f);
+
+    // The event is spent. A calculation pass with no new frame does not re-set
+    // it — but the LATCH holds, which is the point.
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(trig::kCondOut) == 1.0f);
+
+    // The gated message goes out, which fires the Reset on the NEXT evaluation
+    // — the transmit service does not evaluate conditions itself.
+    trig::run(1);
+    CHECK(trig::sent() == 1);
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(trig::kCondOut) == 0.0f);
+
+    // And it stays clear until the next request arrives.
+    for (int i = 0; i < 20; ++i)
+        engine_tick_calc(10);
+    CHECK(engine_signal_value(trig::kCondOut) == 0.0f);
+    trig::arm(false);
+    CHECK(engine_signal_value(trig::kCondOut) == 1.0f);
+
+    // Clear it again, which takes a WHOLE PERIOD of transmit services and not
+    // one — the message is 1 Hz, its accumulator was zeroed by the send above,
+    // and calculation ticks do not advance the transmit scheduler. The reset
+    // arrives when the message actually goes out, not when the latch would
+    // like it to.
+    trig::run(200); // 1,000 ms
+    CHECK(trig::sent() == 2);
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(trig::kCondOut) == 0.0f);
+
+    // A frame matching no receive message produces no event at all: the receive
+    // scan returns before anything is recorded, so there is nothing for a Set
+    // to see.
+    const uint8_t f[8] = {0};
+    engine_process_can(1, 0x7FE, 0, 0, f, 8); // an ID no message claims
+    CHECK(engine_signal_value(trig::kCondOut) == 0.0f);
+
+    engine_clear_config();
+}
+
+// A BATCH compound message emits EVERY variant before its transmit event fires,
+// so a condition reset on "was transmitted" clears after the whole batch and not
+// after the first frame.
+//
+// That ordering is the whole point of pairing a batch message with a Set/Reset:
+// set on the request arriving, send every variant, reset on the send. If the
+// event were recorded per frame instead of per message, the reset would land
+// after variant 1 and variants 2 and 3 would go out with the condition already
+// clear — or not go out at all.
+//
+// Two DISTINCT selector values, because that is what makes two variants. Three
+// identifiers all claiming selector 0 collapse into one, which is a
+// configuration the host now refuses rather than a shape the device can honour.
+static void testBatchCompoundEmitsAllVariantsBeforeItsEvent()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+
+    constexpr quint16 kSrc = 0, kCondOut = 1, kVarA = 2, kVarB = 3;
+
+    ct::CanMessageConfig msgs[2]{};
+    msgs[0].can_id = trig::kRxId;
+    msgs[0].flags = ct::MSGFLAG_ACTIVE;
+    msgs[0].src_bus = 1;
+    msgs[0].dlc = 8;
+    msgs[0].tx_trigger_cond = ct::TX_TRIGGER_COND_NONE;
+    // Compound, BATCH (no MSGFLAG_TX_SEQUENTIAL), triggered on condition 0.
+    msgs[1].can_id = trig::kTxId;
+    msgs[1].flags = ct::MSGFLAG_ACTIVE | ct::MSGFLAG_TRANSMIT;
+    msgs[1].src_bus = 1;
+    msgs[1].dlc = 8;
+    msgs[1].period_ms = trig::kPeriodMs;
+    msgs[1].tx_trigger_cond = 0;
+    msgs[1].tx_trigger_flags = ct::TXTRIG_ENABLED;
+
+    ct::CanSignalConfig sig[4]{};
+    for (auto &s : sig) {
+        s.factor = 1.0f;
+        s.min_val = -1.0e9f;
+        s.max_val = 1.0e9f;
+    }
+    ct::sigSetHeader(sig[kSrc], 0, 0, 1);
+    ct::sigSetBits(sig[kSrc], 0, 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    ct::sigSetHeader(sig[kCondOut], ct::SIG_MSG_NONE, 0, 1);
+    ct::sigSetBits(sig[kCondOut], 0, 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    // The two variants: same message, one selector byte at 0, data clear of it.
+    for (quint16 v : {kVarA, kVarB}) {
+        ct::sigSetHeader(sig[v], 1, 0, 1); // message 1 (the transmit one)
+        ct::sigSetBits(sig[v], 8, 8, ct::SIGNAL_TYPE_UINT8, 0, 0); // byte 1, selector at 0
+        sig[v].mux_mask = 0xFF;
+    }
+    sig[kVarA].mux_id = 1;
+    sig[kVarB].mux_id = 2;
+
+    const ct::ConditionTerm set = trig::msgTerm(0, ct::COND_OP_MSG_RX);
+    const ct::ConditionTerm reset = trig::msgTerm(1, ct::COND_OP_MSG_TX);
+    const ct::ConditionConfig cond = trig::makeCondition(kCondOut, set, &reset, 0);
+
+    CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, 2,
+                             reinterpret_cast<const uint8_t *>(msgs)));
+    CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 4,
+                             reinterpret_cast<const uint8_t *>(sig)));
+    CHECK(engine_table_write(ENGINE_TABLE_CONDITIONS, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&cond)));
+
+    g_txFrames.clear();
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(kCondOut) == 0.0f);
+
+    // The request arrives: the latch sets in the same pass.
+    trig::arm(true);
+    CHECK(engine_signal_value(kCondOut) == 1.0f);
+
+    // One transmit service sends the WHOLE batch — both variants, one call —
+    // and the condition is still set while they go, because the event has not
+    // been evaluated yet.
+    trig::run(1);
+    CHECK(trig::sent() == 2);
+    CHECK(engine_signal_value(kCondOut) == 1.0f);
+
+    // The next evaluation sees the transmit and clears it.
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(kCondOut) == 0.0f);
+
+    // And nothing more goes out until the next request, however long we wait —
+    // the batch was one event, not two.
+    trig::run(600); // 3,000 ms, three periods
+    CHECK(trig::sent() == 2);
+
+    engine_clear_config();
+}
+
+// A trigger that names nothing usable makes the message SILENT, never cyclic.
+//
+// The direction matters more than the mechanism. Falling back to "no gate"
+// would put a message on a customer's bus at full rate precisely when the
+// configuration has stopped making sense, and a stream of unexpected frames is
+// a far worse failure than a message that does not appear.
+static void testTriggeredTransmitBrokenReferenceIsSilent()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+
+    const auto runWith = [](quint16 condIdx, bool presentButInactive) {
+        engine_clear_config();
+        ct::CanMessageConfig msg{};
+        msg.can_id = trig::kTxId;
+        msg.flags = ct::MSGFLAG_ACTIVE | ct::MSGFLAG_TRANSMIT;
+        msg.src_bus = 1;
+        msg.dlc = 8;
+        msg.period_ms = 100;
+        msg.tx_trigger_cond = condIdx;
+        msg.tx_trigger_flags = ct::TXTRIG_ENABLED;
+        CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, 1,
+                                 reinterpret_cast<const uint8_t *>(&msg)));
+        if (presentButInactive) {
+            ct::CanSignalConfig sig{};
+            sig.factor = 1.0f;
+            sig.min_val = -1.0e9f;
+            sig.max_val = 1.0e9f;
+            ct::sigSetHeader(sig, ct::SIG_MSG_NONE, 0, 1);
+            CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 1,
+                                     reinterpret_cast<const uint8_t *>(&sig)));
+            // Present, and its Set would be true (0 > -1), but not active.
+            ct::ConditionConfig cond =
+                trig::makeCondition(0, trig::cmpTerm(0, ct::COND_OP_GT, -1.0f), nullptr, 10);
+            cond.flags &= quint8(~ct::CONDFLAG_ACTIVE);
+            CHECK(engine_table_write(ENGINE_TABLE_CONDITIONS, 0, 1,
+                                     reinterpret_cast<const uint8_t *>(&cond)));
+        }
+        g_txFrames.clear();
+        trig::run(400); // 2,000 ms — twenty periods' worth
+        return trig::sent();
+    };
+
+    CHECK(runWith(ct::TX_TRIGGER_COND_NONE, false) == 0); // the unset sentinel
+    CHECK(runWith(7, false) == 0);                        // past the end of an empty table
+    CHECK(runWith(0, true) == 0);                         // present, but inactive
+
+    engine_clear_config();
+}
+
+// Give a condition the Reset that makes it behave like the level these tests
+// were written against: the exact inverse of its Set, which is also what the
+// migration writes into every configuration loaded from an older file.
+static void giveInverseReset(ct::ConditionRow &c)
+{
+    CHECK(ct::invertConditionExpr(c.setTerms, c.setJoiners, &c.resetTerms, &c.resetJoiners));
+}
+
 // Reference CRC-8, written here independently of the engine's implementation
 // so the two can disagree. Anchored below against PUBLISHED catalogue check
 // values (crc("123456789")) before it is trusted to judge anything: an
@@ -2162,6 +2735,315 @@ static quint8 crc8Ref(const QByteArray &bytes, quint8 poly, quint8 init,
 // must cover the bytes the channels actually packed, which is only true if
 // the stamp runs last), ID elements for the identifier path, and the
 // published channel for the monitor's view of it.
+// Clamp vs roll-over on the way out, driven through the real composer.
+//
+// Six 8-bit fields in one frame, three clamping and three rolling over, fed by
+// constants that each sit OUTSIDE what the field can carry. Byte for byte, the
+// frame is the whole contract:
+//
+//   byte 0  clamp,  unsigned, 256      -> 255   (the biggest 8 bits hold)
+//   byte 1  roll,   unsigned, 256      -> 0     (256 & 0xFF)
+//   byte 2  clamp,  unsigned, -1       -> 0     (the smallest)
+//   byte 3  roll,   unsigned, -1       -> 255   (two's complement, truncated)
+//   byte 4  clamp,  signed,   200      -> 127   (0x7F)
+//   byte 5  roll,   signed,   200      -> 200   (0xC8, which reads back as -56)
+//
+// Byte 6 is the case the flag exists for and the one a field-width-only
+// implementation would get wrong: a channel RANGED 0..255 carrying 300. The
+// physical clamp runs first and would pin it to 255 before the field width was
+// ever consulted, so a rolling row has to skip that clamp too or the roll-over
+// never happens. It must read 300 & 0xFF = 44.
+//
+// Byte 7 is byte 6's mirror and guards the other direction of the same edit: a
+// CLAMPING row on a channel ranged 0..100 carrying 300. Here the channel's
+// range is the thing that decides — 100, not the 255 the field could hold — so
+// deleting the physical clamp outright, rather than merely making it
+// conditional, fails here while byte 6 still passes. The two together pin the
+// clamp to exactly the rows that asked for it.
+//
+// Byte 8 proves the resolution is applied before the truncation, not after:
+// 30.0 at 0.1 per count is raw 300, so it must also read 44 — not 30, and not
+// the 255 a clamping row would send.
+//
+// Bytes 9 and 10 drive the int64/NaN guard, which nothing else reaches. A
+// factor of 1e-30 sends the quotient far past int64, where llround would be
+// undefined; the guard saturates at the largest double below 2^63, whose low
+// bits are zero, so a rolling row sends 0 and a clamping one sends 255. Byte 11
+// feeds a NaN through a constant: it resolves to 0 rather than to whatever a
+// conversion would have produced.
+// A compound variant with no channels of its own still goes out.
+//
+// The device works out which variants a compound message has by walking its
+// SIGNALS — the identifier list is nowhere else — so an identifier with nothing
+// bound to it used to imply nothing and never reached the bus. A selector-only
+// signal declares it and packs nothing, which is the request/ping frame shape:
+// the ID byte IS the message.
+//
+// The frame is laid out so that "packs nothing" is FALSIFIABLE rather than
+// merely true-looking. Byte 1 holds an ALWAYS-PRESENT signal (mux_mask 0, in
+// every variant) carrying 0x77, and the two selector-only signals declare that
+// same byte 1 while sitting LATER in the table. Signals pack in table order and
+// the last writer wins, so a composer that packed a selector-only signal would
+// write its own zero over the 0x77 — byte 1 would read 0x00 in variants 1 and
+// 3. Expecting 0x77 there is what makes the skip observable.
+static void testSelectorOnlyVariantsAreTransmitted()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    g_txFrames.clear();
+
+    ct::CanMessageConfig msg{};
+    msg.can_id = 0x440;
+    msg.flags = ct::MSGFLAG_ACTIVE | ct::MSGFLAG_TRANSMIT; // batch (not SEQUENTIAL)
+    msg.src_bus = 1;
+    msg.dlc = 8;
+    msg.period_ms = 10;
+    msg.tx_trigger_cond = ct::TX_TRIGGER_COND_NONE;
+    CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&msg)));
+
+    // 0: always-present (mask 0) in byte 1, value 0x77 — in every variant.
+    // 1: selector-only, id 1, DECLARING byte 1, later in the table than 0.
+    // 2: a real gated channel, id 2, byte 2, value 0xAB.
+    // 3: selector-only, id 3, also declaring byte 1.
+    ct::CanSignalConfig sig[4]{};
+    for (auto &g : sig) {
+        g.factor = 1.0f;
+        g.min_val = -1.0e9f;
+        g.max_val = 1.0e9f;
+        ct::sigSetHeader(g, 0, 0, 1);
+    }
+    ct::sigSetBits(sig[0], 8, 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    sig[0].mux_mask = 0; // always present
+    sig[0].tx_source = 5; // constant slot 4, encoded +1
+
+    ct::sigSetSelectorOnly(sig[1], true);
+    ct::sigSetBits(sig[1], 8, 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    sig[1].mux_id = 1;
+    sig[1].mux_mask = 0xFF;
+
+    ct::sigSetBits(sig[2], 16, 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    sig[2].mux_id = 2;
+    sig[2].mux_mask = 0xFF;
+    sig[2].tx_source = 6; // constant slot 5, encoded +1
+
+    ct::sigSetSelectorOnly(sig[3], true);
+    ct::sigSetBits(sig[3], 8, 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    sig[3].mux_id = 3;
+    sig[3].mux_mask = 0xFF;
+
+    CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 4,
+                             reinterpret_cast<const uint8_t *>(sig)));
+    ct::ConstantConfig k[2]{};
+    k[0].dest_signal_idx = 4;
+    k[0].value = 0x77;
+    k[0].is_active = 1;
+    k[1].dest_signal_idx = 5;
+    k[1].value = 0xAB;
+    k[1].is_active = 1;
+    CHECK(engine_table_write(ENGINE_TABLE_CONSTANTS, 0, 2,
+                             reinterpret_cast<const uint8_t *>(k)));
+
+    engine_tick(10);
+    // Three variants, three frames — not one.
+    CHECK(g_txFrames.size() == 3);
+    int seen[4] = {0, 0, 0, 0};
+    for (const CapturedTx &t : std::as_const(g_txFrames)) {
+        CHECK(t.id == 0x440);
+        CHECK(t.len == 8);
+        const int sel = t.data[0];
+        CHECK(sel >= 1 && sel <= 3);
+        ++seen[sel];
+        // The always-present byte survives in EVERY variant, including the two
+        // whose only other content is their selector. This is the assertion the
+        // composer's skip earns: without it the selector-only signals pack a
+        // zero here and 0x77 is lost.
+        CHECK(t.data[1] == 0x77);
+        CHECK(t.data[2] == (sel == 2 ? 0xAB : 0x00));
+        for (int b = 3; b < 8; ++b)
+            CHECK(t.data[b] == 0x00);
+    }
+    CHECK(seen[1] == 1 && seen[2] == 1 && seen[3] == 1);
+
+    // Sequential mode rotates over all three too — a selector-only variant is a
+    // full member of the rotation, not a gap in it. From a CLEAN engine: the
+    // flash model programs each doubleword once per erase, so rewriting message
+    // slot 0 in place fails before anything under test can run.
+    engine_init(&cb);
+    engine_clear_config();
+    g_txFrames.clear();
+    ct::CanMessageConfig seqMsg = msg;
+    seqMsg.flags |= ct::MSGFLAG_TX_SEQUENTIAL;
+    CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&seqMsg)));
+    CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 4,
+                             reinterpret_cast<const uint8_t *>(sig)));
+    CHECK(engine_table_write(ENGINE_TABLE_CONSTANTS, 0, 2,
+                             reinterpret_cast<const uint8_t *>(k)));
+    for (int i = 0; i < 3; ++i)
+        engine_tick(10);
+    CHECK(g_txFrames.size() == 3);
+    int rotation[4] = {0, 0, 0, 0};
+    for (const CapturedTx &t : std::as_const(g_txFrames)) {
+        const int sel = t.data[0];
+        CHECK(sel >= 1 && sel <= 3);
+        ++rotation[sel];
+        CHECK(t.data[1] == 0x77);
+    }
+    CHECK(rotation[1] == 1 && rotation[2] == 1 && rotation[3] == 1);
+}
+
+static void testTransmitClampOrRollOver()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    g_txFrames.clear();
+
+    ct::CanMessageConfig msg{};
+    msg.can_id = 0x420;
+    msg.flags = ct::MSGFLAG_ACTIVE | ct::MSGFLAG_TRANSMIT;
+    msg.src_bus = 1;
+    msg.dlc = 12; // CAN FD, so all twelve fields fit one frame
+    msg.period_ms = 10;
+    msg.tx_trigger_cond = ct::TX_TRIGGER_COND_NONE;
+    msg.flags |= ct::MSGFLAG_FD;
+    CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&msg)));
+
+    struct Row {
+        float value;      // what the constant writes to the slot
+        bool wrap;        // the row's choice
+        bool isSigned;
+        float factor;
+        float off;        // the DBC offset, which the transmit path subtracts
+        float lo, hi;     // the CHANNEL's declared range
+        int expect;       // the byte the frame must carry
+    };
+    const float kNaN = std::numeric_limits<float>::quiet_NaN();
+    const Row rows[12] = {
+        {256.0f, false, false, 1.0f,     0.0f, -1.0e9f, 1.0e9f, 255},
+        {256.0f, true,  false, 1.0f,     0.0f, -1.0e9f, 1.0e9f, 0},
+        {-1.0f,  false, false, 1.0f,     0.0f, -1.0e9f, 1.0e9f, 0},
+        {-1.0f,  true,  false, 1.0f,     0.0f, -1.0e9f, 1.0e9f, 255},
+        {200.0f, false, true,  1.0f,     0.0f, -1.0e9f, 1.0e9f, 127},
+        {200.0f, true,  true,  1.0f,     0.0f, -1.0e9f, 1.0e9f, 200},
+        {300.0f, true,  false, 1.0f,     0.0f, 0.0f,    255.0f, 44},
+        {300.0f, false, false, 1.0f,     0.0f, 0.0f,    100.0f, 100},
+        {30.0f,  true,  false, 0.1f,     0.0f, -1.0e9f, 1.0e9f, 44},
+        {1.0f,   true,  false, 1.0e-30f, 0.0f, -1.0e9f, 1.0e9f, 0},
+        {1.0f,   false, false, 1.0e-30f, 0.0f, -1.0e9f, 1.0e9f, 255},
+        // The offset of 5 is what makes this row falsifiable. NaN must resolve
+        // to 0 in the GUARD, after the offset has been subtracted — if instead
+        // the NaN were scrubbed to a physical 0 somewhere upstream, the row
+        // would compute (0 - 5) / 1 = -5 and roll over to 251. Expecting 0
+        // tells the two apart; expecting it with offset 0 would not have.
+        {kNaN,   true,  false, 1.0f,     5.0f, -1.0e9f, 1.0e9f, 0},
+    };
+
+    ct::CanSignalConfig sig[12]{};
+    ct::ConstantConfig k[12]{};
+    for (int i = 0; i < 12; ++i) {
+        sig[i].factor = rows[i].factor;
+        sig[i].offset = rows[i].off;
+        sig[i].min_val = rows[i].lo;
+        sig[i].max_val = rows[i].hi;
+        // Wrap set FIRST, header second, deliberately. sigSetHeader writes the
+        // same 16-bit word, and the version this feature replaced ASSIGNED it
+        // whole — so if it ever goes back to doing that, the CHECK below fails
+        // here. Setting the header first would have hidden exactly that.
+        ct::sigSetTxWrap(sig[i], rows[i].wrap);
+        ct::sigSetHeader(sig[i], 0, 0, 1); // message 0, Intel byte order, active
+        ct::sigSetBits(sig[i], quint16(i * 8), 8,
+                       rows[i].isSigned ? ct::SIGNAL_TYPE_INT8 : ct::SIGNAL_TYPE_UINT8, 0, 0);
+        CHECK(ct::sigTxWrap(sig[i]) == rows[i].wrap);
+        CHECK(ct::sigIsActive(sig[i]) == 1);
+        CHECK(ct::sigMsgIdx(sig[i]) == 0);
+        k[i].dest_signal_idx = quint16(i);
+        k[i].value = rows[i].value;
+        k[i].is_active = 1;
+    }
+    CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 12,
+                             reinterpret_cast<const uint8_t *>(sig)));
+    CHECK(engine_table_write(ENGINE_TABLE_CONSTANTS, 0, 12,
+                             reinterpret_cast<const uint8_t *>(k)));
+
+    engine_tick(10);
+    CHECK(g_txFrames.size() == 1);
+    const CapturedTx &tx = g_txFrames.first();
+    CHECK(tx.id == 0x420);
+    CHECK(tx.len == 12);
+    for (int i = 0; i < 12; ++i)
+        CHECK(int(tx.data[i]) == rows[i].expect);
+
+    // And the other order, on a record of its own: the header first and the
+    // wrap bit after must reach the same place. Both directions matter because
+    // device_mapper writes them in this order and the tests above in the other.
+    ct::CanSignalConfig both{};
+    ct::sigSetHeader(both, 7, 1, 1);
+    ct::sigSetTxWrap(both, true);
+    CHECK(ct::sigTxWrap(both));
+    CHECK(ct::sigMsgIdx(both) == 7);
+    CHECK(ct::sigByteOrder(both) == 1);
+    CHECK(ct::sigIsActive(both) == 1);
+    ct::sigSetHeader(both, 9, 0, 1); // a second header write must not drop it
+    CHECK(ct::sigTxWrap(both));
+    CHECK(ct::sigMsgIdx(both) == 9);
+    ct::sigSetTxWrap(both, false);
+    CHECK(!ct::sigTxWrap(both));
+    CHECK(ct::sigMsgIdx(both) == 9); // clearing it must not disturb the rest
+    CHECK(ct::sigIsActive(both) == 1);
+
+    // The signed roll-over byte read back as a signed field really is -56, so
+    // the receiver of such a frame sees the value the sender rolled to and not
+    // an unsigned 200. This is the sense in which roll-over is lossless: it is
+    // the same eight bits, read with the same convention.
+    CHECK(int(int8_t(tx.data[5])) == -56);
+}
+
+// Wrapping is a TRANSMIT rule. The receive path extracts bit_length bits and
+// then clamps to the channel's range, and neither half consults the flag —
+// so a receive signal carrying it behaves exactly as one without it.
+static void testRollOverIsIgnoredOnReceive()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+
+    ct::CanMessageConfig msg{};
+    msg.can_id = 0x421;
+    msg.flags = ct::MSGFLAG_ACTIVE;
+    msg.src_bus = 1;
+    msg.dlc = 8;
+    msg.tx_trigger_cond = ct::TX_TRIGGER_COND_NONE;
+    CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&msg)));
+
+    // Two identical 8-bit receive signals but for the flag, both on a channel
+    // ranged 0..100 so the clamp has something to do.
+    ct::CanSignalConfig sig[2]{};
+    for (int i = 0; i < 2; ++i) {
+        sig[i].factor = 1.0f;
+        sig[i].min_val = 0.0f;
+        sig[i].max_val = 100.0f;
+        ct::sigSetHeader(sig[i], 0, 0, 1);
+        ct::sigSetTxWrap(sig[i], i == 1);
+        ct::sigSetBits(sig[i], quint16(i * 8), 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+    }
+    CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 2,
+                             reinterpret_cast<const uint8_t *>(sig)));
+
+    const uint8_t frame[8] = {200, 200, 0, 0, 0, 0, 0, 0};
+    engine_process_can(1, 0x421, 0, 0, frame, 8);
+    // Both clamp to the channel's 100, the flagged one included.
+    CHECK(qAbs(engine_signal_value(0) - 100.0f) < 0.01f);
+    CHECK(qAbs(engine_signal_value(1) - 100.0f) < 0.01f);
+}
+
 static void testTransmitCrc8Stamping()
 {
     // The reference must earn its authority first. CRC-8/SAE-J1850
@@ -2854,23 +3736,21 @@ static void testMessageProtectionIsHostOnly(const SerialProtoCallbacks *restore)
     serial_proto_init(restore);
     flashErase();
 
-    // `fill` lands in what used to be the per-message key[4] and is now
-    // reserved[4]. It is deliberately NON-ZERO where it is used: the write path
-    // scrubs the field before storing, so filling it is how that scrub gets
-    // tested rather than assumed. A host stashing four bytes of private data in
-    // a retired field would otherwise have the device hand them back to every
-    // other host that asked, and a reserved field that is only usually zero has
-    // stopped being reserved.
+    // `fill` lands in the ONE byte of the old per-message key[4] that is still
+    // reserved. Store v10 claimed the other three for tx_trigger_cond and
+    // tx_trigger_flags, so the scrub narrowed to this byte with them — and the
+    // narrowing is exactly why filling it still has to be tested rather than
+    // assumed. It is deliberately NON-ZERO where it is used: a host stashing
+    // private data in a retired field would otherwise have the device hand it
+    // back to every other host that asked, and a reserved field that is only
+    // usually zero has stopped being reserved.
     const auto record = [](quint32 id, quint8 prot, quint8 fill) {
         ct::CanMessageConfig m{};
         m.can_id = id;
         m.flags = quint8(ct::MSGFLAG_ACTIVE | prot);
         m.src_bus = 1;
         m.dlc = 8;
-        m.reserved[0] = fill;
-        m.reserved[1] = fill;
-        m.reserved[2] = fill;
-        m.reserved[3] = fill;
+        m.reserved = fill;
         return m;
     };
     const auto writeOne = [](quint16 idx, const ct::CanMessageConfig &m) {
@@ -2944,11 +3824,18 @@ static void testMessageProtectionIsHostOnly(const SerialProtoCallbacks *restore)
                 // The engine-evaluated bits are untouched by the level. That is
                 // what makes the top two bits usable for this at all.
                 CHECK(got.flags & ct::MSGFLAG_ACTIVE);
-                // Bytes 10..13 come back zero from every one of them, whatever
-                // was written into them — see the head of this function for why
-                // that assertion outlives the field it was written for.
-                CHECK(got.reserved[0] == 0 && got.reserved[1] == 0 && got.reserved[2] == 0
-                      && got.reserved[3] == 0);
+                // Byte 13 comes back zero from every one of them, whatever was
+                // written into it — see the head of this function for why that
+                // assertion outlives the field it was written for, and why it
+                // now covers one byte rather than four.
+                CHECK(got.reserved == 0);
+                // And the three bytes beside it are NOT scrubbed any more. This
+                // record went in with no trigger, so it comes back with none —
+                // but it comes back because the device stored what it was sent,
+                // not because something blanked the field on the way past. The
+                // scrub narrowing is the whole reason Triggered transmit
+                // survives a round trip at all.
+                CHECK(got.tx_trigger_flags == 0);
             }
         }
     }
@@ -4193,7 +5080,20 @@ int main(int argc, char *argv[])
         // more, and for the device-channels write in particular the old 62-byte
         // payload remains a valid PREFIX of the new 72 — the same rule that has
         // protected that command through every growth it has had.
-        CHECK(FLASH_STORE_VERSION == 9u);
+        // v11: the condition record grew to carry a second expression, and
+        // ConditionTerm shrank 10 -> 8 to pay for it. BOTH store hazards at
+        // once: the record size changed (so imageCrc hashes a different span,
+        // the v2 rule) and conditions are the FOURTH table (so everything
+        // after them shifts, the v4 rule). v10 was built but never released.
+        //
+        // v10: MAX_CONDITIONS 100 -> 250. Conditions are the FOURTH table, so
+        // the 6,000 extra bytes shift every table behind them — v4's hazard,
+        // and a v9 image is refused rather than misread. Triggered transmit
+        // rode along in the same release and forced nothing: it claimed three
+        // retired bytes INSIDE CanMessageConfig in place, so item_size stayed
+        // 14, no offset moved, and by itself it would not have needed a bump at
+        // all. The WIRE version stays put once more.
+        CHECK(FLASH_STORE_VERSION == 11u);
         // The configurator carries its own copy so a Send can check the device
         // before writing to it. This file is the only place that sees both, so
         // it is the only place the two can be held equal.
@@ -4211,9 +5111,15 @@ int main(int argc, char *argv[])
         CHECK(ct::MAX_TIMERS == fw::kMaxTimers);
         CHECK(ct::MAX_COUNTERS == fw::kMaxCounters);
         CHECK(ct::MAX_TABLES_2X16 == fw::kMaxTables2x16);
+        CHECK(ct::MAX_CONDITIONS == fw::kMaxConditions);
         CHECK(ct::MAX_MESSAGES == 500);
         CHECK(ct::MAX_SIGNALS == 1000);
         CHECK(ct::MAX_TIMERS == 50);
+        // 100 -> 250 at store v10. Pinned to the literal like the rest, and
+        // worth pinning for a second reason: every active condition also owns a
+        // signal slot, so this number and MAX_SIGNALS above are spending the
+        // same budget. 250 conditions can claim a quarter of the signal table.
+        CHECK(ct::MAX_CONDITIONS == 250);
 
         // THE binding limit on the message axis, and the reason 500 rather than
         // a round 512. A signal's parent message index is a 9-BIT field inside
@@ -4235,6 +5141,7 @@ int main(int argc, char *argv[])
         CHECK(engine_table_capacity(ENGINE_TABLE_MESSAGES) == ct::MAX_MESSAGES);
         CHECK(engine_table_capacity(ENGINE_TABLE_SIGNALS) == ct::MAX_SIGNALS);
         CHECK(engine_table_capacity(ENGINE_TABLE_TIMERS) == ct::MAX_TIMERS);
+        CHECK(engine_table_capacity(ENGINE_TABLE_CONDITIONS) == ct::MAX_CONDITIONS);
         CHECK(engine_table_capacity(ENGINE_TABLE_TABLES_2X16_DEF) == ct::MAX_TABLES_2X16);
         CHECK(engine_table_capacity(ENGINE_TABLE_TABLES_8X8_DEF) == ct::MAX_TABLES_8X8);
         // Table t owns rows t*8..t*8+7, so the ROW table holds the product, not
@@ -4698,10 +5605,11 @@ int main(int argc, char *argv[])
 
     // v5 condition (boolean logic channel): RPM High = (Engine RPM > 5000).
     ct::ConditionRow cond;
-    cond.terms[0].aChannel = QStringLiteral("Engine RPM");
-    cond.terms[0].op = ct::COND_OP_GT;
-    cond.terms[0].bIsChannel = false;
-    cond.terms[0].bConst = 5000;
+    cond.setTerms[0].aChannel = QStringLiteral("Engine RPM");
+    cond.setTerms[0].op = ct::COND_OP_GT;
+    cond.setTerms[0].bIsChannel = false;
+    cond.setTerms[0].bConst = 5000;
+    giveInverseReset(cond);
     cond.outputChannel = QStringLiteral("RPM High");
     config.conditionRows.append(cond);
 
@@ -5793,9 +6701,10 @@ int main(int argc, char *argv[])
             return t;
         };
         ct::ConditionRow band;
-        band.terms = {term("RPM", ct::COND_OP_LT, 1500), term("RPM", ct::COND_OP_GT, 100),
+        band.setTerms = {term("RPM", ct::COND_OP_LT, 1500), term("RPM", ct::COND_OP_GT, 100),
                       term("TPS", ct::COND_OP_LT, 1)};
-        band.joiners = {int(ct::COND_JOIN_AND), int(ct::COND_JOIN_OR)};
+        band.setJoiners = {int(ct::COND_JOIN_AND), int(ct::COND_JOIN_OR)};
+        giveInverseReset(band);
         band.outputChannel = QStringLiteral("InBand");
         mcfg.conditionRows.append(band);
 
@@ -5805,9 +6714,10 @@ int main(int argc, char *argv[])
         // At RPM 5000, TPS 0: left-to-right gives (T or T) and F = FALSE;
         // C precedence would give T or (T and F) = TRUE.
         ct::ConditionRow mixed;
-        mixed.terms = {term("RPM", ct::COND_OP_GT, 100), term("TPS", ct::COND_OP_LT, 1),
+        mixed.setTerms = {term("RPM", ct::COND_OP_GT, 100), term("TPS", ct::COND_OP_LT, 1),
                        term("RPM", ct::COND_OP_LT, 1500)};
-        mixed.joiners = {int(ct::COND_JOIN_OR), int(ct::COND_JOIN_AND)};
+        mixed.setJoiners = {int(ct::COND_JOIN_OR), int(ct::COND_JOIN_AND)};
+        giveInverseReset(mixed);
         mixed.outputChannel = QStringLiteral("Mixed");
         mcfg.conditionRows.append(mixed);
 
@@ -5815,11 +6725,11 @@ int main(int argc, char *argv[])
         CHECK(mm.ok());
         CHECK(mm.tables.conditions.size() == 2);
         if (mm.tables.conditions.size() == 2) {
-            CHECK(mm.tables.conditions[0].term_count == 3);
+            CHECK(mm.tables.conditions[0].set_count == 3);
             // joiners bit0 = AND (0), bit1 = OR (1)  ->  0b10 = 2
-            CHECK(mm.tables.conditions[0].joiners == 2);
+            CHECK(mm.tables.conditions[0].set_joiners == 2);
             // joiners bit0 = OR (1), bit1 = AND (0)  ->  0b01 = 1
-            CHECK(mm.tables.conditions[1].joiners == 1);
+            CHECK(mm.tables.conditions[1].set_joiners == 1);
         }
 
         CHECK(expectAck(ct::CMD_CLEAR_CONFIG, {}));
@@ -5861,16 +6771,17 @@ int main(int argc, char *argv[])
 
         // A 1-comparison condition still behaves exactly as it did pre-v14.
         ct::ConditionRow single;
-        single.terms = {term("RPM", ct::COND_OP_GT, 1000)};
-        single.joiners.clear();
+        single.setTerms = {term("RPM", ct::COND_OP_GT, 1000)};
+        single.setJoiners.clear();
+        giveInverseReset(single);
         single.outputChannel = QStringLiteral("Simple");
         mcfg.conditionRows = {single};
         const ct::MappingResult sm = ct::mapToDevice(mcfg);
         CHECK(sm.ok());
         CHECK(sm.tables.conditions.size() == 1);
         if (sm.tables.conditions.size() == 1) {
-            CHECK(sm.tables.conditions[0].term_count == 1);
-            CHECK(sm.tables.conditions[0].joiners == 0);
+            CHECK(sm.tables.conditions[0].set_count == 1);
+            CHECK(sm.tables.conditions[0].set_joiners == 0);
         }
     }
 
@@ -6526,6 +7437,15 @@ int main(int argc, char *argv[])
     testTxPhaseSpreadingIsPerBus();
     testTxFairnessUnderSaturation();
     testTxDeadBusDoesNotSilenceOthers();
+    testTriggeredTransmit();
+    testConditionSetResetLatch();
+    testConditionMomentaryHold();
+    testConditionMessageEvents();
+    testBatchCompoundEmitsAllVariantsBeforeItsEvent();
+    testTriggeredTransmitBrokenReferenceIsSilent();
+    testSelectorOnlyVariantsAreTransmitted();
+    testTransmitClampOrRollOver();
+    testRollOverIsIgnoredOnReceive();
     testTransmitCrc8Stamping();
     testDeviceCanDiagnostics();
     testMcuHealth();

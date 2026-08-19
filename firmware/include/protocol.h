@@ -476,7 +476,20 @@
  * CFG_TOTAL <= FLASH_STORE_CAPACITY is what actually binds this.) */
 #define MAX_SIGNALS             1000
 #define MAX_MATH_COMPUTATIONS   100
-#define MAX_CONDITIONS          100
+/* 100 -> 250. PAD8(35) is 40, so the table costs 10,000 B where it cost 4,000,
+ * and CFG_TOTAL lands at 126,368 of 131,072 — 4,704 B still spare. That is the
+ * whole budget story; the assert in flash_store.c is what actually enforces it.
+ *
+ * The raise is NOT free the way the triggered-transmit fields were: conditions
+ * are the 4th table in FLASH_TABLE_LIST, so every table after them shifts and
+ * FLASH_STORE_VERSION goes 9 -> 10. A unit updated to this firmware reads its
+ * stored configuration as absent and needs one re-Send — the same price v6, v7,
+ * v8 and v9 each charged, paid once here for both changes in this release.
+ *
+ * 250 also spends 250 of the 1,000 MAX_SIGNALS slots if every condition is used,
+ * because each one owns an output slot. That is the real ceiling on going
+ * further: another 250 signals would cost 16,000 B against 4,704 B spare. */
+#define MAX_CONDITIONS          250
 #define MAX_COUNTERS            50
 /* 20 -> 50, matching MAX_COUNTERS: 50 * PAD8(20) = 1,200 B of flash, up from
  * 480. Timers were the one calculation table an ordinary configuration could
@@ -532,6 +545,33 @@
 #define MSGFLAG_TRANSMIT        0x10  /* v3: compose+transmit periodically (else receive) */
 #define MSGFLAG_TX_SEQUENTIAL   0x20  /* v10: compound tx cadence — set = one variant per
                                        * period (round-robin), clear = all variants each period */
+
+/* CanMessageConfig.tx_trigger_flags bits — Triggered transmit.
+ *
+ * These are a SEPARATE byte rather than two more MSGFLAG_* bits because there
+ * are no MSGFLAG_* bits left: 0x01..0x20 are taken and 0x40/0x80 are the
+ * MSGPROT_* level, whose values are pinned (see MSGPROT_MASK) and cannot be
+ * borrowed. The byte comes out of the retired per-message key, so it is free.
+ *
+ * A transmit message with TXTRIG_ENABLED clear is CYCLIC — it transmits every
+ * period_ms as it always has, and tx_trigger_cond is not read. */
+#define TXTRIG_ENABLED          0x01  /* transmit only while the named condition holds */
+/* 0x02 was TXTRIG_RESET_ON_TX — "Reset User Condition once Triggered", which
+ * forced the named condition's output to 0 after a transmission so the message
+ * fired once per rising edge. RETIRED before it ever shipped, and removed
+ * rather than reserved because nothing in the field has ever seen it.
+ *
+ * It went because User Conditions grew a Reset expression, which does the same
+ * job explicitly and better. "Send once when the request arrives" is now a
+ * Set/Reset condition set on Message Received and reset on Message Transmitted:
+ * the reset is visible in the editor beside the thing it resets, it can name a
+ * DIFFERENT message than the one it gates, and it does not reach across from a
+ * transmit message to quietly rewrite a calculation's output. Two ways to do
+ * one thing, where one of them acted at a distance, was not worth carrying. */
+/* tx_trigger_cond when no condition is named. Not a magic "disabled" value —
+ * TXTRIG_ENABLED is what decides that — but a marker that survives a round trip
+ * so a Get cannot invent condition 0 out of an unset field. */
+#define TX_TRIGGER_COND_NONE    0xFFFFu
 /* 2.3.0: bits 6-7 are ONE ORDERED PROTECTION LEVEL, not two independent flags.
  * level = (flags & MSGPROT_MASK) >> 6, and that number is the tier directly:
  *
@@ -653,23 +693,32 @@ typedef struct {
                              * receive timeout in ms — after this long without a
                              * frame the message's signals revert to their
                              * default_value; 0 = no timeout. */
-    uint8_t reserved[ACCESS_KEY_LEN]; /* was the v20 per-message key; RETIRED in
-                                  * 2.3.0. Always written zero, by the host and by
-                                  * this firmware, and zeroed again on the way out
-                                  * (see the read path in serial_proto.c, which
-                                  * must keep doing that forever — an in-place
-                                  * updated 2.2.1 unit still has live PBKDF2 key
-                                  * bytes sitting here).
-                                  *
-                                  * NOT removed, deliberately. PAD8(14) ==
-                                  * PAD8(10) == 16, so shrinking the record back
-                                  * to 10 bytes frees no flash at all, while
-                                  * moving every stored table after `messages` —
-                                  * which forces FLASH_STORE_VERSION 6 -> 7, which
-                                  * costs every field unit its stored
-                                  * configuration. Paying a config-loss event to
-                                  * reclaim zero bytes, in order to REMOVE a
-                                  * feature, is not a trade worth making. */
+    /* Triggered transmit. These three bytes are the first three of the retired
+     * v20 per-message key, claimed in place at store v10 — see `reserved` below
+     * for why claiming them costs nothing and why it is only safe now.
+     *
+     * A transmit message is CYCLIC unless TXTRIG_ENABLED is set, which is the
+     * whole backward story: an all-zero field is exactly the behaviour every
+     * message had before this existed. */
+    uint16_t tx_trigger_cond;  /* index into the condition table whose boolean
+                                * output gates this message. Only meaningful with
+                                * TXTRIG_ENABLED; TX_TRIGGER_COND_NONE when unset. */
+    uint8_t tx_trigger_flags;  /* TXTRIG_* */
+    uint8_t reserved;          /* the last byte of the v20 per-message key; RETIRED
+                                * in 2.3.0 and still retired. Always written zero,
+                                * by the host and by this firmware, and zeroed
+                                * again on the way out (see serial_proto.c).
+                                *
+                                * The other three bytes carried live PBKDF2 key
+                                * material on a 2.2.1 unit updated in place, which
+                                * is why the scrub existed and why claiming them
+                                * had to wait: a stored image from that era is a
+                                * store-v6 image, and this firmware is store v10,
+                                * so it is refused at load and its bytes can no
+                                * longer reach either the engine or a Get. The
+                                * scrub survives on this byte alone, because a
+                                * reserved field that is only USUALLY zero stops
+                                * being reserved. */
 } CanMessageConfig;         /* v20: 14 bytes (was 10). PROTOCOL_VERSION does NOT move —
                              * the generic write handler checks
                              * length == 4 + count*item_size, so a 10-byte-record host
@@ -684,7 +733,18 @@ typedef struct {
                              * and FLASH_STORE_VERSION stays 6 — a shipped unit
                              * keeps its configuration across the update. See the
                              * field's own comment for why shrinking would cost
-                             * something and save nothing. */
+                             * something and save nothing.
+                             *
+                             * Triggered transmit: STILL 14, and that is the point.
+                             * Three of the four retired key bytes became named
+                             * fields IN PLACE, so item_size does not move, no
+                             * table offset moves, CFG_TOTAL is unchanged and every
+                             * chunk constant on both sides stays as it was. The
+                             * feature costs zero flash. PROTOCOL_VERSION does not
+                             * move either: the record is the same size, so an
+                             * older host's write still satisfies the length check
+                             * — and it writes zeros there, which decodes to
+                             * "cyclic", the behaviour it intended. */
 
 typedef enum {
     SIGNAL_TYPE_UINT8   = 0x01,
@@ -740,7 +800,9 @@ typedef struct {
                               * window at data[mux_byte_offset..].
                               * mux_mask == 0 -> always active. */
     uint16_t mux_mask;
-    uint16_t msg_and_flags;  /* msg_idx(9) | byte_order<<9 | is_active<<10 */
+    uint16_t msg_and_flags;  /* msg_idx(9) | byte_order<<9 | is_active<<10
+                              * | tx_wrap<<11 | selector_only<<12.
+                              * Bits 13-15 are free. */
     uint16_t tx_source;      /* transmit source signal index + 1; 0 = own slot */
     uint32_t bits;           /* start_bit(9) | (bit_length-1)(6)<<9
                               * | value_type(6)<<15 | decimal_places(4)<<21
@@ -758,6 +820,46 @@ typedef struct {
 #define SIG_DECIMALS_MASK  0xFu     /* 0..8 */
 #define SIG_MUXOFF_MASK    0x3Fu    /* 0..63 */
 
+/* msg_and_flags bit 11: on TRANSMIT, send the low bit_length bits of the
+ * converted value instead of clamping it to what the field can hold.
+ *
+ * Clear is the old behaviour and the default, which is why the bit means WRAP
+ * rather than CLAMP: every configuration written before this bit existed has a
+ * zero there, and every one of them keeps clamping exactly as it did. An older
+ * host writing this record also writes zero, so it cannot accidentally ask for
+ * wrapping it does not know about. The record does not change size, so
+ * PROTOCOL_VERSION does not move (the v14 rule) and neither does any table
+ * offset or chunk constant — the flag costs zero flash.
+ *
+ * Wrapping skips BOTH clamps in inverseSignalScaling, not just the field-width
+ * one: the physical clamp is the CHANNEL's declared range, so a channel ranged
+ * 0..255 would never present 256 to an 8-bit field to wrap in the first place.
+ * "Do not clamp" has to mean the whole way out or it means nothing.
+ *
+ * Receive ignores this bit. A received field is bit_length bits wide by
+ * construction, so there is nothing to wrap; the clamp on that side is the
+ * channel's range and stays unconditional. */
+#define SIG_FLAG_TX_WRAP   0x0800u
+
+/* msg_and_flags bit 12: this signal DECLARES its compound identifier and packs
+ * nothing. It exists so a transmit variant with no channels of its own still
+ * reaches the wire.
+ *
+ * The device learns which variants a compound message has by walking its
+ * SIGNALS (collectMuxIdentifiers) — the identifier list is not stored anywhere
+ * else, and storing it per message would cost MAX_MESSAGES x MAX_TX_MUX_IDS
+ * records for a list the signals already imply. The cost of implying it was
+ * that an identifier with no channels implied nothing: a variant whose whole
+ * content is its selector — a request or a ping frame, where the ID byte IS the
+ * message — had no signal to be inferred from and never went out.
+ *
+ * One of these per such identifier fixes that for the price of a signal slot.
+ * composeVariant skips it when packing, so the frame carries its selector over
+ * a zeroed payload, which is exactly what was asked for. Clear on every record
+ * ever written, and a signal that packs nothing is invisible to any reader that
+ * ignores the bit, so nothing older misreads it. */
+#define SIG_FLAG_SELECTOR_ONLY 0x1000u
+
 static inline uint16_t sig_msg_idx(const CanSignalConfig *s)
 {
     const uint16_t v = (uint16_t)(s->msg_and_flags & SIG_MSG_IDX_MASK);
@@ -768,6 +870,10 @@ static inline uint8_t sig_byte_order(const CanSignalConfig *s)
 { return (uint8_t)((s->msg_and_flags >> 9) & 1u); }
 static inline uint8_t sig_is_active(const CanSignalConfig *s)
 { return (uint8_t)((s->msg_and_flags >> 10) & 1u); }
+static inline uint8_t sig_tx_wrap(const CanSignalConfig *s)
+{ return (uint8_t)((s->msg_and_flags & SIG_FLAG_TX_WRAP) ? 1u : 0u); }
+static inline uint8_t sig_selector_only(const CanSignalConfig *s)
+{ return (uint8_t)((s->msg_and_flags & SIG_FLAG_SELECTOR_ONLY) ? 1u : 0u); }
 static inline uint16_t sig_start_bit(const CanSignalConfig *s)
 { return (uint16_t)(s->bits & SIG_START_BIT_MASK); }
 static inline uint8_t sig_bit_length(const CanSignalConfig *s)
@@ -784,8 +890,28 @@ static inline void sig_set_header(CanSignalConfig *s, uint16_t msg_idx,
 {
     const uint16_t m = (msg_idx == SIG_MSG_NONE) ? (uint16_t)SIG_MSG_IDX_MASK
                                                  : (uint16_t)(msg_idx & SIG_MSG_IDX_MASK);
-    s->msg_and_flags = (uint16_t)(m | ((uint16_t)(byte_order & 1u) << 9)
+    /* Writes the three fields it names and PRESERVES the rest of the word, so
+     * sig_set_tx_wrap can be called on either side of it. The alternative —
+     * assigning the whole word — made the two setters order-dependent, which
+     * is a silent wrong answer rather than a compile error. Every caller
+     * starts from a zeroed record, so preserving costs nothing there. */
+    s->msg_and_flags = (uint16_t)((s->msg_and_flags & (uint16_t)~0x07FFu) | m
+                                  | ((uint16_t)(byte_order & 1u) << 9)
                                   | ((uint16_t)(is_active & 1u) << 10));
+}
+static inline void sig_set_tx_wrap(CanSignalConfig *s, uint8_t wrap)
+{
+    if (wrap)
+        s->msg_and_flags |= (uint16_t)SIG_FLAG_TX_WRAP;
+    else
+        s->msg_and_flags &= (uint16_t)~SIG_FLAG_TX_WRAP;
+}
+static inline void sig_set_selector_only(CanSignalConfig *s, uint8_t on)
+{
+    if (on)
+        s->msg_and_flags |= (uint16_t)SIG_FLAG_SELECTOR_ONLY;
+    else
+        s->msg_and_flags &= (uint16_t)~SIG_FLAG_SELECTOR_ONLY;
 }
 static inline void sig_set_bits(CanSignalConfig *s, uint16_t start_bit, uint8_t bit_length,
                                 uint8_t value_type, int8_t decimal_places,
@@ -873,8 +999,34 @@ typedef struct {
 
 typedef enum {
     COND_OP_EQ = 0, COND_OP_NEQ = 1, COND_OP_LT = 2, COND_OP_LTE = 3,
-    COND_OP_GT = 4, COND_OP_GTE = 5
+    COND_OP_GT = 4, COND_OP_GTE = 5,
+    /* The two MESSAGE operators. A term carrying one of these is not a
+     * comparison at all: input_a_signal_idx holds a MESSAGE index instead of a
+     * signal index, and input_b is unused and written zero.
+     *
+     * They are true only on the evaluation pass in which a frame actually
+     * happened, which is what makes them usable as a Set — "the request
+     * arrived" — and as a Reset — "the reply went out". A level ("is this
+     * message alive") is a different question and the receive timeout already
+     * answers it.
+     *
+     * The asymmetry between them is real and worth knowing. A received frame
+     * sets its flag and runs executeConditions in the SAME call, so every frame
+     * gets its own pass and none is ever missed. A transmitted frame is
+     * recorded in the 200 Hz service, which does not evaluate conditions, so it
+     * is seen by the NEXT pass — up to 10 ms later on a quiet bus — and two
+     * transmissions of one message inside a single 10 ms window collapse into
+     * one event. A 5 ms cyclic message, or a batch compound message emitting
+     * every identifier in one service, will do exactly that. See
+     * executeConditions in engine_core.c. */
+    COND_OP_MSG_RX = 6,  /* a frame for this message was received this pass */
+    COND_OP_MSG_TX = 7   /* a frame for this message was transmitted */
 } ConditionOp;
+
+/* Does this operator take a MESSAGE index in input_a rather than a signal? The
+ * bounds check differs (MAX_MESSAGES, not MAX_SIGNALS), so every site that
+ * validates a term has to ask. */
+#define COND_OP_IS_MESSAGE(op) ((op) == COND_OP_MSG_RX || (op) == COND_OP_MSG_TX)
 
 /* v14: how two comparisons are joined. */
 typedef enum {
@@ -884,34 +1036,107 @@ typedef enum {
 
 #define COND_MAX_TERMS 3
 
-/* One "A op B" comparison. */
-typedef struct {
-    uint16_t input_a_signal_idx;
-    uint8_t op;              /* ConditionOp */
-    uint8_t input_b_type;    /* 0 = const, 1 = signal */
-    uint16_t input_b_idx;
-    float input_b_const;
-} ConditionTerm;             /* 2 + 1 + 1 + 2 + 4 = 10 bytes */
+/* ConditionConfig.flags bits. */
+#define CONDFLAG_ACTIVE     0x01
+#define CONDFLAG_SETRESET   0x02  /* set = Set/Reset latch, clear = Momentary */
 
-/* v5: a condition is a pure boolean logic channel, writing 1.0 to
- * dest_signal_idx while it holds and 0.0 otherwise. (v4 and earlier carried an
- * action + target instead; that routing/mute/set-value behaviour was removed.)
+/* Momentary hold ceiling, in Hz. The hold is spent against elapsed_ms on the
+ * calculation pass, which arrives every ENGINE_TICK_MS, so one tick is the
+ * finest hold that exists and 100 Hz is the frequency whose period IS one tick.
+ * A record asking for more is clamped rather than refused, for the reason
+ * COUNTER_MAX_HZ gives: a condition running at a neighbouring rate is a better
+ * failure than one that silently never fires. */
+#define COND_LATCH_MAX_HZ   100u
+
+/* One "A op B" comparison — or, for the message operators, one event test.
  *
- * v14: it evaluates up to COND_MAX_TERMS comparisons joined by AND/OR instead
- * of a single one. `joiners` holds one ConditionJoin BIT per gap — bit 0 joins
- * terms[0] to terms[1], bit 1 joins terms[1] to terms[2].
+ * B IS A UNION, and that is what pays for the second expression. The two
+ * members were always mutually exclusive: input_b_type says which one is live,
+ * and nothing has ever read the other. Overlapping them takes the term from 10
+ * bytes to 8, which takes a six-term ConditionConfig from 72 bytes to 56 and is
+ * the difference between 250 conditions fitting and not fitting.
  *
- * Evaluation is STRICTLY LEFT TO RIGHT, i.e. ((t0 J0 t1) J1 t2) — deliberately
- * NOT C's "&& binds tighter than ||", because the editor shows the expression
- * with that exact bracketing and a config tool should read the way it looks.
- * Every term is evaluated (no short-circuit) so the pass takes constant time. */
+ * BOTH SIDES MUST ZERO THE WHOLE UNION BEFORE WRITING input_b_idx, because the
+ * upper two bytes are otherwise whatever the writer left there and they travel
+ * on the wire. Value-initialising the record does it; so does memset. */
 typedef struct {
-    ConditionTerm terms[COND_MAX_TERMS]; /* 30 */
-    uint16_t dest_signal_idx; /* boolean output slot: 1.0 when met, else 0.0 */
-    uint8_t term_count;       /* comparisons in use, 1..COND_MAX_TERMS */
-    uint8_t joiners;          /* ConditionJoin per gap, bit i joins term i -> i+1 */
-    uint8_t is_active;
-} ConditionConfig;            /* 30 + 2 + 1 + 1 + 1 = 35 bytes */
+    uint16_t input_a_signal_idx; /* signal index — or MESSAGE index when
+                                  * COND_OP_IS_MESSAGE(op) */
+    uint8_t op;              /* ConditionOp */
+    uint8_t input_b_type;    /* 0 = const, 1 = signal; ignored for message ops */
+    union {
+        uint16_t input_b_idx;
+        float input_b_const;
+    } b;
+} ConditionTerm;             /* 2 + 1 + 1 + 4 = 8 bytes */
+
+/* A User Condition drives a boolean output slot. It has TWO MODES, and the mode
+ * is the difference between a shape and a level.
+ *
+ * The level it used to be is gone. Up to the modes revision a condition simply
+ * published its expression: 1.0 while the comparisons held, 0.0 otherwise, with
+ * no memory. That is still expressible — a Set/Reset whose Reset expression is
+ * the logical inverse of its Set behaves identically, which is exactly what
+ * every configuration written before this was migrated into — but it is no
+ * longer the only thing a condition can be.
+ *
+ *   MOMENTARY (CONDFLAG_SETRESET clear)
+ *     The RISING EDGE of the Set expression drives the output to 1, and it
+ *     holds for one period of latch_hz — 10 Hz is 100 ms — then drops on its
+ *     own. Retriggerable: a fresh rising edge while it is still high RELOADS
+ *     the hold rather than topping it up, the same rule a counter's reset edge
+ *     applies to its phase accumulator. The Reset expression is unused.
+ *
+ *     The hold is decremented by elapsed_ms on the CALCULATION pass only, so
+ *     the achievable quantum is ENGINE_TICK_MS. COND_LATCH_MAX_HZ is 100 for
+ *     that reason and no other, exactly as COUNTER_MAX_HZ and
+ *     INTEGRATOR_MAX_HZ are.
+ *
+ *   SET / RESET (CONDFLAG_SETRESET set)
+ *     A latch. The Set expression drives the output to 1, the Reset expression
+ *     drives it to 0, and it HOLDS in between. RESET IS DOMINANT: with both
+ *     expressions true the output is 0. That is the conventional safe bias and
+ *     it is the one the timer stage already uses — a stop edge is applied after
+ *     a start edge in executeTimers, so a simultaneous pair leaves the timer
+ *     stopped. A Reset that means "stop" must not be defeatable by a Set that
+ *     is stuck on. latch_hz is unused.
+ *
+ * BOTH expressions evaluate up to COND_MAX_TERMS comparisons joined by AND/OR,
+ * STRICTLY LEFT TO RIGHT — ((t0 J0 t1) J1 t2) — deliberately NOT C's "&& binds
+ * tighter than ||", because the editor shows the expression with that exact
+ * bracketing and a config tool should read the way it looks. Every term is
+ * evaluated (no short-circuit) so the pass takes constant time. The joiner bytes
+ * hold one ConditionJoin BIT per gap: bit 0 joins term 0 to term 1, bit 1 joins
+ * term 1 to term 2.
+ *
+ * Both modes are STATEFUL, and that is the one property this revision took away
+ * from the engine. Evaluation used to be pure, which is why executeConditions
+ * could run from the calculation tick AND from the receive path without caring
+ * how often. It still runs from both, but it now carries memory — a latched
+ * output, a previous-Set edge flag, a remaining hold — so it takes elapsed_ms
+ * and the receive path passes 0. A received frame is an instant, not a duration.
+ *
+ * The runtime state lives in engine_core.c and NOT in this record, which stays
+ * read-only flash: g_cond_state, g_cond_prev_set and g_cond_hold_ms. Nothing is
+ * persisted, so a power cycle re-arms every condition. */
+typedef struct {
+    ConditionTerm set_terms[COND_MAX_TERMS];   /* 24 */
+    ConditionTerm reset_terms[COND_MAX_TERMS]; /* 24 — Set/Reset mode only */
+    uint16_t dest_signal_idx; /* boolean output slot: 1.0 when held, else 0.0 */
+    uint8_t flags;            /* CONDFLAG_* */
+    uint8_t set_count;        /* comparisons in the Set expression, 1..COND_MAX_TERMS */
+    uint8_t set_joiners;      /* ConditionJoin per gap, bit i joins set term i -> i+1 */
+    uint8_t reset_count;      /* Set/Reset mode: comparisons in the Reset expression */
+    uint8_t reset_joiners;    /* ConditionJoin per gap of the Reset expression */
+    uint8_t latch_hz;         /* Momentary mode: the output holds for ONE PERIOD of
+                               * this, so 10 Hz is 100 ms. 1..COND_LATCH_MAX_HZ,
+                               * clamped rather than rejected — see rate_hz. */
+} ConditionConfig;            /* 24 + 24 + 2 + 6 = 56 bytes, and PAD8(56) is 56:
+                               * the record fills its flash slot exactly, with no
+                               * padding waste. That is not luck — the six tail
+                               * bytes are what was left after the terms, and it
+                               * is why they are six plain fields rather than a
+                               * bitfield. There was no reason to pack. */
 
 /* v3: up/down counter. Inputs are edge-triggered on the rising edge of a
  * boolean channel (value crosses from <=0 to >0). */

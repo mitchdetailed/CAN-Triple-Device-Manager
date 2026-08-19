@@ -24,7 +24,7 @@ Two kinds of file ask for a password before they open:
 
 In both cases the prompt appears *before* the current document is touched — cancelling leaves whatever you had open exactly as it was.
 
-> **Note:** Files saved by earlier versions open normally. Where a feature has changed shape the file is migrated as it loads: a **4x4 lookup table** from an older configuration becomes an [8x8](tables.md) with its sites, cells and interpolation modes intact, occupying the top-left of the wider grid. Nothing needs re-entering, and the next Save writes the file in the current form. The reverse does not hold — a file saved by a *newer* version of the program is refused rather than half-read, because a field this build does not know about is one it would silently drop.
+> **Note:** Files saved by earlier versions open normally. Where a feature has changed shape the file is migrated as it loads: a **4x4 lookup table** from an older configuration becomes an [8x8](tables.md) with its sites, cells and interpolation modes intact, occupying the top-left of the wider grid, and a **User Condition** written before conditions had modes becomes a [Set/Reset](conditions.md#migration) whose Reset expression is generated as the logical inverse of its Set — which behaves identically to the plain level it replaces, though it does mean opening one and finding a Reset expression you did not write. Nothing needs re-entering, and the next Save writes the file in the current form. The reverse does not hold — a file saved by a *newer* version of the program is refused rather than half-read, because a field this build does not know about is one it would silently drop.
 
 **File → Recent Files** keeps the last 8 files you opened or saved, most recent first, with the full path shown as a tooltip. Opening one behaves exactly like Open…, including the password handling. The submenu is disabled while the list is empty.
 
@@ -47,7 +47,9 @@ A document that has no Edit Protected Comms password yet can set one directly in
 
 ## Version compatibility
 
-Every .ct3 records the schema version it was written at (currently **12**). Older files keep loading — fields a newer schema added simply take their defaults. A file whose version is *ahead* of the program is refused rather than half-read, with a message saying it was saved by a newer version of CAN Triple Device Manager; update the program to open it.
+Every .ct3 records the schema version it was written at (currently **18**). Older files keep loading — fields a newer schema added simply take their defaults. A file whose version is *ahead* of the program is refused rather than half-read, with a message saying it was saved by a newer version of CAN Triple Device Manager; update the program to open it.
+
+Refusing is deliberate, and the reason is worth knowing: a setting an older program does not recognise is not always a setting it can safely ignore. A message set to transmit only on a [User Condition](communications.md#triggered) looks like an ordinary message to a program written before that existed, and sending it from there would put a continuously transmitting message on the bus. A [User Condition](conditions.md#modes) with a mode is the same hazard in its sharpest form: a program written before the modes finds none of the keys it expects, reads every condition as a single empty comparison — because a missing key has always been a legal way to say "default" — and would send a configuration whose logic is simply absent. Refusing the file names the real remedy instead.
 
 > **Note:** The file schema version is independent of the firmware protocol version. Updating firmware never invalidates your .ct3 files — but it can invalidate the configuration stored *in the device's flash*, in which case the device comes up empty and the configuration has to be sent again. See [Troubleshooting](troubleshooting.md).
 

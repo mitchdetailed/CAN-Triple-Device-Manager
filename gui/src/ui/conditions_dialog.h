@@ -1,5 +1,7 @@
 // "Conditions" (Calculations menu) — grid editor for
 // Configuration::conditionRows, mapping 1:1 onto the firmware condition table.
+// The row editor is file-local; it edits both of a condition's expressions
+// (Set and Reset) and its mode. See ConditionRow.
 #pragma once
 
 #include <QDialog>
@@ -17,7 +19,12 @@ class ConditionsDialog : public QDialog
 public:
     explicit ConditionsDialog(Configuration *config, QWidget *parent = nullptr);
 
-    static QStringList opNames();     // indexed by ct::ConditionOp (==, !=, <, <=, >, >=)
+    // The six COMPARISON operators, indexed by ct::ConditionOp (==, !=, <, <=,
+    // >, >=). The two message operators (COND_OP_MSG_RX / COND_OP_MSG_TX) are
+    // deliberately absent: they are phrases rather than symbols and take no
+    // right-hand operand, so the row editor adds them itself and carries their
+    // value in the combo's userData instead of by position.
+    static QStringList opNames();
 
 private:
     void rebuild();

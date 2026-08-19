@@ -84,7 +84,7 @@ QString dbcTypeName(int type)
 QString rowDetail(const CommsChannelRow &row, const CommsSection &s)
 {
     const int len = row.dbcType == int(DbcType::IEEE754) ? 32 : row.bitLength;
-    QString d = QStringLiteral("bit: %1, len: %2, %3, x: %4, +: %5")
+    QString d = QStringLiteral("bit: %1, len: %2, %3, res: %4, +: %5")
                     .arg(row.startBit)
                     .arg(len)
                     .arg(dbcTypeName(row.dbcType))
@@ -92,6 +92,10 @@ QString rowDetail(const CommsChannelRow &row, const CommsSection &s)
                     .arg(num(row.dbcOffset));
     if (s.isReceive() && s.defaultValueOnTimeout && s.receiveTimeoutMs > 0)
         d += QStringLiteral(", dflt: %1").arg(num(row.defaultValue));
+    // Only worth a word when it is NOT the default, and only on the side that
+    // acts on it. Silence means clamping, which is what it has always meant.
+    if (!s.isReceive() && !row.clampToRange)
+        d += QStringLiteral(", rolls over");
     return d;
 }
 
@@ -194,6 +198,14 @@ QString sectionDetail(const CommsSection &s, int busIndex, bool revealed)
             parts << (s.compoundTxMode == CompoundTxMode::Sequential
                           ? QStringLiteral("compound, sequential")
                           : QStringLiteral("compound, batch"));
+        // Cyclic prints nothing — it is what a transmit message has always been,
+        // and every line in this report would otherwise carry a word that says
+        // "normal". A trigger is the exception worth a reader's attention, so it
+        // names itself and the condition it waits on.
+        if (!s.cyclic)
+            parts << QStringLiteral("triggered on %1")
+                         .arg(s.transmitCondition.isEmpty() ? QStringLiteral("(none)")
+                                                            : s.transmitCondition);
     } else {
         if (s.defaultValueOnTimeout && s.receiveTimeoutMs > 0)
             parts << QStringLiteral("timeout %1 ms -> defaults").arg(s.receiveTimeoutMs);
@@ -582,29 +594,58 @@ ReportBuilder buildReport(const Configuration &config)
         r.line();
     }
     if (!config.conditionRows.isEmpty()) {
-        r.subhead(QStringLiteral("  Conditions"));
+        r.subhead(QStringLiteral("  User Conditions"));
         for (int i = 0; i < config.conditionRows.size(); ++i) {
             const ConditionRow &c = config.conditionRows[i];
-            QStringList termTexts;
             QList<QPair<QString, QString>> inputs;
-            for (int t = 0; t < c.terms.size(); ++t) {
-                const ConditionTermRow &term = c.terms[t];
-                const QString b = term.bIsChannel ? term.bChannel : num(term.bConst);
-                termTexts << QStringLiteral("%1 %2 %3")
-                                 .arg(term.aChannel, conditionOpName(term.op), b);
-                const QString which = c.terms.size() > 1
-                                          ? QStringLiteral("comparison %1 ").arg(t + 1)
-                                          : QString();
-                inputs << qMakePair(term.aChannel, which + QStringLiteral("input A"));
-                if (term.bIsChannel)
-                    inputs << qMakePair(term.bChannel, which + QStringLiteral("input B"));
+            // One expression, rendered the way the editor renders it and
+            // collecting its channel references as it goes. Shared by Set and
+            // Reset so the report cannot describe the two differently.
+            const auto renderExpr = [&](const QList<ConditionTermRow> &terms,
+                                        const QList<int> &joiners,
+                                        const QString &side) -> QString {
+                QStringList termTexts;
+                for (int t = 0; t < terms.size(); ++t) {
+                    const ConditionTermRow &term = terms[t];
+                    const QString which = terms.size() > 1
+                                              ? QStringLiteral("%1 comparison %2 ")
+                                                    .arg(side).arg(t + 1)
+                                              : side + QLatin1Char(' ');
+                    if (term.isMessageOp()) {
+                        termTexts << QStringLiteral("CAN %1 · %2 %3")
+                                         .arg(term.aMessageBus)
+                                         .arg(term.aMessage, conditionOpName(term.op));
+                        continue; // a message is not a channel reference
+                    }
+                    const QString b = term.bIsChannel ? term.bChannel : num(term.bConst);
+                    termTexts << QStringLiteral("%1 %2 %3")
+                                     .arg(term.aChannel, conditionOpName(term.op), b);
+                    inputs << qMakePair(term.aChannel, which + QStringLiteral("input A"));
+                    if (term.bIsChannel)
+                        inputs << qMakePair(term.bChannel, which + QStringLiteral("input B"));
+                }
+                return joinConditionTerms(termTexts, joiners, QStringLiteral("AND"),
+                                          QStringLiteral("OR"));
+            };
+
+            const QString setText = renderExpr(c.setTerms, c.setJoiners, QStringLiteral("set"));
+            if (c.mode == ConditionMode::Momentary) {
+                // The hold is printed in milliseconds as well as hertz, because
+                // the hold is the thing being configured and 1/f is not a
+                // conversion a reader should be doing in their head.
+                r.subhead(QStringLiteral("    (%1) %2 = momentary (%3), hold %4 ms (%5 Hz)%6")
+                              .arg(i + 1)
+                              .arg(c.outputChannel, setText)
+                              .arg(c.latchHz > 0 ? 1000 / c.latchHz : 0)
+                              .arg(c.latchHz)
+                              .arg(inactiveTag(c.active)));
+            } else {
+                const QString resetText =
+                    renderExpr(c.resetTerms, c.resetJoiners, QStringLiteral("reset"));
+                r.subhead(QStringLiteral("    (%1) %2 = set (%3), reset (%4)%5")
+                              .arg(i + 1)
+                              .arg(c.outputChannel, setText, resetText, inactiveTag(c.active)));
             }
-            r.subhead(QStringLiteral("    (%1) %2 = (%3)%4")
-                          .arg(i + 1)
-                          .arg(c.outputChannel,
-                               joinConditionTerms(termTexts, c.joiners, QStringLiteral("AND"),
-                                                  QStringLiteral("OR")),
-                               inactiveTag(c.active)));
             usesGenerates(inputs,
                           {{c.outputChannel, QStringLiteral("condition result (boolean)")}});
         }
@@ -859,16 +900,18 @@ ChannelUsage analyzeChannelUsage(const Configuration &config)
     }
     for (int i = 0; i < config.conditionRows.size(); ++i) {
         const ConditionRow &cond = config.conditionRows[i];
-        const QString where = QStringLiteral("Condition %1").arg(i + 1);
+        const QString where = QStringLiteral("User Condition %1").arg(i + 1);
         if (!cond.active) {
             for (const QString &n : cond.inputChannels())
                 c.dormantRef(n);
             c.dormantRef(cond.outputChannel);
             continue;
         }
-        for (int t = 0; t < cond.terms.size(); ++t) {
-            const ConditionTermRow &term = cond.terms[t];
-            const QString which = cond.terms.size() > 1
+        for (int t = 0; t < cond.setTerms.size(); ++t) {
+            const ConditionTermRow &term = cond.setTerms[t];
+            if (term.isMessageOp())
+                continue; // names a message, not a channel
+            const QString which = cond.setTerms.size() > 1
                                       ? QStringLiteral(" comparison %1").arg(t + 1)
                                       : QString();
             c.user(term.aChannel, where + which + QStringLiteral(" input A"));

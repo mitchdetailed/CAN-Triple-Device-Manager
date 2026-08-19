@@ -89,7 +89,7 @@ QString sourceFor(const Configuration &config, const QString &name)
             return QObject::tr("Math");
     for (const ConditionRow &c : config.conditionRows)
         if (sameName(c.outputChannel))
-            return QObject::tr("Condition");
+            return QObject::tr("User Condition");
     for (const CounterRow &c : config.counterRows)
         if (sameName(c.outputChannel))
             return QObject::tr("Counter");

@@ -1,8 +1,8 @@
 // "Add Comms Channel" — one signal row inside a message, defined DBC-style:
 // channel + Select…, Default Value (on timeout), Start Bit, Bit Length,
-// DBC Type (Unsigned / Signed / IEEE754) and DBC Factor / Offset
-// (physical = raw × Factor + Offset). Live-validated against the section's
-// alignment and message length.
+// DBC Type (Unsigned / Signed / IEEE754), Bit Resolution and Offset
+// (physical = raw × Factor + Offset), and on a transmit row the clamp/roll-over
+// choice. Live-validated against the section's alignment and message length.
 #pragma once
 
 #include <QDialog>
@@ -10,6 +10,7 @@
 #include "../model/comms_types.h"
 #include "../model/configuration.h"
 
+class QCheckBox;
 class QComboBox;
 class QDialogButtonBox;
 class QDoubleSpinBox;
@@ -81,6 +82,9 @@ private:
     QComboBox *m_dbcTypeCombo;
     QDoubleSpinBox *m_factorSpin;
     QDoubleSpinBox *m_dbcOffsetSpin;
+    // Transmit rows only — null on a receive row, where there is nothing to
+    // clamp but the channel's own range and the device always does that.
+    QCheckBox *m_clampCheck = nullptr;
     QLabel *m_previewLabel;
     QLabel *m_warnLabel; // dimmed note, or the two-writer warning; never blocks OK
     QLabel *m_errorLabel;

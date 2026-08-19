@@ -29,7 +29,7 @@ To program the device with the open document, choose Online → Send Configurati
 2. **Fleet identity check.** The same rules the uploader applies are run against the connected unit. Here a failing rule is *advisory*: it is shown with its reason and a Yes/No question defaulting to No, because Send is the engineer's command and a bench unit is routinely re-loaded. Upload Configuration… is the path that refuses outright.
 3. **Validation.** If the configuration has any Error, the send stops and Check Channels opens — see [Validation &amp; the Config Summary](validation-report.md).
 4. **Protect Communication without a device password.** If the document marks any message **Protect Communication** and the connected unit has no **Edit Protected Comms** password set, you are told so and asked whether to send anyway. Unticking that marking is authorised by a device confirming that password, so on such a unit there is nothing to confirm. It is a warning and not a refusal — a check that cannot be overridden would only become a reason to stop marking messages. If the device cannot be asked (older firmware, or a failed read) nothing is said, because "I could not tell" must not be reported as "it is wrong".
-5. **Confirmation.** A dialog summarises what will be sent (messages, channels, math, conditions, counters, timers), the bus settings that will be applied, and any mapper warnings. It asks for a required **Configuration Title :** (stored on the device, up to 32 bytes) and offers two checkboxes:
+5. **Confirmation.** A dialog summarises what will be sent (messages, channels, math, User Conditions, counters, timers), the bus settings that will be applied, and any mapper warnings. It asks for a required **Configuration Title :** (stored on the device, up to 32 bytes) and offers two checkboxes:
     - **Lock this configuration to this device** — stores the device's unique chip ID with the configuration, so the device refuses to run it if it is copied to a different CAN Triple. Sending to another device re-binds it. Offered only when the firmware can report a device ID.
     - **Reset device after sending** — reboots the unit once the transfer completes.
 
@@ -53,7 +53,7 @@ Installs a `.ct3s` package on the connected device **without opening it**: nothi
 
 Reads the device's configuration into the editor, replacing the current document (you are asked first if it has unsaved changes). If the device protects "Get a Configuration", that password is proved first.
 
-The read recovers every message, channel, math channel, condition, counter, timer, constant, table and integrator, the stored configuration title, and — on current firmware — the live bus setup (mode, bit rates, termination), so what comes back can be re-sent without guessing. A [device script](device-scripts.md) comes back as well, as the **compiled bytecode** the device stores — sending that document back puts the same script on a unit byte for byte. What a Get cannot recover is a script's *Lua source*, because bytecode does not turn back into source: the Script Editor shows a retrieved script as a [read-only disassembly](device-scripts.md#retrieved), and replaces it only if you deliberately ask it to.
+The read recovers every message, channel, math channel, User Condition, counter, timer, constant, table and integrator, the stored configuration title, and — on current firmware — the live bus setup (mode, bit rates, termination), so what comes back can be re-sent without guessing. A [device script](device-scripts.md) comes back as well, as the **compiled bytecode** the device stores — sending that document back puts the same script on a unit byte for byte. What a Get cannot recover is a script's *Lua source*, because bytecode does not turn back into source: the Script Editor shows a retrieved script as a [read-only disassembly](device-scripts.md#retrieved), and replaces it only if you deliberately ask it to.
 
 On firmware that cannot report its bus setup, the assumed bring-up rates are used and a note tells you to check Connections → Communications before sending. A bus running listen-only reads back as enabled, and a note is raised whenever that conversion happens.
 
@@ -81,7 +81,7 @@ Two consequences worth knowing. A message the open document has *never* seen com
 
 ## Verify Configuration
 
-Maps the open document to device tables, reads the connected device's tables back (gated by the "Get a Configuration" password, since it is a read), and compares them record by record — every table kind: messages, channels, math channels, conditions, counters, timers, constants, relays, lookup tables, integrators and the compiled device script. Extra active entries on the device beyond what the document defines — leftovers from an older configuration — count as differences too. The result is either "Device configuration matches the document." or a count of differing table entries with the advice to use Send Configuration to update the device.
+Maps the open document to device tables, reads the connected device's tables back (gated by the "Get a Configuration" password, since it is a read), and compares them record by record — every table kind: messages, channels, math channels, User Conditions, counters, timers, constants, relays, lookup tables, integrators and the compiled device script. Extra active entries on the device beyond what the document defines — leftovers from an older configuration — count as differences too. The result is either "Device configuration matches the document." or a count of differing table entries with the advice to use Send Configuration to update the device.
 
 ## Reset Device
 
@@ -93,7 +93,7 @@ Reboots the unit after proving the "Send a Configuration" password. It re-initia
 
 One read-only report of what the unit is and what it is doing:
 - Uptime and per-bus receive/transmit frame counters.
-- Active table counts (messages, channels, math, conditions).
+- Active table counts (messages, channels, math, User Conditions).
 - Firmware protocol version.
 - Device ID and whether the stored configuration is locked to a different unit (which is why an apparently inert device shows 0 active messages).
 - Which access passwords are set — never their values. This tells you in advance that a Send or Get will ask for a password.

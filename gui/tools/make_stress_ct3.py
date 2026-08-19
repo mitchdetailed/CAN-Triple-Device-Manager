@@ -1,5 +1,5 @@
 """Generate a maximum-capacity stress configuration: 500 transmit messages,
-no receive, every calculation table full.
+no receive, every calculation table full except conditions.
 
 WHY 500 TRANSMIT AND ONE CHANNEL EACH. The device has 500 message slots and
 1000 signal slots, and a transmit row costs a signal slot of its own on top of
@@ -19,6 +19,19 @@ signals for the rows alone and the configuration would not map. The frames are
 still 8 bytes: messageLength is what sets the DLC, and a 32-bit channel in an
 8-byte message leaves the rest zero -- which is the point, since the goal is to
 prove 500 EIGHT-BYTE messages go out on time.
+
+WHY N_COND IS 100 AND NOT THE 250 THE DEVICE NOW HOLDS. Store v10 raised the
+condition table to 250, and the signal table did NOT grow with it -- 1000 is
+still 1000, and 64 bytes a slot is what stopped it growing. So "every table
+full at once" stopped being representable: 250 conditions would put the budget
+above at 1110 of 1000 and the configuration would simply fail to map.
+
+That is not a defect in this script, it is the shape of the device now, and it
+is worth stating rather than quietly picking a smaller number: the SIGNAL table
+is the binding constraint on the calculation side, and any table can be filled
+to its own capacity only by leaving room somewhere else. 100 conditions is the
+share that keeps the 500-message transmit load -- the thing this file exists to
+measure -- intact.
 
 WHY THE MESSAGES CARRY CALCULATED CHANNELS rather than channels of their own.
 A channel nothing generates is a channel the device transmits as zero for ever,

@@ -27,10 +27,12 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTimer>
+#include <QComboBox>
 #include <QTreeWidget>
 
 #include <cstdio>
 
+#include "../src/protocol/wire_structs.h"
 #include "../src/model/channel.h"
 #include "../src/model/channel_catalog.h"
 #include "../src/model/configuration.h"
@@ -136,11 +138,18 @@ void testChannelFieldSeparatesDisplayFromIdentity()
 // refuses to close is rejected and the test fails on its assertions, instead of
 // the whole sweep stopping on a window nobody can see.
 int g_modalAttempts = 0;
+// The shared closer presses OK on whatever modal appears, which is exactly what
+// most tests want and exactly wrong for one that needs to LOOK at an editor
+// before it closes. That test suspends the closer rather than racing it on
+// timer intervals, which would pass or fail by milliseconds.
+bool g_suspendModalCloser = false;
 
 void installModalCloser()
 {
     auto *timer = new QTimer(qApp);
     QObject::connect(timer, &QTimer::timeout, qApp, []() {
+        if (g_suspendModalCloser)
+            return;
         auto *dlg = qobject_cast<QDialog *>(QApplication::activeModalWidget());
         if (!dlg)
             return;
@@ -306,9 +315,12 @@ void testConditionsKeepBareNames()
     seedChannels(config);
     ConditionRow row;
     row.outputChannel = QStringLiteral("Engine RPM");
-    // ConditionRow already comes with one term. Appending a second would leave
-    // the first one empty, which the editor rightly refuses to accept.
-    row.terms[0].aChannel = QString::fromUtf8(kChan);
+    // ConditionRow already comes with one term per expression. Appending a
+    // second would leave the first one empty, which the editor rightly refuses
+    // to accept — and BOTH expressions have to be filled, because the default
+    // mode is Set/Reset and a latch with no Reset never clears.
+    row.setTerms[0].aChannel = QString::fromUtf8(kChan);
+    row.resetTerms[0].aChannel = QString::fromUtf8(kChan);
     config.conditionRows.append(row);
 
     ConditionsDialog d(&config);
@@ -318,10 +330,143 @@ void testConditionsKeepBareNames()
         return;
     }
     CHECK(config.conditionRows.size() == 1);
-    if (config.conditionRows.isEmpty() || config.conditionRows[0].terms.isEmpty())
+    if (config.conditionRows.isEmpty() || config.conditionRows[0].setTerms.isEmpty())
         return;
-    CHECK(config.conditionRows[0].terms[0].aChannel == QString::fromUtf8(kChan));
+    CHECK(config.conditionRows[0].setTerms[0].aChannel == QString::fromUtf8(kChan));
+    // The Reset half goes through the same channel fields, so it is the same
+    // claim and worth asserting rather than assuming.
+    CHECK(config.conditionRows[0].resetTerms[0].aChannel == QString::fromUtf8(kChan));
     CHECK(config.conditionRows[0].outputChannel == QStringLiteral("Engine RPM"));
+}
+
+// ------------------- the message operators, from a user's setup outward
+// A configuration with ONE receive message and ONE transmit message, which is
+// the smallest thing anyone builds first, and then: can a User Condition
+// actually be pointed at the received one?
+//
+// This exists because the answer was reported as no. It drives the real row
+// editor rather than calling populateMessages directly, because the failure
+// being chased is "the option is not there", and a unit test of the list
+// builder cannot see an option that the editor never shows.
+void testConditionMessagePickerOffersSections()
+{
+    Configuration config;
+    config.clear();
+    seedChannels(config);
+
+    CommsSection rx;
+    rx.name = QStringLiteral("Engine Data");
+    rx.device = SectionDevice::ReceiveMessage;
+    rx.baseAddress = 0x640;
+    rx.messageLengthBytes = 8;
+    config.bus[0].sections.append(rx);
+
+    CommsSection tx;
+    tx.name = QStringLiteral("Status Out");
+    tx.device = SectionDevice::TransmitMessage;
+    tx.baseAddress = 0x641;
+    tx.messageLengthBytes = 8;
+    tx.transmitRateHz = 10;
+    config.bus[0].sections.append(tx);
+
+    ConditionRow row;
+    row.outputChannel = QStringLiteral("Engine RPM");
+    row.setTerms[0].aChannel = QString::fromUtf8(kChan);
+    row.resetTerms[0].aChannel = QString::fromUtf8(kChan);
+    config.conditionRows.append(row);
+
+    ConditionsDialog d(&config);
+    auto *tree = d.findChild<QTreeWidget *>();
+    CHECK(tree && tree->topLevelItemCount() == 1);
+    if (!tree || tree->topLevelItemCount() == 0)
+        return;
+    tree->setCurrentItem(tree->topLevelItem(0));
+
+    // Everything worth knowing is collected from inside the modal editor, since
+    // that is the only place these widgets exist.
+    struct Found {
+        bool sawEditor = false;
+        bool opOffersReceived = false;
+        bool opOffersTransmitted = false;
+        QStringList messagesForReceived;
+        QStringList messagesForTransmitted;
+    } found;
+
+    g_suspendModalCloser = true;
+    auto *timer = new QTimer(qApp);
+    QObject::connect(timer, &QTimer::timeout, qApp, [&found, timer]() {
+        auto *dlg = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (!dlg)
+            return;
+        timer->stop();
+        found.sawEditor = true;
+
+        // The KIND combo — the first control of a comparison, and the one a
+        // user actually reaches for. Found by what it offers rather than by
+        // position, so a layout change does not silently stop testing this.
+        QComboBox *op = nullptr;
+        for (QComboBox *c : dlg->findChildren<QComboBox *>())
+            if (c->findData(int(COND_OP_MSG_RX)) >= 0 && c->findData(int(COND_OP_MSG_TX)) >= 0) {
+                op = c;
+                break;
+            }
+        if (op) {
+            const int rx = op->findData(int(COND_OP_MSG_RX));
+            const int tx = op->findData(int(COND_OP_MSG_TX));
+            found.opOffersReceived = rx >= 0;
+            found.opOffersTransmitted = tx >= 0;
+
+            // Selecting a message operator must swap input A for the message
+            // list. Whatever combo becomes visible and is not the operator one
+            // is that list.
+            const auto visibleMessages = [&]() {
+                QStringList out;
+                for (QComboBox *c : dlg->findChildren<QComboBox *>()) {
+                    if (c == op || !c->isVisibleTo(dlg))
+                        continue;
+                    for (int i = 0; i < c->count(); ++i)
+                        if (c->itemData(i).canConvert<QVariantList>())
+                            out << c->itemText(i);
+                }
+                return out;
+            };
+            if (rx >= 0) {
+                op->setCurrentIndex(rx);
+                found.messagesForReceived = visibleMessages();
+            }
+            if (tx >= 0) {
+                op->setCurrentIndex(tx);
+                found.messagesForTransmitted = visibleMessages();
+            }
+        }
+        dlg->reject(); // nothing here should be committed
+    });
+    timer->start(1);
+
+    QPushButton *change = button(d, QStringLiteral("Change…"));
+    CHECK(change != nullptr);
+    if (change)
+        change->click(); // blocks until the timer above rejects it
+    QApplication::processEvents();
+    timer->stop();
+    g_suspendModalCloser = false;
+
+    CHECK(found.sawEditor);
+    // The two operators are on the list at all — the thing a user looks for.
+    CHECK(found.opOffersReceived);
+    CHECK(found.opOffersTransmitted);
+    // And the receive message is offered under "was received", spelled the way
+    // the Communications list spells it.
+    CHECK(found.messagesForReceived.contains(
+        QStringLiteral("CAN 1 · Section 1 · Rx · Engine Data")));
+    // The transmit message is NOT, because it cannot be received.
+    CHECK(!found.messagesForReceived.contains(
+        QStringLiteral("CAN 1 · Section 2 · Tx · Status Out")));
+    // And the other way round under "was transmitted".
+    CHECK(found.messagesForTransmitted.contains(
+        QStringLiteral("CAN 1 · Section 2 · Tx · Status Out")));
+    CHECK(!found.messagesForTransmitted.contains(
+        QStringLiteral("CAN 1 · Section 1 · Rx · Engine Data")));
 }
 
 // ------------------------- a rename must reach an OPEN dialog's working copy
@@ -467,6 +612,7 @@ int main(int argc, char **argv)
     testIntegratorsKeepBareNames();
     testTimersKeepBareNames();
     testConditionsKeepBareNames();
+    testConditionMessagePickerOffersSections();
     testRenameReachesOpenWorkingCopy();
     testRenameRepointsOpenChannelFields();
     testDeviceChannelsAreSelfConsistent();

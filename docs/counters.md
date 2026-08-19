@@ -1,6 +1,6 @@
 # Up/Down Counters
 
-A counter is a calculation that steps a value up or down on the edges of boolean input channels. Its output is an ordinary generated [channel](channels.md), so it can feed [math channels](math-channels.md), [conditions](conditions.md), transmit messages, or be watched live in [Monitor Channels](monitor.md). Counters are evaluated on the device at 100 Hz.
+A counter is a calculation that steps a value up or down on the edges of boolean input channels. Its output is an ordinary generated [channel](channels.md), so it can feed [math channels](math-channels.md), [User Conditions](conditions.md), transmit messages, or be watched live in [Monitor Channels](monitor.md). Counters are evaluated on the device at 100 Hz.
 
 To edit counters, choose **Calculations → Up / Down Counters…**. The dialog lists every counter with columns **#**, **Active**, **Output**, **Type** and **Inputs**. Use **Add…**, **Change…** (or double-click a row) and **Remove** to manage the list. The device supports at most **50** counters. Changes are written into the configuration only when you close the dialog with **OK**; **Cancel** discards them.
 
@@ -44,7 +44,7 @@ see below.</td></tr>
 <tr><td>Active</td><td>Only active counters run on the device.</td></tr>
 </table>
 
-> **Note:** All counter inputs are boolean channels: true means the channel's value is greater than 0. A [condition](conditions.md) output is the usual way to build a clean trigger from an analog channel.
+> **Note:** All counter inputs are boolean channels: true means the channel's value is greater than 0. A [User Condition](conditions.md) output is the usual way to build a clean trigger from an analog channel.
 
 > **Note:** The Reset value is always forced into the Minimum–Maximum range, even when the limits are disabled for counting (Maximum ≤ Minimum), so keep it inside the range you configure.
 
@@ -72,4 +72,4 @@ At most **20** values can be preserved, and the store is *shared* between counte
 
 ## See also
 
-[Timers](timers.md) · [Integrators](integrators.md) · [Conditions](conditions.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md) · [Validation &amp; the Config Summary](validation-report.md)
+[Timers](timers.md) · [Integrators](integrators.md) · [User Conditions](conditions.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md) · [Validation &amp; the Config Summary](validation-report.md)

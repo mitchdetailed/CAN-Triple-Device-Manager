@@ -37,7 +37,7 @@ behaviour is surprising.</td><td>No</td></tr>
 
 ### Warnings — examples
 
-The channel-level warning that matters most is **two things writing the same channel**. The device has one value slot per channel, so two writers overwrite each other and whichever runs last wins. Every writer counts — receive rows, math, conditions, counters, timers, integrators, constants, table outputs and the channel a Transmit CRC8 message publishes its checksum to — an inactive row counts as no writer at all, and one warning is raised per channel naming all of its writers. See [Math Channels](math-channels.md), [Conditions](conditions.md), [Constants](constants.md) and [Lookup Tables](tables.md).
+The channel-level warning that matters most is **two things writing the same channel**. The device has one value slot per channel, so two writers overwrite each other and whichever runs last wins. Every writer counts — receive rows, math, User Conditions, counters, timers, integrators, constants, table outputs and the channel a Transmit CRC8 message publishes its checksum to — an inactive row counts as no writer at all, and one warning is raised per channel naming all of its writers. See [Math Channels](math-channels.md), [User Conditions](conditions.md), [Constants](constants.md) and [Lookup Tables](tables.md).
 
 Other warnings include: messages on a bus whose Mode is Off; routing or relaying to a bus whose mode is Off; a route or relay mask that includes its own bus (ignored by the device); a DBC factor of zero; two channels overlapping in a frame; a channel occupying the byte a Transmit CRC8 message stamps its checksum into (the stamp runs last and overwrites it); a CRC element reading at or past the message length, or reading the CRC's own byte; a counter whose maximum does not exceed its minimum; a timer with neither a start nor a stop channel; an integrator with no reset channel; table axis sites that are not strictly ascending.
 
@@ -58,7 +58,7 @@ To produce a report of the whole configuration, choose File → Config Summary�
 - **Configuration Comments** — the document's comment text.
 - **CAN Bus Setup** — per-bus mode, bit rate, FD data rate and termination.
 - **Used Channels** — every channel the configuration touches, in first-use order.
-- **Channels By Function** — Communications first (each section with its type, ID, length, alignment, timing, routing and its per-row bit/length/ type/factor/offset detail), then Calculations (math, conditions, counters, timers, integrators, constants and tables, each with what it uses and what it generates).
+- **Channels By Function** — Communications first (each section with its type, ID, length, alignment, timing, routing and its per-row bit/length/ type/factor/offset detail), then Calculations (math, User Conditions, counters, timers, integrators, constants and tables, each with what it uses and what it generates).
 - **Incomplete Channels** — channels something consumes but nothing generates, with the list of their users.
 - **Unused Channels** — catalogue channels nothing references.
 

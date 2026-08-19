@@ -298,6 +298,15 @@ static void fillLabel(CanSignalConfig &sig, const QString &name)
     std::memcpy(sig.label, utf8.constData(), size_t(utf8.size()));
 }
 
+// The document's handle for a message: its bus and its name, lower-cased. Used
+// by both directions of the condition mapping, so the two cannot disagree about
+// what counts as the same message. Deliberately the same shape as
+// sectionNameIdentity below, which the Get reconciliation pass already uses.
+QString messageRefKey(int bus, const QString &name)
+{
+    return QStringLiteral("%1/%2").arg(bus).arg(name.trimmed().toLower());
+}
+
 MappingResult mapToDevice(const Configuration &config)
 {
     MappingResult r;
@@ -316,6 +325,34 @@ MappingResult mapToDevice(const Configuration &config)
     // at 31 characters, but one non-ASCII character is 2-4 UTF-8 bytes, so a
     // legal-looking 31-character name can still overrun the label. That is the
     // case this check exists for.
+    // Triggered transmit, deferred. A message names its User Condition by the
+    // condition's OUTPUT CHANNEL, but the wire wants the condition's INDEX, and
+    // the index does not exist yet: messages are mapped here at the top and the
+    // condition table is built several hundred lines below. Rather than guess
+    // the numbering twice — the condition loop skips inactive and malformed rows,
+    // so predicting it would mean duplicating those rules and getting them to
+    // stay duplicated — each transmit message parks what it wants here and the
+    // bindings are resolved once the real indices are known.
+    struct PendingTrigger {
+        int msgIdx;
+        QString conditionChannel;
+        QString where;
+    };
+    QList<PendingTrigger> pendingTriggers;
+
+    // (bus, lower-cased section name) -> the message index it landed at, for the
+    // "was received" / "was transmitted" comparisons a User Condition can carry.
+    //
+    // Bus AND name, because a name alone is not unique across buses and a
+    // cross-bus match would let a section on CAN 2 answer for one on CAN 1 —
+    // the hazard sectionNameIdentity already documents. Lower-cased, because
+    // every other name comparison in the document is case-insensitive.
+    //
+    // A duplicate name within one bus resolves to the FIRST section, which is
+    // the same rule the device applies to two receive rows sharing a CAN ID.
+    // Validation reports the ambiguity rather than this silently picking.
+    QHash<QString, int> messageIndexByBusName;
+
     QHash<QByteArray, QString> truncatedLabels;
     auto checkLabelCollision = [&](const QString &channelName) {
         const QByteArray label = clipToLabel(channelName);
@@ -398,12 +435,33 @@ MappingResult mapToDevice(const Configuration &config)
                 if (section.compound && section.compoundTxMode == CompoundTxMode::Sequential)
                     msg.flags |= MSGFLAG_TX_SEQUENTIAL;
                 applyProtection(msg.flags, section.protection);
-                // The retired per-message key's four bytes, written zero. The
-                // record is value-initialised above so they already are; this
-                // says so on purpose, because "reserved" is exactly the field a
-                // future change reaches for when it wants somewhere to put
-                // something, and the firmware scrubs it on the way in.
-                std::memset(msg.reserved, 0, sizeof(msg.reserved));
+                // The one surviving byte of the retired per-message key, written
+                // zero. Value-initialised above, so this only says so on purpose
+                // — the firmware scrubs it on the way in, and a field that is
+                // only usually zero stops being reserved.
+                msg.reserved = 0;
+                // Cyclic until the resolve pass below says otherwise. Naming the
+                // sentinel rather than leaning on the zero-init matters: 0 is a
+                // perfectly good condition index, and a message that ended up
+                // with tx_trigger_cond = 0 and no flag would read back from a
+                // device as "triggered on condition 1" the moment anything set
+                // the flag by accident.
+                msg.tx_trigger_cond = TX_TRIGGER_COND_NONE;
+                msg.tx_trigger_flags = 0;
+                if (!section.cyclic) {
+                    if (section.transmitCondition.isEmpty()) {
+                        // Refused rather than silently sent as cyclic. The
+                        // section says "only transmit on a condition" and names
+                        // none; mapping it to a message that transmits
+                        // CONTINUOUSLY is the one outcome the author certainly
+                        // did not ask for.
+                        r.errors.append(QStringLiteral(
+                            "%1: Triggered transmit with no User Condition selected").arg(where));
+                    } else {
+                        pendingTriggers.append({r.tables.messages.size(),
+                                                section.transmitCondition, where});
+                    }
+                }
                 msg.src_bus = quint8(busIdx + 1);
                 msg.dlc = quint8(qBound(0, section.messageLengthBytes, section.fd ? 64 : 8));
                 // An explicit period (set on Get) is authoritative and survives
@@ -416,6 +474,8 @@ MappingResult mapToDevice(const Configuration &config)
                                     ? quint16(qBound(5, section.transmitPeriodMs, 65535))
                                     : quint16(qMax(5, 1000 / rate));
                 const int msgIdx = r.tables.messages.size();
+                messageIndexByBusName.insert(messageRefKey(busIdx + 1, section.name),
+                                             msgIdx);
                 r.tables.messages.append(msg);
 
                 // Transmit CRC8: the section's checksum recipe becomes one
@@ -516,6 +576,11 @@ MappingResult mapToDevice(const Configuration &config)
                     CanSignalConfig sig{};
                     // belongs to this (transmit) message
                     sigSetHeader(sig, quint16(msgIdx), fields.byteOrder, 1);
+                    // The ONE place the model's polarity meets the wire's. The
+                    // row says "clamp" because that is the box the user ticks;
+                    // the record says "wrap" because a zero bit has to mean the
+                    // behaviour every configuration written before it had.
+                    sigSetTxWrap(sig, !row.clampToRange);
                     sigSetBits(sig, fields.startBit, fields.bitLength, fields.valueType,
                                0 /* scaling is fully in factor/offset */, muxOffset);
                     sig.factor = float(row.dbcFactor); // DBC scaling: physical = raw × factor + offset
@@ -569,15 +634,58 @@ MappingResult mapToDevice(const Configuration &config)
                                     .arg(ident.rows.size()));
                             continue;
                         }
-                        if (!ident.rows.isEmpty()) {
-                            // Row-less identifiers produce no signals, so the
-                            // composer never sees them — count only the ones
-                            // that reach the wire format.
+                        if (!ident.rows.isEmpty() || ident.configured) {
+                            // Counted when it reaches the wire format, which a
+                            // channel-less identifier now does too — it emits a
+                            // selector-only signal below, and the device collects
+                            // that exactly like any other.
                             const quint64 sel = (quint64(quint8(ident.byteOffset)) << 32)
                                                 | (quint64(ident.idMask) << 16)
                                                 | quint64(ident.id & ident.idMask);
                             if (!selectors.contains(sel))
                                 selectors.append(sel);
+                        }
+                        if (ident.rows.isEmpty()) {
+                            // A variant whose whole content is its selector — a
+                            // request or ping frame, where the ID byte IS the
+                            // message. The device infers a compound message's
+                            // variants by walking its SIGNALS, so an identifier
+                            // with nothing bound to it used to infer nothing and
+                            // never went out. One selector-only signal declares
+                            // it; the composer packs no bits for it, so the frame
+                            // carries its selector over a zeroed payload.
+                            //
+                            // Gated on `configured`: the editor hands out
+                            // identifier SLOTS, and an untouched slot is not a
+                            // sub-message somebody wants on the bus every period.
+                            if (!ident.configured)
+                                continue;
+                            if (r.tables.signalConfigs.size() >= MAX_SIGNALS) {
+                                r.errors.append(
+                                    QStringLiteral("%1: device signal table is full (%2)")
+                                        .arg(where).arg(MAX_SIGNALS));
+                                continue;
+                            }
+                            CanSignalConfig sel{};
+                            // Same rule computeExtraction applies (line 122): WordSwap is
+                            // Intel, Normal is Motorola. It packs nothing, so this
+                            // only matters because Get reads a message's alignment
+                            // back off its signals.
+                            const quint8 selOrder =
+                                (section.alignment == SectionAlignment::WordSwap) ? 0 : 1;
+                            sigSetHeader(sel, quint16(msgIdx), selOrder, 1);
+                            sigSetSelectorOnly(sel, true);
+                            // Width is a formality — nothing is packed from it —
+                            // but a zero-length field is not a legal record, and
+                            // the mux byte offset has to ride in the bits word.
+                            sigSetBits(sel, 0, 1, SIGNAL_TYPE_UINT8, 0, quint8(ident.byteOffset));
+                            sel.factor = 1.0f;
+                            sel.mux_id = quint16(ident.id);
+                            sel.mux_mask = quint16(ident.idMask);
+                            // No label: it names no channel, and Get recognises
+                            // it by the flag rather than by anything written here.
+                            r.tables.signalConfigs.append(sel);
+                            continue;
                         }
                         for (const CommsChannelRow &row : ident.rows)
                             emitTxSignal(row, quint8(ident.byteOffset), quint16(ident.id),
@@ -641,7 +749,11 @@ MappingResult mapToDevice(const Configuration &config)
             }
             // Same helper as the transmit branch above, and the same reasoning.
             applyProtection(msg.flags, section.protection);
-            std::memset(msg.reserved, 0, sizeof(msg.reserved));
+            msg.reserved = 0;
+            // A receive message has no trigger, and says so rather than leaving
+            // the sentinel to the zero-init — see the transmit branch.
+            msg.tx_trigger_cond = TX_TRIGGER_COND_NONE;
+            msg.tx_trigger_flags = 0;
             msg.src_bus = quint8(busIdx + 1);
             msg.dlc = quint8(qBound(0, section.messageLengthBytes, section.fd ? 64 : 8));
             // period_ms doubles as the receive timeout: signals revert to their
@@ -651,6 +763,7 @@ MappingResult mapToDevice(const Configuration &config)
                                 ? quint16(qBound(0, section.receiveTimeoutMs, 65535))
                                 : 0;
             const int msgIdx = r.tables.messages.size();
+            messageIndexByBusName.insert(messageRefKey(busIdx + 1, section.name), msgIdx);
             r.tables.messages.append(msg);
 
             // Emit one receive signal, optionally mux-gated (compound). muxMask
@@ -701,6 +814,9 @@ MappingResult mapToDevice(const Configuration &config)
                 }
                 CanSignalConfig &sig = r.tables.signalConfigs[sigIdx];
                 sigSetHeader(sig, quint16(msgIdx), fields.byteOrder, 1);
+                // Receive never wraps, and this slot may be one an earlier pass
+                // created, so the bit is cleared rather than assumed clear.
+                sigSetTxWrap(sig, false);
                 // decimals 0: the scaling is fully expressed in factor/offset
                 sigSetBits(sig, fields.startBit, fields.bitLength, fields.valueType, 0, muxOffset);
                 sig.factor = float(row.dbcFactor); // DBC scaling: physical = raw × factor + offset
@@ -873,12 +989,44 @@ MappingResult mapToDevice(const Configuration &config)
         r.tables.math.append(mc);
     }
 
-    // Condition rows
+    // Describe a generated value slot from its data type, so a later Get can
+    // recover the channel's type and decimals. Only stamps a slot no other
+    // generator has typed yet: a name shared between, say, a table output and a
+    // condition must not have one silently rewrite the other's type — validation
+    // flags the overlap instead.
+    //
+    // Defined HERE, above the conditions, rather than beside the lookup tables
+    // that first needed it: conditions type their output too now, and they are
+    // mapped first.
+    auto typeOutputSignal = [&](int destIdx, const QString &dataType, int decimals) {
+        CanSignalConfig &sig = r.tables.signalConfigs[destIdx];
+        if (sigValueType(sig) != 0)
+            return; // already typed by another generator (overlap flagged by validation)
+        const quint8 vt = valueTypeForDataType(dataType);
+        if (vt != 0) {
+            sigSetValueType(sig, vt);
+            sigSetBitLength(sig, (vt == SIGNAL_TYPE_FLOAT)                                ? 32
+                                 : (vt == SIGNAL_TYPE_UINT8 || vt == SIGNAL_TYPE_INT8)   ? 8
+                                 : (vt == SIGNAL_TYPE_UINT16 || vt == SIGNAL_TYPE_INT16) ? 16
+                                                                                         : 32);
+        }
+        sigSetDecimalPlaces(sig, int8_t(qBound(0, decimals, 8)));
+    };
+
+    // Condition rows. The output channel of each one that actually reaches the
+    // device, against the index it landed at — the lookup the Triggered-transmit
+    // resolve pass below needs, recorded HERE because this loop is the only
+    // thing that knows which rows survived and in what order.
+    //
+    // No deferral is needed for the MESSAGE operands, unlike the transmit
+    // trigger: every bus has been walked by the time this loop runs, so
+    // messageIndexByBusName is already complete.
+    QHash<QString, int> conditionIndexByOutput;
     for (int i = 0; i < config.conditionRows.size(); ++i) {
         const ConditionRow &c = config.conditionRows[i];
         if (!c.active)
             continue;
-        const QString where = QStringLiteral("Condition %1").arg(i + 1);
+        const QString where = QStringLiteral("User Condition %1").arg(i + 1);
         if (r.tables.conditions.size() >= MAX_CONDITIONS) {
             r.errors.append(QStringLiteral("%1: device condition table is full").arg(where));
             break;
@@ -887,70 +1035,149 @@ MappingResult mapToDevice(const Configuration &config)
             r.errors.append(QStringLiteral("%1: no output channel selected").arg(where));
             continue;
         }
-        if (c.terms.isEmpty()) {
-            r.errors.append(QStringLiteral("%1: no comparisons").arg(where));
-            continue;
-        }
-        const int termCount = qMin(int(c.terms.size()), COND_MAX_TERMS);
         ConditionConfig cc{};
-        cc.is_active = 1;
-        cc.term_count = quint8(termCount);
+        cc.flags = CONDFLAG_ACTIVE;
+        if (c.mode == ConditionMode::SetReset)
+            cc.flags |= CONDFLAG_SETRESET;
+        cc.latch_hz = quint8(qBound(1, c.latchHz, int(COND_LATCH_MAX_HZ)));
+
+        // One expression into its three wire slots. Shared by Set and Reset so
+        // the two can never disagree about how a term is packed; `side` is
+        // carried only to name the right one in an error a user has to act on.
+        const auto mapExpr = [&](const QList<ConditionTermRow> &terms,
+                                 const QList<int> &joiners, const QString &side,
+                                 ConditionTerm *out, quint8 *countOut,
+                                 quint8 *joinersOut) -> bool {
+            const int n = qMin(int(terms.size()), COND_MAX_TERMS);
+            if (n < 1) {
+                r.errors.append(QStringLiteral("%1: no %2 comparisons").arg(where, side));
+                return false;
+            }
+            for (int t = 0; t < n; ++t) {
+                const ConditionTermRow &tr = terms[t];
+                ConditionTerm &wt = out[t];
+                wt.op = quint8(tr.op);
+                if (tr.isMessageOp()) {
+                    // input_a is a MESSAGE index for these, and input_b is
+                    // unused — left zero by the value-initialised record above,
+                    // which also zeroes the whole union.
+                    if (tr.aMessage.isEmpty()) {
+                        r.errors.append(
+                            QStringLiteral("%1 %2 comparison %3: no message selected")
+                                .arg(where, side).arg(t + 1));
+                        return false;
+                    }
+                    const auto mit = messageIndexByBusName.constFind(
+                        messageRefKey(tr.aMessageBus, tr.aMessage));
+                    if (mit == messageIndexByBusName.constEnd()) {
+                        // Refused, not skipped. A term that silently evaluated
+                        // false would leave a Set that never sets or a Reset
+                        // that never clears, and the configuration would look
+                        // like it had mapped cleanly.
+                        r.errors.append(
+                            QStringLiteral("%1 %2 comparison %3: CAN %4 has no message "
+                                           "named %5")
+                                .arg(where, side).arg(t + 1).arg(tr.aMessageBus)
+                                .arg(tr.aMessage));
+                        return false;
+                    }
+                    wt.input_a_signal_idx = quint16(*mit);
+                    continue;
+                }
+                // Both sides are reads, so any named channel resolves — to a
+                // virtual default-valued slot when nothing writes it. Only a
+                // term left blank is unmappable: there is no value to compare.
+                const auto readSlot = [&](const QString &name) -> int {
+                    if (name.isEmpty()) {
+                        r.errors.append(
+                            QStringLiteral("%1 %2 comparison %3: no input channel selected")
+                                .arg(where, side).arg(t + 1));
+                        return -1;
+                    }
+                    const int idx = signalFor(name);
+                    if (idx >= MAX_SIGNALS) {
+                        r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
+                                            .arg(where).arg(MAX_SIGNALS));
+                        return -1;
+                    }
+                    return idx;
+                };
+                const int idxA = readSlot(tr.aChannel);
+                if (idxA < 0)
+                    return false;
+                wt.input_a_signal_idx = quint16(idxA);
+                if (tr.bIsChannel) {
+                    const int idxB = readSlot(tr.bChannel);
+                    if (idxB < 0)
+                        return false;
+                    wt.input_b_type = 1;
+                    wt.b.input_b_idx = quint16(idxB);
+                } else {
+                    wt.input_b_type = 0;
+                    wt.b.input_b_const = float(tr.bConst);
+                }
+            }
+            *countOut = quint8(n);
+            *joinersOut = 0;
+            // One joiner bit per gap; a missing entry defaults to AND.
+            for (int g = 0; g + 1 < n; ++g)
+                if (joiners.value(g, int(COND_JOIN_AND)) == int(COND_JOIN_OR))
+                    *joinersOut |= quint8(1u << g);
+            return true;
+        };
+
         // Any unresolved term invalidates the WHOLE condition — a partially
         // built expression would evaluate to something the user never wrote.
-        bool termsOk = true;
-        for (int t = 0; t < termCount && termsOk; ++t) {
-            const ConditionTermRow &tr = c.terms[t];
-            ConditionTerm &wt = cc.terms[t];
-            wt.op = quint8(tr.op);
-            // Both sides are reads, so any named channel resolves — to a
-            // virtual default-valued slot when nothing writes it. Only a term
-            // left blank is unmappable: there is no value to compare.
-            const auto readSlot = [&](const QString &name, int termNo) -> int {
-                if (name.isEmpty()) {
-                    r.errors.append(QStringLiteral("%1 comparison %2: no input channel selected")
-                                        .arg(where).arg(termNo));
-                    return -1;
-                }
-                const int idx = signalFor(name);
-                if (idx >= MAX_SIGNALS) {
-                    r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
-                                        .arg(where).arg(MAX_SIGNALS));
-                    return -1;
-                }
-                return idx;
-            };
-            const int idxA = readSlot(tr.aChannel, t + 1);
-            if (idxA < 0) {
-                termsOk = false;
-                break;
-            }
-            wt.input_a_signal_idx = quint16(idxA);
-            if (tr.bIsChannel) {
-                const int idxB = readSlot(tr.bChannel, t + 1);
-                if (idxB < 0) {
-                    termsOk = false;
-                    break;
-                }
-                wt.input_b_type = 1;
-                wt.input_b_idx = quint16(idxB);
-            } else {
-                wt.input_b_type = 0;
-                wt.input_b_const = float(tr.bConst);
-            }
-        }
-        if (!termsOk)
+        if (!mapExpr(c.setTerms, c.setJoiners, QStringLiteral("Set"), cc.set_terms,
+                     &cc.set_count, &cc.set_joiners))
             continue;
-        // One joiner bit per gap; a missing entry defaults to AND.
-        for (int g = 0; g + 1 < termCount; ++g)
-            if (c.joiners.value(g, int(COND_JOIN_AND)) == int(COND_JOIN_OR))
-                cc.joiners |= quint8(1u << g);
+        // The Reset half is only sent for a Set/Reset. A Momentary keeps the
+        // editor's Reset expression in the document so switching modes does not
+        // destroy what was typed, but the device must not see it: reset_count 0
+        // is how the engine is told there is no Reset, and a Momentary has none.
+        if (c.mode == ConditionMode::SetReset) {
+            if (!mapExpr(c.resetTerms, c.resetJoiners, QStringLiteral("Reset"), cc.reset_terms,
+                         &cc.reset_count, &cc.reset_joiners))
+                continue;
+        }
+
         const int destIdx = signalFor(c.outputChannel);
         if (destIdx >= MAX_SIGNALS) {
             r.errors.append(QStringLiteral("%1: device signal table is full").arg(where));
             continue;
         }
         cc.dest_signal_idx = quint16(destIdx);
+        // A User Condition's output is boolean by definition — the engine writes
+        // 1.0 or 0.0 into it and nothing else ever has. Stamping the slot says
+        // so on the wire, which matters for the round trip: a Get reads the type
+        // back out, and an untyped slot comes home with no data type at all.
+        //
+        // Math, counter, timer and integrator outputs are equally untyped, and
+        // deliberately so: what they produce depends on what the user configured,
+        // so there is nothing for the mapper to declare. A condition is the case
+        // where the type IS knowable without being declared, which is why leaving
+        // this slot blank was a gap rather than a policy.
+        typeOutputSignal(destIdx, QStringLiteral("boolean"), 0);
+        conditionIndexByOutput.insert(c.outputChannel.toLower(), r.tables.conditions.size());
         r.tables.conditions.append(cc);
+    }
+
+    // Triggered transmit: bind each waiting message to the condition it named.
+    //
+    // Anything unresolved is an ERROR rather than a quiet fall back to cyclic,
+    // for the reason the parking comment above gives — a message configured to
+    // speak only on a condition must not become one that never stops.
+    for (const PendingTrigger &pt : pendingTriggers) {
+        const auto it = conditionIndexByOutput.constFind(pt.conditionChannel.toLower());
+        if (it == conditionIndexByOutput.constEnd()) {
+            r.errors.append(QStringLiteral(
+                "%1: Triggered transmit names '%2', which is not the output of any active "
+                "User Condition").arg(pt.where, pt.conditionChannel));
+            continue;
+        }
+        CanMessageConfig &msg = r.tables.messages[pt.msgIdx];
+        msg.tx_trigger_cond = quint16(*it);
+        msg.tx_trigger_flags = TXTRIG_ENABLED;
     }
 
     // Resolves a boolean-input channel to a signal index (0xFFFF when empty,
@@ -1165,24 +1392,6 @@ MappingResult mapToDevice(const Configuration &config)
         r.tables.constants.append(cc);
     }
 
-    // v12 lookup tables. The output is a generated channel (like a constant):
-    // the table owns its value slot and types it from the row's data type so a
-    // later Get recovers the channel definition. Axis inputs resolve like math
-    // inputs (must be a channel generated by a comms row or another calc).
-    auto typeOutputSignal = [&](int destIdx, const QString &dataType, int decimals) {
-        CanSignalConfig &sig = r.tables.signalConfigs[destIdx];
-        if (sigValueType(sig) != 0)
-            return; // already typed by another generator (overlap flagged by validation)
-        const quint8 vt = valueTypeForDataType(dataType);
-        if (vt != 0) {
-            sigSetValueType(sig, vt);
-            sigSetBitLength(sig, (vt == SIGNAL_TYPE_FLOAT)                                ? 32
-                                 : (vt == SIGNAL_TYPE_UINT8 || vt == SIGNAL_TYPE_INT8)   ? 8
-                                 : (vt == SIGNAL_TYPE_UINT16 || vt == SIGNAL_TYPE_INT16) ? 16
-                                                                                         : 32);
-        }
-        sigSetDecimalPlaces(sig, int8_t(qBound(0, decimals, 8)));
-    };
     // Resolve a table's named output into a typed generated signal slot. Returns
     // -1 (with an error appended) if the name is empty, the table is full, or the
     // name already belongs to a communications signal.
@@ -1719,7 +1928,13 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         // byte_order overrides this below for messages that have channels.
         s.alignment = SectionAlignment::Normal;
         if (transmit) {
-            s.cyclic = true;
+            // Triggered survives a Get now. It used to be forced true here
+            // because the flag reached the device nowhere and a read-back had
+            // nothing to consult; the message record carries it, so the section
+            // comes home the way it went out. The condition itself is resolved
+            // from an index to a channel name at the end of this function, once
+            // the condition rows exist.
+            s.cyclic = !(msg.tx_trigger_flags & TXTRIG_ENABLED);
             s.transmitPeriodMs = msg.period_ms; // authoritative — exact re-send
             s.transmitRateHz = qBound(1, msg.period_ms ? 1000 / msg.period_ms : 50, 200);
             s.compoundTxMode = (msg.flags & MSGFLAG_TX_SEQUENTIAL) ? CompoundTxMode::Sequential
@@ -1771,10 +1986,20 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         const CanSignalConfig &sig = tables.signalConfigs[i];
         if (!sigIsActive(sig))
             continue;
-        QString name = QString::fromUtf8(sig.label, qstrnlen(sig.label, sizeof(sig.label))).trimmed();
-        if (name.isEmpty())
-            name = QStringLiteral("Signal %1").arg(i);
-        signalNames.insert(i, name);
+        // Declares an identifier and carries no value (SIG_FLAG_SELECTOR_ONLY).
+        // It must still reach the section rebuild at the bottom of this loop —
+        // that is the whole point of it — but it names no channel, so it takes
+        // no catalogue entry and no signalNames slot. Its blank label would
+        // otherwise become "Signal 12" and manufacture a channel for something
+        // that is not one.
+        const bool selectorOnly = sigSelectorOnly(sig);
+        QString name;
+        if (!selectorOnly) {
+            name = QString::fromUtf8(sig.label, qstrnlen(sig.label, sizeof(sig.label))).trimmed();
+            if (name.isEmpty())
+                name = QStringLiteral("Signal %1").arg(i);
+            signalNames.insert(i, name);
+        }
 
         // Infer the storage data type from the field width + signedness so
         // reconstructed channels open cleanly in Edit Custom Channel.
@@ -1815,7 +2040,10 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         // The published slots themselves carry no message binding, so the
         // SIG_MSG_NONE test below still retires them exactly as the continue
         // did.
-        if (devicePublishedSlots.contains(i) || ChannelCatalog::isDeviceChannel(name)) {
+        if (selectorOnly) {
+            // Names no channel, so it takes no catalogue entry — but it keeps
+            // walking to the section rebuild below, which is what it is for.
+        } else if (devicePublishedSlots.contains(i) || ChannelCatalog::isDeviceChannel(name)) {
             channelNamesSeen.insert(nameKey);
         } else if (!channelNamesSeen.contains(nameKey)) {
             channelNamesSeen.insert(nameKey);
@@ -1875,12 +2103,21 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         }
         row.dbcFactor = sig.factor;
         row.dbcOffset = sig.offset;
+        // Inverted back out of the wire's polarity. A receive row's bit is
+        // always clear, so this reads true for it, which is what receive does.
+        row.clampToRange = !sigTxWrap(sig);
 
         // v8/v10: a signal with a non-zero mux mask is a gated compound
         // sub-message channel (receive OR transmit); group it under an identifier
         // keyed by (offset, id, mask). Ungated signals (mask 0) are the section's
         // always-present rows.
         if (sig.mux_mask == 0) {
+            // A selector-only signal with no mask declares nothing — it cannot
+            // name a variant — and appending it here would put a channel-less
+            // row in the section. Only a foreign or hand-built table can
+            // produce one; drop it rather than reconstruct a row from it.
+            if (selectorOnly)
+                continue;
             section->rows.append(row);
         } else {
             section->compound = true;
@@ -1900,7 +2137,12 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
                 section->identifiers.append(ci);
                 ident = &section->identifiers.last();
             }
-            ident->rows.append(row);
+            // A selector-only signal has just done its whole job: the identifier
+            // above exists again. It carries no channel, so appending a row for
+            // it would invent one — and the next Send would emit a real signal
+            // where the author put nothing.
+            if (!selectorOnly)
+                ident->rows.append(row);
         }
     }
 
@@ -1999,30 +2241,98 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         config.mathRows.append(m);
     }
 
-    for (const ConditionConfig &cc : tables.conditions) {
-        if (!cc.is_active)
+    // Wire index -> the condition's output channel, for the Triggered-transmit
+    // resolve below. Keyed on the position in the DEVICE's table, not on the
+    // position in conditionRows, because the two can differ: an inactive record
+    // is skipped here but still occupies its index on the device.
+    QHash<int, QString> conditionOutputByIndex;
+    for (int ci = 0; ci < tables.conditions.size(); ++ci) {
+        const ConditionConfig &cc = tables.conditions[ci];
+        if (!(cc.flags & CONDFLAG_ACTIVE))
             continue;
         ConditionRow c;
-        c.terms.clear();
-        // A device record always carries COND_MAX_TERMS slots; only the first
-        // term_count are meaningful (an older 1-comparison condition reads back
-        // with term_count 1, exactly as it was sent).
-        const int termCount = qBound(1, int(cc.term_count), COND_MAX_TERMS);
-        for (int t = 0; t < termCount; ++t) {
-            const ConditionTerm &wt = cc.terms[t];
-            ConditionTermRow tr;
-            tr.aChannel = signalNames.value(wt.input_a_signal_idx);
-            tr.op = wt.op;
-            tr.bIsChannel = wt.input_b_type == 1;
-            tr.bChannel = signalNames.value(wt.input_b_idx);
-            tr.bConst = wt.input_b_const;
-            c.terms.append(tr);
-            if (t + 1 < termCount)
-                c.joiners.append(((cc.joiners >> t) & 1u) ? int(COND_JOIN_OR)
-                                                          : int(COND_JOIN_AND));
-        }
+        c.mode = (cc.flags & CONDFLAG_SETRESET) ? ConditionMode::SetReset
+                                                : ConditionMode::Momentary;
+        c.latchHz = qBound(1, int(cc.latch_hz), int(COND_LATCH_MAX_HZ));
+
+        // One expression back out of its three wire slots. A device record
+        // always carries COND_MAX_TERMS of them; only the first `count` are
+        // meaningful, and the rest are whatever the writer left there.
+        const auto readExpr = [&](const ConditionTerm *src, int count, quint8 joinerBits,
+                                  QList<ConditionTermRow> *terms, QList<int> *joiners) {
+            terms->clear();
+            joiners->clear();
+            const int n = qBound(0, count, COND_MAX_TERMS);
+            for (int t = 0; t < n; ++t) {
+                const ConditionTerm &wt = src[t];
+                ConditionTermRow tr;
+                tr.op = wt.op;
+                if (condOpIsMessage(wt.op)) {
+                    // input_a is a message index. Turn it back into the (bus,
+                    // name) pair the document holds, through the same section
+                    // map the CRC8 and trigger paths use. An index naming
+                    // nothing leaves the term blank rather than carrying a
+                    // number no editor could show.
+                    const int mi = int(wt.input_a_signal_idx);
+                    if (msgSection.contains(mi) && mi < tables.messages.size()) {
+                        const int busIdx = int(tables.messages[mi].src_bus) - 1;
+                        if (busIdx >= 0 && busIdx <= 2) {
+                            const CommsSection &ms =
+                                config.bus[busIdx].sections[msgSection.value(mi)];
+                            tr.aMessageBus = busIdx + 1;
+                            tr.aMessage = ms.name;
+                        }
+                    }
+                } else {
+                    tr.aChannel = signalNames.value(wt.input_a_signal_idx);
+                    tr.bIsChannel = wt.input_b_type == 1;
+                    tr.bChannel = signalNames.value(wt.b.input_b_idx);
+                    tr.bConst = wt.b.input_b_const;
+                }
+                terms->append(tr);
+                if (t + 1 < n)
+                    joiners->append(((joinerBits >> t) & 1u) ? int(COND_JOIN_OR)
+                                                             : int(COND_JOIN_AND));
+            }
+            if (terms->isEmpty())
+                terms->append(ConditionTermRow{});
+        };
+
+        readExpr(cc.set_terms, cc.set_count, cc.set_joiners, &c.setTerms, &c.setJoiners);
+        // A Momentary sends reset_count 0, so this reads back as one empty
+        // comparison — which is what a Momentary's Reset half looks like in a
+        // freshly created row too. Nothing is lost that the device ever held.
+        readExpr(cc.reset_terms, cc.reset_count, cc.reset_joiners, &c.resetTerms,
+                 &c.resetJoiners);
+
         c.outputChannel = signalNames.value(cc.dest_signal_idx);
+        conditionOutputByIndex.insert(ci, c.outputChannel);
         config.conditionRows.append(c);
+    }
+
+    // Triggered transmit, the other direction: turn each message's condition
+    // INDEX back into the output-channel name the document holds.
+    //
+    // A message whose index names nothing — a device configured by some other
+    // tool, or a condition record that came back inactive — keeps cyclic rather
+    // than acquiring a dangling reference. The Get is describing a device, and a
+    // trigger this build cannot name is one it cannot honestly show.
+    for (const CanMessageConfig &msg : tables.messages) {
+        if (!(msg.flags & MSGFLAG_TRANSMIT) || !(msg.tx_trigger_flags & TXTRIG_ENABLED))
+            continue;
+        const int m = int(&msg - tables.messages.constData());
+        if (!msgSection.contains(m))
+            continue;
+        const int busIdx = int(msg.src_bus) - 1;
+        if (busIdx < 0 || busIdx > 2)
+            continue;
+        const QString outputChannel = conditionOutputByIndex.value(int(msg.tx_trigger_cond));
+        CommsSection &s = config.bus[busIdx].sections[msgSection.value(m)];
+        if (outputChannel.isEmpty()) {
+            s.cyclic = true;
+            continue;
+        }
+        s.transmitCondition = outputChannel;
     }
 
     auto boolName = [&](quint16 idx) {
@@ -2333,6 +2643,19 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
     }
 
     config.catalog().setUserChannels(userChannels);
+    // A User Condition's output is boolean, and a Get is the one path that could
+    // quietly say otherwise. The device stores the type as SIGNAL_TYPE_UINT8 —
+    // boolean and u8 are the same eight bits on the wire and always were — so
+    // inferDataType reads every condition output back as "u8", and an untyped
+    // slot from an older device reads back as nothing at all.
+    //
+    // The condition TABLE is what settles it. A channel a condition writes is a
+    // boolean because a condition writes it, whatever the signal record's type
+    // byte happens to say, so this runs after the catalogue is installed and
+    // corrects the inference from the one piece of evidence that is not
+    // ambiguous. Without it, one Get would un-type every condition output in
+    // the document.
+    config.forceConditionOutputsBoolean();
     config.setDirty(true);
 }
 

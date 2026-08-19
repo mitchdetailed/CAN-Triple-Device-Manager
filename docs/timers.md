@@ -1,6 +1,6 @@
 # Timers
 
-A timer accumulates elapsed time, in seconds, into a generated [channel](channels.md) while it is running. It is started and stopped by the rising edges of boolean input channels, so a [condition](conditions.md) output is the natural trigger. Timers are evaluated on the device at 100 Hz, and their outputs can feed [math channels](math-channels.md), other calculations, transmit messages, or be watched in [Monitor Channels](monitor.md).
+A timer accumulates elapsed time, in seconds, into a generated [channel](channels.md) while it is running. It is started and stopped by the rising edges of boolean input channels, so a [User Condition](conditions.md) output is the natural trigger. Timers are evaluated on the device at 100 Hz, and their outputs can feed [math channels](math-channels.md), other calculations, transmit messages, or be watched in [Monitor Channels](monitor.md).
 
 To edit timers, choose **Calculations → Timers…**. The dialog lists every timer with columns **#**, **Active**, **Output**, **Start**, **Stop** and **Mode** (**Count up** or **Count down**). Use **Add…**, **Change…** (or double-click a row) and **Remove**. The device supports at most **50** timers. Changes are written into the configuration only when you close the dialog with **OK**; **Cancel** discards them.
 
@@ -51,4 +51,4 @@ to :</td><td>Load a fixed value into the output on each stop edge.</td></tr>
 
 ## See also
 
-[Up/Down Counters](counters.md) · [Integrators](integrators.md) · [Conditions](conditions.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md) · [Validation &amp; the Config Summary](validation-report.md)
+[Up/Down Counters](counters.md) · [Integrators](integrators.md) · [User Conditions](conditions.md) · [Channels](channels.md) · [Monitoring Live Values](monitor.md) · [Validation &amp; the Config Summary](validation-report.md)

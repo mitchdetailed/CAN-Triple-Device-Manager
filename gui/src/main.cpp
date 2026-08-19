@@ -91,9 +91,12 @@ void saveScreenshots(const QString &dir)
     config.bus[0].sections.append(section);
 
     ct::ConditionRow cond;
-    cond.terms[0].aChannel = QStringLiteral("Engine Temperature");
-    cond.terms[0].op = 4; // >
-    cond.terms[0].bConst = 100;
+    cond.setTerms[0].aChannel = QStringLiteral("Engine Temperature");
+    cond.setTerms[0].op = 4; // >
+    cond.setTerms[0].bConst = 100;
+    cond.resetTerms[0].aChannel = QStringLiteral("Engine Temperature");
+    cond.resetTerms[0].op = 3; // <=
+    cond.resetTerms[0].bConst = 100;
     cond.outputChannel = QStringLiteral("Engine Hot");
     config.conditionRows.append(cond);
 

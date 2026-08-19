@@ -1,5 +1,6 @@
 #include "add_channel_dialog.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -163,20 +164,58 @@ AddChannelDialog::AddChannelDialog(Configuration *config, const CommsChannelRow 
     grid->addWidget(m_dbcTypeCombo, r, 1, 1, 3);
     ++r;
 
-    // DBC Factor / Offset  (physical = raw × Factor + Offset)
-    grid->addWidget(new QLabel(tr("DBC Factor :")), r, 0);
+    // Bit Resolution / Offset  (physical = raw × Bit Resolution + Offset)
+    //
+    // "Bit Resolution" rather than "DBC Factor" because that is what the number
+    // MEANS to whoever types it: how much physical quantity one raw count is
+    // worth. 0.1 is a tenth per count in both directions — a received count of
+    // 7 is 0.7, and transmitting 0.7 puts 7 on the wire. The same number, read
+    // the same way, whichever way the message goes.
+    //
+    // The stored key stays dbcFactor. Renaming a label costs nothing; renaming
+    // a JSON key would invalidate every saved configuration to no purpose.
+    grid->addWidget(new QLabel(tr("Bit Resolution :")), r, 0);
     m_factorSpin = new TrimmedDoubleSpinBox;
     m_factorSpin->setRange(-1e9, 1e9);
     m_factorSpin->setDecimals(8);
     m_factorSpin->setValue(m_row.dbcFactor);
+    m_factorSpin->setToolTip(
+        tr("How much one raw count is worth, in the channel's units. 0.1 means "
+           "each count is a tenth: a received count of 7 reads 0.7, and "
+           "transmitting 0.7 puts 7 on the wire."));
     grid->addWidget(m_factorSpin, r, 1);
-    grid->addWidget(new QLabel(tr("DBC Offset :")), r, 2);
+    grid->addWidget(new QLabel(tr("Offset :")), r, 2);
     m_dbcOffsetSpin = new TrimmedDoubleSpinBox;
     m_dbcOffsetSpin->setRange(-1e9, 1e9);
     m_dbcOffsetSpin->setDecimals(8);
     m_dbcOffsetSpin->setValue(m_row.dbcOffset);
+    m_dbcOffsetSpin->setToolTip(
+        tr("Added to the scaled value to get the channel's units. -40 on a "
+           "temperature whose counts start at -40 makes a raw 0 read as -40. "
+           "Type the offset the channel HAS; the device inverts it when "
+           "transmitting so the value survives the round trip."));
     grid->addWidget(m_dbcOffsetSpin, r, 3);
     ++r;
+
+    // Transmit only. A receive row has no such choice to make: the field it
+    // reads is bitLength bits wide by construction, so nothing can overflow it,
+    // and the clamp that does apply on that side is the channel's declared
+    // range, which is not optional.
+    if (m_transmit) {
+        m_clampCheck = new QCheckBox(tr("Clamp to Signal Limit"));
+        m_clampCheck->setChecked(m_row.clampToRange);
+        m_clampCheck->setToolTip(
+            tr("Ticked, a value too big for the field is sent as the biggest the "
+               "field can hold — 256 into 8 bits sends 255. Unticked, only the "
+               "low bits are sent, so the count rolls over and 256 sends 0. "
+               "Roll-over is what a free-running counter or a wrapping angle "
+               "wants; clamping is what a measurement wants.\n\n"
+               "Unticked also stops the CHANNEL's range from clamping first, "
+               "which it would otherwise do before the field width ever came "
+               "into it."));
+        grid->addWidget(m_clampCheck, r, 0, 1, 4);
+        ++r;
+    }
 
     layout->addLayout(grid);
 
@@ -219,6 +258,8 @@ AddChannelDialog::AddChannelDialog(Configuration *config, const CommsChannelRow 
     connect(m_dbcOffsetSpin, &QDoubleSpinBox::valueChanged, this, &AddChannelDialog::revalidate);
     connect(m_dbcTypeCombo, &QComboBox::currentIndexChanged, this,
             &AddChannelDialog::onDbcTypeChanged);
+    if (m_clampCheck)
+        connect(m_clampCheck, &QCheckBox::toggled, this, &AddChannelDialog::revalidate);
 
     onDbcTypeChanged(); // apply the IEEE754 length lock if needed
     revalidate();
@@ -230,8 +271,10 @@ AddChannelDialog::AddChannelDialog(Configuration *config, const CommsChannelRow 
     // onDbcTypeChanged() keep the Default Value, Bit Length and OK button off
     // on their own.
     if (m_readOnly) {
-        const QList<QWidget *> locked{selectButton,   m_startBitSpin, m_bitLengthSpin,
-                                      m_dbcTypeCombo, m_factorSpin,   m_dbcOffsetSpin};
+        QList<QWidget *> locked{selectButton,   m_startBitSpin, m_bitLengthSpin,
+                                m_dbcTypeCombo, m_factorSpin,   m_dbcOffsetSpin};
+        if (m_clampCheck)
+            locked.append(m_clampCheck);
         for (QWidget *w : locked)
             w->setEnabled(false);
     }
@@ -247,6 +290,9 @@ CommsChannelRow AddChannelDialog::row() const
     r.bitLength = (r.dbcType == int(DbcType::IEEE754)) ? 32 : m_bitLengthSpin->value();
     r.dbcFactor = m_factorSpin->value();
     r.dbcOffset = m_dbcOffsetSpin->value();
+    // A receive row has no box, and keeps the model's default of clamping.
+    if (m_clampCheck)
+        r.clampToRange = m_clampCheck->isChecked();
     return r;
 }
 
@@ -396,10 +442,36 @@ void AddChannelDialog::revalidate()
 
     if (error.isEmpty()) {
         const QString unit = channel.isValid() ? channel.unit : QString();
-        m_previewLabel->setText(tr("Physical = raw × %1 + %2 %3")
-                                    .arg(current.dbcFactor)
-                                    .arg(current.dbcOffset)
-                                    .arg(unit));
+        QString preview = tr("Physical = raw × %1 + %2 %3")
+                              .arg(current.dbcFactor)
+                              .arg(current.dbcOffset)
+                              .arg(unit);
+        // What the field can carry, in the channel's own units, so the choice
+        // above is judged against a number rather than an idea. IEEE754 is left
+        // out: its 32 bits hold any float the channel can, so there is no edge
+        // to name — the only clamp on such a row is the channel's range.
+        if (m_clampCheck && current.dbcType != int(DbcType::IEEE754)) {
+            const int len = qBound(1, current.bitLength, 64);
+            const bool isSigned = current.dbcType == int(DbcType::Signed);
+            // std::pow, not a shift: len can be 64, where 1<<64 is undefined,
+            // and the ends are only ever displayed.
+            const double span = qPow(2.0, len);
+            const double rawLo = isSigned ? -span / 2.0 : 0.0;
+            const double rawHi = (isSigned ? span / 2.0 : span) - 1.0;
+            const double lo = rawLo * current.dbcFactor + current.dbcOffset;
+            const double hi = rawHi * current.dbcFactor + current.dbcOffset;
+            preview += QLatin1String("\n")
+                       + (current.clampToRange
+                              ? tr("%1 bits hold %2 to %3 %4 — anything outside is sent as the "
+                                   "nearer end.")
+                              : tr("%1 bits hold %2 to %3 %4 — anything outside rolls over into "
+                                   "that range."))
+                             .arg(len)
+                             .arg(qMin(lo, hi))
+                             .arg(qMax(lo, hi))
+                             .arg(unit);
+        }
+        m_previewLabel->setText(preview);
     } else {
         m_previewLabel->clear();
     }
