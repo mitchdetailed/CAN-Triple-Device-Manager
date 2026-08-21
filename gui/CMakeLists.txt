@@ -39,7 +39,7 @@ cmake_minimum_required(VERSION 3.21)
 # GENERATION, not a version (see fw_image.h), and winding it back would tell
 # bootloaders this image uses the old memory map. Compatibility gates keep
 # counting; only the product number starts over.
-project(CANTripleDeviceManager VERSION 1.1.1 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.1.2 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -877,6 +877,23 @@ qt_add_executable(test_comms_multiselect
 target_include_directories(test_comms_multiselect PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_comms_multiselect PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
     ct_device_core) # device_mapper.cpp — see test_roundtrip
+
+# The CAN Viewer's display filters and Overwrite Mode, driven through the real
+# dialog. Two properties this pins: a filter is a view and never a loss (the
+# capture buffer is what Save to File writes), and an Overwrite Mode row always
+# holds its identifier's LATEST frame — a stale row in a view whose whole
+# purpose is "the value right now" reads as live data.
+qt_add_executable(test_can_viewer
+    test/test_can_viewer.cpp
+    src/ui/can_viewer_dialog.cpp
+    src/protocol/asc_log.cpp
+    src/protocol/cobs.cpp
+    src/protocol/device_link.cpp
+    src/protocol/framer.cpp
+)
+target_include_directories(test_can_viewer PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_can_viewer PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
+    Qt6::SerialPort)
 
 # Every shipped device-script example, compiled and run on the real VM. These
 # files are installed with the program and offered by the editor's Load Script…,

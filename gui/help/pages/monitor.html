@@ -57,16 +57,22 @@ reports its errors in full; it conceals nothing (see
 <p>Choose <b>Online → CAN Viewer…</b> or press <b>F4</b>. The viewer
 shows raw frames from all three buses as they arrive, with columns
 <b>Time (s)</b>, <b>Bus</b>, <b>Dir</b> (Rx or Tx), <b>ID</b>, <b>Len</b> and
-<b>Data</b>. Standard IDs are shown as three hex digits (0x123), extended IDs
-as eight (0x18FEF100).</p>
+<b>Data</b>, plus a <b>Count</b> column in
+<a href="#overwrite">Overwrite Mode</a>. Standard IDs are shown as three hex
+digits (0x123), extended IDs as eight (0x18FEF100).</p>
 
 <table>
 <tr><th>Control</th><th>Meaning</th></tr>
 <tr><td>Pause</td><td>Stops capturing new frames; frames arriving while paused
 are discarded, not queued.</td></tr>
-<tr><td>Auto scroll</td><td>Keeps the newest frame in view.</td></tr>
+<tr><td>Auto scroll</td><td>Keeps the newest frame in view. Not used in
+Overwrite Mode, where the rows hold still.</td></tr>
 <tr><td>Show: CAN 1 / CAN 2 / CAN 3</td><td>Which buses appear in the list. All
 three are ticked by default — see below.</td></tr>
+<tr><td>Show: Tx Msgs</td><td>Whether the frames the device itself transmitted
+appear in the list. Ticked by default — see below.</td></tr>
+<tr><td>Overwrite Mode</td><td>One row per message carrying its most recent
+data, instead of a scrolling trace — see below.</td></tr>
 <tr><td>Save to File…</td><td>Writes every buffered frame as a Vector ASCII
 log (*.asc), readable by common CAN tools. Timestamps in the file are relative
 to the first buffered frame.</td></tr>
@@ -79,7 +85,22 @@ the on-screen table is a bounded window of the most recent 5,000 rows. "N
 frames buffered" above the table counts the full capture buffer, not the
 visible rows.</p>
 
-<h3>Filtering by bus</h3>
+<h3>When frames are dropped</h3>
+
+<p>The monitor stream shares the USB link with everything else, so a bus busier
+than the link can describe will overrun it. It is allowed to drop frames; it is
+not allowed to drop them silently, because a trace missing frames without
+saying so invites you to conclude a message was never sent when it was only
+never reported.</p>
+
+<p>In the scrolling view the loss appears as its own row, in orange, at the
+point in the trace where it happened. In <a href="#overwrite">Overwrite
+Mode</a> there is no chronological place to put such a row, so the notice moves
+to the frame count above the table, which reads "<b>… — frames were
+dropped</b>" from the first loss until the next <b>Clear</b>. Treat any
+<b>Count</b> on screen as a lower bound once you see it.</p>
+
+<h3 id="filtering">Filtering the list</h3>
 
 <p>The <b>Show:</b> checkboxes — <b>CAN 1</b>, <b>CAN 2</b>, <b>CAN 3</b> — pick
 which buses appear in the list. Unticking a busy bus is the quickest way to
@@ -87,20 +108,80 @@ read a quiet one: on a gateway where one network runs at a few thousand frames
 a second, the traffic you care about otherwise scrolls past before you can see
 it.</p>
 
-<p>These filter the <b>display only</b>. Every bus is captured regardless, so:</p>
+<p><b>Tx Msgs</b> is the same idea applied to direction rather than to a bus: it
+picks whether the frames the <em>device</em> sent — the <b>Tx</b> rows — appear.
+That covers every transmit message the engine sends on its own schedule, every
+frame a relay forwards, and the echo of anything you send from <b>Inject
+Frame</b>. It is ticked by default. Untick it to leave only what the buses
+carried in, which is the quickest way to tell an incoming message apart from
+one of the device's own on a bus where both share an ID.</p>
+
+<p>The two filters compose: a Tx frame on a hidden bus stays hidden when
+<b>Tx Msgs</b> is re-ticked, because its bus is still unticked.</p>
+
+<p>All of these filter the <b>display only</b>. Every frame is captured
+regardless, so:</p>
 
 <ul>
-<li><b>Save to File…</b> always writes the whole trace, including buses that
-were hidden while it was recording.</li>
+<li><b>Save to File…</b> always writes the whole trace, including buses and
+transmitted frames that were hidden while it was recording.</li>
 <li>The "N frames buffered" count is the whole capture, not the visible
 rows.</li>
-<li>Re-ticking a bus brings its history back rather than starting from that
+<li>Re-ticking a box brings its history back rather than starting from that
 moment — the list is rebuilt from the buffer.</li>
 </ul>
 
-<p class="note">Hiding a bus is not the same as <b>Pause</b>. Pause stops
-capture altogether and discards what arrives; a bus filter keeps recording
-everything and only changes what is on screen.</p>
+<p class="note">Hiding a bus or the Tx rows is not the same as <b>Pause</b>.
+Pause stops capture altogether and discards what arrives; a filter keeps
+recording everything and only changes what is on screen.</p>
+
+<h3 id="overwrite">Overwrite Mode</h3>
+
+<p><b>Overwrite Mode</b>, on the row below Pause, changes the list from a
+history into a snapshot. Instead of a new row per frame, each message keeps a
+single row that is rewritten in place every time it arrives — so what you read
+is the current value of every message on the bus, in the shape of PCAN-View's
+Receive/Transmit tab.</p>
+
+<p>Rows are ordered by <b>bus</b>, then by <b>arbitration ID</b>, and they stay
+where they are. That is the point: a value you are watching does not move, so
+you can look at one row while the bus runs.</p>
+
+<p>A <b>Count</b> column appears in this mode, showing how many frames that
+message has contributed since the last <b>Clear</b>. It is what tells a message
+that has stopped arriving from one that is still running — the data of a
+message that died holds its last value indefinitely, and only the count gives
+that away.</p>
+
+<p>A row is one <em>identifier</em>, which means all four of:</p>
+
+<ul>
+<li>the <b>bus</b> it arrived on;</li>
+<li>the <b>arbitration ID</b>;</li>
+<li>whether that ID is <b>standard or extended</b> — 0x100 and 0x00000100 are
+different frames on the wire and get separate rows;</li>
+<li>the <b>direction</b> — a message the device transmits with an ID it also
+receives is not the same traffic, so Rx and Tx keep separate rows. The
+<b>Dir</b> column says which is which.</li>
+</ul>
+
+<p>Everything else keeps working as it does in the scrolling view. The bus and
+<b>Tx Msgs</b> filters still apply; <b>Pause</b> still stops capture; and
+capture itself is untouched, so <b>Save to File…</b> writes the complete trace
+frame by frame no matter which mode you were watching in. Switching the mode
+off gives the full history back — it was recorded the whole time.</p>
+
+<p class="note">Ticking Overwrite Mode shows the bus as it already stands
+rather than starting empty: the current value of every message seen since the
+last Clear is there immediately, with its count, instead of filling in over the
+next few seconds as each message comes round again.</p>
+
+<p class="note">This view is bounded by the number of distinct identifiers, not
+by the frame rate, and it tracks up to 10,000 of them — far more than any real
+network carries. Past that, the identifiers already listed keep counting and new
+ones are ignored, and the frame count reads "<b>… — identifier limit
+reached</b>". Seeing that at all means something is sending on IDs that keep
+changing, which is worth looking into on its own; <b>Clear</b> starts over.</p>
 
 <h3>Inject Frame</h3>
 

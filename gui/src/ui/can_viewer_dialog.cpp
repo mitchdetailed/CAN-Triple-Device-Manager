@@ -40,8 +40,9 @@ enum Column {
     ColDir,
     ColId,
     ColLen,
+    ColFrameCount, // Overwrite Mode only — hidden in the scrolling view
     ColData,
-    ColCount
+    ColCount       // sentinel: number of columns
 };
 
 QTableWidgetItem *makeItem(const QString &text)
@@ -49,6 +50,43 @@ QTableWidgetItem *makeItem(const QString &text)
     auto *item = new QTableWidgetItem(text);
     item->setFlags(item->flags() & ~Qt::ItemIsEditable);
     return item;
+}
+
+// Set a cell's text, reusing the item that is already there. Overwrite Mode
+// rewrites the same rows for the life of the dialog, so allocating a fresh
+// QTableWidgetItem per frame would churn the heap at bus rate for no reason.
+void setCellText(QTableWidget *table, int row, int col, const QString &text,
+                 const QFont *font = nullptr)
+{
+    if (QTableWidgetItem *item = table->item(row, col)) {
+        item->setText(text);
+        return;
+    }
+    auto *item = makeItem(text);
+    if (font)
+        item->setFont(*font);
+    table->setItem(row, col, item);
+}
+
+// The ID as the viewer writes it: standard as 0x%03X, extended as 0x%08X, so
+// the width itself marks the format (matches the section editor's Base Address).
+QString formatCanId(quint32 canId, bool extended)
+{
+    return QStringLiteral("0x")
+           + QStringLiteral("%1").arg(canId, extended ? 8 : 3, 16, QLatin1Char('0')).toUpper();
+}
+
+QString formatData(const ct::MonitorStreamPayload &frame)
+{
+    const int len = qMin<int>(frame.data_len, 64);
+    QString text;
+    text.reserve(len * 3);
+    for (int i = 0; i < len; ++i) {
+        if (i)
+            text += QLatin1Char(' ');
+        text += QStringLiteral("%1").arg(frame.data[i], 2, 16, QLatin1Char('0')).toUpper();
+    }
+    return text;
 }
 
 } // namespace
@@ -69,20 +107,24 @@ CanViewerDialog::CanViewerDialog(DeviceLink *link, QWidget *parent)
     m_autoScrollCheck = new QCheckBox(tr("Auto scroll"), this);
     m_autoScrollCheck->setChecked(true);
     m_countLabel = new QLabel(tr("%1 frames buffered").arg(0), this);
+    m_countLabel->setObjectName(QStringLiteral("countLabel"));
     auto *saveButton = new QPushButton(tr("Save to File…"), this);
     auto *clearButton = new QPushButton(tr("Clear"), this);
 
+    m_pauseCheck->setObjectName(QStringLiteral("pauseCheck"));
+    m_autoScrollCheck->setObjectName(QStringLiteral("autoScrollCheck"));
     topRow->addWidget(m_pauseCheck);
     topRow->addWidget(m_autoScrollCheck);
 
-    // Per-bus display filters. These hide rows; they do NOT stop capture. Every
-    // frame the device streams still goes into the buffer and into Save to
-    // File, so unchecking a bus to read a quiet one cannot silently cost you
-    // the trace you were recording — and re-checking brings its history back.
+    // Display filters. These hide rows; they do NOT stop capture. Every frame
+    // the device streams still goes into the buffer and into Save to File, so
+    // unchecking a bus to read a quiet one cannot silently cost you the trace
+    // you were recording — and re-checking brings its history back.
     topRow->addSpacing(12);
     topRow->addWidget(new QLabel(tr("Show:"), this));
     for (int b = 0; b < 3; ++b) {
         m_busChecks[b] = new QCheckBox(tr("CAN %1").arg(b + 1), this);
+        m_busChecks[b]->setObjectName(QStringLiteral("busCheck%1").arg(b + 1));
         m_busChecks[b]->setChecked(true);
         m_busChecks[b]->setToolTip(tr("Show frames from CAN %1. Hiding a bus only affects "
                                       "this list — every bus is still captured and saved.")
@@ -91,17 +133,50 @@ CanViewerDialog::CanViewerDialog(DeviceLink *link, QWidget *parent)
         topRow->addWidget(m_busChecks[b]);
     }
 
+    // The device's own transmissions — engine transmit messages, relayed
+    // frames, and the echo of an injected one. Ticked by default, because
+    // hiding what this device put on the wire is a deliberate act and never a
+    // surprise: on a gateway the Tx side is usually the half you are checking.
+    m_txCheck = new QCheckBox(tr("Tx Msgs"), this);
+    m_txCheck->setObjectName(QStringLiteral("txCheck"));
+    m_txCheck->setChecked(true);
+    m_txCheck->setToolTip(tr("Show frames the device transmitted (the Tx rows). Untick to "
+                             "leave only what the buses carried in. Like the bus filters "
+                             "this affects this list alone — Tx frames are still captured "
+                             "and still written by Save to File."));
+    connect(m_txCheck, &QCheckBox::toggled, this, &CanViewerDialog::rebuildTable);
+    topRow->addWidget(m_txCheck);
+
     topRow->addStretch(1);
     topRow->addWidget(m_countLabel);
     topRow->addWidget(saveButton);
     topRow->addWidget(clearButton);
     mainLayout->addLayout(topRow);
 
+    // --- Second control row: view mode ---------------------------------------
+    auto *modeRow = new QHBoxLayout;
+    m_overwriteCheck = new QCheckBox(tr("Overwrite Mode"), this);
+    m_overwriteCheck->setObjectName(QStringLiteral("overwriteCheck"));
+    m_overwriteCheck->setToolTip(tr("Show one row per message instead of a scrolling trace: "
+                                    "each arbitration ID keeps a single row carrying its "
+                                    "most recent data, ordered by bus and then by ID. Use it "
+                                    "to read current values; untick it to read history. "
+                                    "Capture is unaffected — Save to File still writes the "
+                                    "whole trace, frame by frame."));
+    connect(m_overwriteCheck, &QCheckBox::toggled, this, &CanViewerDialog::onOverwriteToggled);
+    modeRow->addWidget(m_overwriteCheck);
+    modeRow->addStretch(1);
+    mainLayout->addLayout(modeRow);
+
     // --- Frame table --------------------------------------------------------
     m_table = new QTableWidget(0, ColCount, this);
+    m_table->setObjectName(QStringLiteral("frameTable"));
     m_table->setHorizontalHeaderLabels(QStringList()
                                        << tr("Time (s)") << tr("Bus") << tr("Dir")
-                                       << tr("ID") << tr("Len") << tr("Data"));
+                                       << tr("ID") << tr("Len") << tr("Count") << tr("Data"));
+    // Count belongs to Overwrite Mode alone: in the scrolling trace every row
+    // is one frame, so a per-row count would read 1 all the way down.
+    m_table->setColumnHidden(ColFrameCount, true);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -114,6 +189,7 @@ CanViewerDialog::CanViewerDialog(DeviceLink *link, QWidget *parent)
     m_table->setColumnWidth(ColDir, 45);
     m_table->setColumnWidth(ColId, 100);
     m_table->setColumnWidth(ColLen, 45);
+    m_table->setColumnWidth(ColFrameCount, 80);
     mainLayout->addWidget(m_table, 1);
 
     // --- Inject panel --------------------------------------------------------
@@ -171,11 +247,67 @@ bool CanViewerDialog::busVisible(quint8 busIdx) const
     return m_busChecks[busIdx - 1]->isChecked();
 }
 
-// Rebuild the visible rows from the capture buffer. Called when a bus filter
-// changes, so hiding and re-showing a bus restores its history instead of
-// leaving a hole from the moment it was unticked.
+// Every display filter in one place, so the live path, the rebuild and
+// Overwrite Mode cannot drift apart on what "shown" means.
+bool CanViewerDialog::frameVisible(const ct::MonitorStreamPayload &frame) const
+{
+    if (frame.direction && !m_txCheck->isChecked())
+        return false;
+    return busVisible(frame.bus_idx);
+}
+
+CanViewerDialog::OverwriteKey CanViewerDialog::keyFor(const ct::MonitorStreamPayload &frame)
+{
+    OverwriteKey key;
+    key.bus = frame.bus_idx;
+    key.canId = frame.can_id;
+    key.extended = (frame.flags & ct::MONFLAG_EXTENDED) != 0;
+    key.direction = frame.direction;
+    return key;
+}
+
+// "N frames buffered", plus anything that makes the view less than a complete
+// account of the traffic. Both notes are sticky until Clear: a drop that
+// scrolled off the top still happened, and a reader deciding a message was
+// never sent needs to know the viewer might simply not have been told.
+void CanViewerDialog::updateCountLabel()
+{
+    const QString base =
+        tr("%1 frames buffered").arg(QLocale().toString(qulonglong(m_frames.size())));
+    QStringList notes;
+    if (m_sawGap)
+        notes << tr("frames were dropped");
+    if (m_identifierLimit)
+        notes << tr("identifier limit reached");
+    m_countLabel->setText(notes.isEmpty()
+                              ? base
+                              : base + QStringLiteral(" — ") + notes.join(QStringLiteral(", ")));
+}
+
+void CanViewerDialog::onOverwriteToggled()
+{
+    const bool overwrite = m_overwriteCheck->isChecked();
+    m_table->setColumnHidden(ColFrameCount, !overwrite);
+    // Nothing scrolls in a table whose rows hold still, and the ordering is by
+    // identifier rather than by arrival, so there is no "newest" row to chase.
+    m_autoScrollCheck->setEnabled(!overwrite);
+    rebuildTable();
+}
+
+// Rebuild the visible rows from the capture buffer. Called when a filter or the
+// view mode changes, so hiding and re-showing a category restores its history
+// instead of leaving a hole from the moment it was unticked.
 void CanViewerDialog::rebuildTable()
 {
+    // Gap rows span several columns; a stale span left over one of the rows
+    // this rebuild is about to write would swallow the cells underneath it.
+    m_table->clearSpans();
+
+    if (m_overwriteCheck->isChecked()) {
+        rebuildOverwriteTable();
+        return;
+    }
+
     m_table->setUpdatesEnabled(false);
     m_table->setRowCount(0);
     // Walk backwards to find where the last screenful of MATCHING frames
@@ -184,7 +316,7 @@ void CanViewerDialog::rebuildTable()
     int matching = 0;
     int firstIdx = 0;
     for (int i = int(m_frames.size()) - 1; i >= 0; --i) {
-        if (busVisible(m_frames[i].bus_idx) && ++matching >= kMaxDisplayRows) {
+        if (frameVisible(m_frames[i]) && ++matching >= kMaxDisplayRows) {
             firstIdx = i;
             break;
         }
@@ -194,12 +326,50 @@ void CanViewerDialog::rebuildTable()
         // live path (see appendGapRow).
         if (m_frames[i].flags & ct::MONFLAG_GAP)
             appendGapRow(m_frames[i]);
-        if (busVisible(m_frames[i].bus_idx))
+        if (frameVisible(m_frames[i]))
             appendFrameRow(m_frames[i]);
     }
     m_table->setUpdatesEnabled(true);
     if (m_autoScrollCheck->isChecked())
         m_table->scrollToBottom();
+}
+
+// Overwrite Mode's table IS m_latest, in m_latest's own order — the map is
+// keyed to sort by bus and then by arbitration ID, so walking it in order
+// produces the rows in order. Each entry remembers the row it landed on, which
+// is what lets the live path rewrite one row in place instead of searching.
+void CanViewerDialog::rebuildOverwriteTable()
+{
+    m_table->setUpdatesEnabled(false);
+    m_table->setRowCount(0);
+    int row = 0;
+    for (auto &pair : m_latest) {
+        OverwriteEntry &entry = pair.second;
+        if (!frameVisible(entry.frame)) {
+            entry.row = -1;
+            continue;
+        }
+        m_table->insertRow(row);
+        entry.row = row;
+        renderOverwriteRow(row, entry);
+        ++row;
+    }
+    m_table->setUpdatesEnabled(true);
+}
+
+void CanViewerDialog::renderOverwriteRow(int row, const OverwriteEntry &entry)
+{
+    static const QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    const ct::MonitorStreamPayload &frame = entry.frame;
+
+    setCellText(m_table, row, ColTime, QString::number(frame.timestamp_ms / 1000.0, 'f', 3));
+    setCellText(m_table, row, ColBus, tr("CAN %1").arg(frame.bus_idx));
+    setCellText(m_table, row, ColDir, frame.direction ? tr("Tx") : tr("Rx"));
+    setCellText(m_table, row, ColId,
+                formatCanId(frame.can_id, (frame.flags & ct::MONFLAG_EXTENDED) != 0), &mono);
+    setCellText(m_table, row, ColLen, QString::number(qMin<int>(frame.data_len, 64)));
+    setCellText(m_table, row, ColFrameCount, QLocale().toString(qulonglong(entry.count)));
+    setCellText(m_table, row, ColData, formatData(frame), &mono);
 }
 
 void CanViewerDialog::onMonitorFrame(const ct::MonitorStreamPayload &frame)
@@ -214,13 +384,53 @@ void CanViewerDialog::onMonitorFrame(const ct::MonitorStreamPayload &frame)
     if (m_frames.size() > kMaxFrames)
         m_frames.pop_front();
 
-    m_countLabel->setText(tr("%1 frames buffered")
-                              .arg(QLocale().toString(qulonglong(m_frames.size()))));
+    const bool gap = (frame.flags & ct::MONFLAG_GAP) != 0;
+    if (gap)
+        m_sawGap = true;
+
+    // Latest-per-identifier, maintained in BOTH modes. Ticking Overwrite Mode
+    // then shows the bus as it stands rather than filling in over the next few
+    // seconds as each message comes round again, and the counts survive a
+    // toggle instead of restarting. The cost is one map lookup per frame.
+    auto it = m_latest.find(keyFor(frame));
+    bool newIdentifier = false;
+    if (it != m_latest.end()) {
+        it->second.frame = frame;
+        ++it->second.count;
+    } else if (m_latest.size() < kMaxIdentifiers) {
+        OverwriteEntry entry;
+        entry.frame = frame;
+        entry.count = 1;
+        it = m_latest.emplace(keyFor(frame), entry).first;
+        newIdentifier = true;
+    } else {
+        // Past the ceiling. Known identifiers keep updating; this one is not
+        // tracked, and the frame count says so rather than quietly dropping it.
+        it = m_latest.end();
+        m_identifierLimit = true;
+    }
+
+    updateCountLabel();
+
+    if (m_overwriteCheck->isChecked()) {
+        if (it == m_latest.end())
+            return;
+        // A new identifier lands somewhere in the middle of the sort order and
+        // shifts every row below it, so the table is rebuilt. That happens once
+        // per identifier — the steady state is the branch below, which rewrites
+        // the cells of one row that is already in the right place.
+        if (newIdentifier) {
+            if (frameVisible(frame))
+                rebuildTable();
+        } else if (it->second.row >= 0) {
+            renderOverwriteRow(it->second.row, it->second);
+        }
+        return;
+    }
 
     // A gap marker outlives the filter (see appendGapRow); only the frame row
-    // itself is subject to the bus checkboxes.
-    const bool gap = (frame.flags & ct::MONFLAG_GAP) != 0;
-    if (!busVisible(frame.bus_idx) && !gap)
+    // itself is subject to the display checkboxes.
+    if (!frameVisible(frame) && !gap)
         return;
 
     // Live table: a bounded window. Drop the oldest tenth in one batch when the
@@ -236,7 +446,7 @@ void CanViewerDialog::onMonitorFrame(const ct::MonitorStreamPayload &frame)
 
     if (gap)
         appendGapRow(frame);
-    if (busVisible(frame.bus_idx))
+    if (frameVisible(frame))
         appendFrameRow(frame);
 
     if (m_autoScrollCheck->isChecked())
@@ -281,27 +491,13 @@ void CanViewerDialog::appendFrameRow(const ct::MonitorStreamPayload &frame)
     m_table->setItem(row, ColBus, makeItem(tr("CAN %1").arg(frame.bus_idx)));
     m_table->setItem(row, ColDir, makeItem(frame.direction ? tr("Tx") : tr("Rx")));
 
-    // Standard IDs shown as 0x%03X, extended as 0x%08X (the width marks the
-    // format; matches the section editor's Base Address presentation).
-    const bool extended = frame.flags & 0x01;
-    const QString idText =
-        QStringLiteral("0x")
-        + QStringLiteral("%1").arg(frame.can_id, extended ? 8 : 3, 16, QLatin1Char('0')).toUpper();
-    auto *idItem = makeItem(idText);
+    auto *idItem = makeItem(formatCanId(frame.can_id, (frame.flags & ct::MONFLAG_EXTENDED) != 0));
     idItem->setFont(mono);
     m_table->setItem(row, ColId, idItem);
 
-    const int len = qMin<int>(frame.data_len, 64);
-    m_table->setItem(row, ColLen, makeItem(QString::number(len)));
+    m_table->setItem(row, ColLen, makeItem(QString::number(qMin<int>(frame.data_len, 64))));
 
-    QString dataText;
-    dataText.reserve(len * 3);
-    for (int i = 0; i < len; ++i) {
-        if (i)
-            dataText += QLatin1Char(' ');
-        dataText += QStringLiteral("%1").arg(frame.data[i], 2, 16, QLatin1Char('0')).toUpper();
-    }
-    auto *dataItem = makeItem(dataText);
+    auto *dataItem = makeItem(formatData(frame));
     dataItem->setFont(mono);
     m_table->setItem(row, ColData, dataItem);
 }
@@ -388,10 +584,17 @@ void CanViewerDialog::onInjectClicked()
 
 void CanViewerDialog::onClearClicked()
 {
+    m_table->clearSpans(); // gap rows span columns; the spans must go with them
     m_table->setRowCount(0);
     m_frames.clear();
     m_frames.shrink_to_fit(); // release the capture buffer's memory
-    m_countLabel->setText(tr("%1 frames buffered").arg(0));
+    // Clear empties Overwrite Mode too: its rows and counts are a summary of
+    // the same capture, so leaving them would leave the viewer asserting
+    // traffic it no longer holds any record of.
+    m_latest.clear();
+    m_sawGap = false;
+    m_identifierLimit = false;
+    updateCountLabel();
 }
 
 void CanViewerDialog::onSaveClicked()
