@@ -190,10 +190,16 @@ AddChannelDialog::AddChannelDialog(Configuration *config, const CommsChannelRow 
     m_dbcOffsetSpin->setDecimals(8);
     m_dbcOffsetSpin->setValue(m_row.dbcOffset);
     m_dbcOffsetSpin->setToolTip(
-        tr("Added to the scaled value to get the channel's units. -40 on a "
-           "temperature whose counts start at -40 makes a raw 0 read as -40. "
-           "Type the offset the channel HAS; the device inverts it when "
-           "transmitting so the value survives the round trip."));
+        m_transmit
+            ? tr("Added to the raw count on its way out, after the resolution has "
+                 "been divided out. Offset 64 puts 64 more on the wire: a value of "
+                 "1 at resolution 1 sends 65.\n\n"
+                 "This is a bias in raw counts, not the reverse of a receive row's "
+                 "offset. Sending to another CAN Triple that receives with the same "
+                 "offset? Negate one of the two, or the offset is applied twice.")
+            : tr("Added after scaling to reach the channel's units. -40 on a "
+                 "temperature whose counts start at -40 makes a raw 0 read as "
+                 "-40."));
     grid->addWidget(m_dbcOffsetSpin, r, 3);
     ++r;
 
@@ -458,8 +464,14 @@ void AddChannelDialog::revalidate()
             const double span = qPow(2.0, len);
             const double rawLo = isSigned ? -span / 2.0 : 0.0;
             const double rawHi = (isSigned ? span / 2.0 : span) - 1.0;
-            const double lo = rawLo * current.dbcFactor + current.dbcOffset;
-            const double hi = rawHi * current.dbcFactor + current.dbcOffset;
+            // Transmit packs raw = physical / resolution + offset, so the
+            // physical values the field can carry are (raw - offset) * res.
+            // NOT raw * res + offset — that is the RECEIVE mapping, and the two
+            // stopped being inverses when the offset was made to add on the way
+            // out. This line only ever renders on a transmit row (m_clampCheck
+            // exists only there), so it states the transmit end of the deal.
+            const double lo = (rawLo - current.dbcOffset) * current.dbcFactor;
+            const double hi = (rawHi - current.dbcOffset) * current.dbcFactor;
             preview += QLatin1String("\n")
                        + (current.clampToRange
                               ? tr("%1 bits hold %2 to %3 %4 — anything outside is sent as the "

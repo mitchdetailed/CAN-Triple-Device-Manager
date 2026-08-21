@@ -1036,8 +1036,10 @@ that password either, which is the trade its author made.
   Type** (Unsigned / Signed / IEEE754 — IEEE754 forces a 32-bit length and
   disables the field), **Bit Resolution** and **Offset** (`physical = raw ×
   Resolution + Offset`, live preview — the same two numbers whichever way the
-  message goes; the device inverts them when transmitting, so a transmit row is
-  NOT entered with the signs reversed), and on a TRANSMIT row **Clamp to Signal
+  message goes; the OFFSET is always ADDED, on receive in channel units after
+  scaling and on transmit in raw counts after the resolution is divided out —
+  the two directions are deliberately NOT inverses, so a CAN Triple pair with
+  identical rows applies the offset twice), and on a TRANSMIT row **Clamp to Signal
   Limit** (ticked by default — unticked, the field carries the low `bitLength`
   bits and the count rolls over: 256 into 8 bits is 0, not 255).
   These map 1:1 onto the signal record,

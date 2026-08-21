@@ -15,16 +15,31 @@ namespace ct {
 enum class DbcType { Unsigned = 0, Signed = 1, IEEE754 = 2 };
 
 // One signal packed into / extracted from a message frame, defined DBC-style:
-// Start Bit + Bit Length + DBC Type, with linear scaling
+// Start Bit + Bit Length + DBC Type, with linear scaling that reads DIFFERENTLY
+// in each direction:
 //
-//     physical = raw × Bit Resolution + Offset
+//     receive:   physical = raw × Bit Resolution + Offset
+//     transmit:  raw      = physical ÷ Bit Resolution + Offset
 //
-// The editor calls the first "Bit Resolution" because that is what it means to
-// whoever types it — how much one raw count is worth — and the number reads the
-// same in both directions: 0.1 is a tenth per count whether the message is
-// received or transmitted. The FIELDS keep their dbcFactor/dbcOffset names here
-// and in the .ct3, because renaming a label costs nothing and renaming a stored
-// key would invalidate every saved configuration.
+// The RESOLUTION means one thing both ways — 0.1 is a tenth per count whether
+// the message is received or transmitted — which is why the editor calls it
+// "Bit Resolution" rather than "DBC Factor".
+//
+// The OFFSET is always ADDED, and that is the point of it: "Offset 64" means
+// put 64 more on the wire, the same way "+40" means add forty. Transmit used to
+// run the algebraic inverse, (physical − Offset) ÷ resolution, which made the
+// same field SUBTRACT on the way out — correct arithmetic, wrong answer to the
+// question the field asks. It lands after the resolution, so on transmit it is
+// counted in RAW COUNTS: value 1 at resolution 0.1 with Offset 64 sends 74, not
+// (1 + 64) ÷ 0.1 = 650.
+//
+// Consequence, and it is not an accident: the two directions are NOT inverses.
+// Two CAN Triples wired together with the SAME row apply the offset twice.
+// Negate it on one of the two rows to get a value back unchanged.
+//
+// The FIELDS keep their dbcFactor/dbcOffset names here and in the .ct3, because
+// renaming a label costs nothing and renaming a stored key would invalidate
+// every saved configuration.
 //
 // Byte order (Intel vs Motorola) is the section's Alignment. These map 1:1 onto
 // the device's signal record, so a row round-trips through Get exactly — the one

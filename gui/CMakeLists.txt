@@ -39,7 +39,7 @@ cmake_minimum_required(VERSION 3.21)
 # GENERATION, not a version (see fw_image.h), and winding it back would tell
 # bootloaders this image uses the old memory map. Compatibility gates keep
 # counting; only the product number starts over.
-project(CANTripleDeviceManager VERSION 1.1.0 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.1.1 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it

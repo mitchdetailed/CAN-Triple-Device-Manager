@@ -639,12 +639,31 @@ every reading is clamped to the channel's Range Minimum…Maximum. See
 <a href="channels.html">Channels</a> for how storage types and ranges are
 chosen.</p>
 
-<p><b>You enter the same two numbers whichever way the message goes</b>, and the
-device inverts them for you when transmitting. A row with Bit Resolution 0.1 and
-Offset -40 reads a raw 7 as -39.3 on receive; transmitting -39.3 puts 7 back on
-the wire. That is what makes a pair of CAN Triples talking to each other work
-from one set of numbers, and it is why a transmit row is not entered with the
-signs reversed.</p>
+<p><b>Bit Resolution reads the same whichever way the message goes.</b> 0.1 is a
+tenth per count in both directions: a received count of 7 is 0.7, and
+transmitting 0.7 puts 7 on the wire.</p>
+
+<p><b>The Offset is always ADDED</b>, in both directions — it is a bias, not a
+correction, and it never quietly changes sign. Where it lands differs, because
+the two directions are describing different things:</p>
+
+<table>
+<tr><th>Direction</th><th>Arithmetic</th><th>Offset is in</th></tr>
+<tr><td><b>Receive</b></td><td>physical = raw × Bit Resolution + Offset</td>
+<td>channel units</td></tr>
+<tr><td><b>Transmit</b></td><td>raw = physical ÷ Bit Resolution + Offset</td>
+<td>raw counts</td></tr>
+</table>
+
+<p>So a transmit row with Bit Resolution 1 and Offset 64, sending a channel that
+reads 1, puts <b>65</b> on the wire. At Bit Resolution 0.1 the same row sends
+1&nbsp;÷&nbsp;0.1&nbsp;+&nbsp;64&nbsp;=&nbsp;<b>74</b> — the offset is applied
+after the resolution, so it counts in raw counts rather than channel units.</p>
+
+<p class="note">These two are deliberately <b>not</b> inverses of one another.
+If you are transmitting to another CAN Triple that receives the same signal with
+the same Offset, the offset is applied twice — once going out and once coming in.
+Negate the Offset on one of the two rows to get the value back unchanged.</p>
 
 <p>A transmit row also chooses what happens when the value will not fit:
 <b>Clamp to Signal Limit</b>, ticked by default, sends the nearest value the
@@ -656,12 +675,11 @@ decide the answer before the field width came into it. See
 such a row <b>rolls over</b>, and so does the channel list in the section
 editor.</p>
 
-<p class="note">The consequence worth knowing: on a transmit row the offset is
-SUBTRACTED on the way out, because it was added on the way in. A channel sitting
-at 0 with an Offset of 1 has nothing to send — raw would be -1, which an unsigned
-field cannot carry, so it pins to 0. If a transmitted value comes out flat at
-zero, check whether the channel's value is below the lowest the row can
-represent, which is the Offset itself.</p>
+<p class="note">If a transmitted value looks pinned at one end, check the
+preview under the Offset field: it names the range of channel values the signal's
+bits can actually carry, with the Offset already accounted for. A negative Offset
+large enough to drive the raw count below zero has nowhere to go in an unsigned
+field, and pins at 0.</p>
 
 <p class="note">OK validates the section before closing: the base address must be
 valid hex within its 11/29-bit range, the message length must fit the frame kind,

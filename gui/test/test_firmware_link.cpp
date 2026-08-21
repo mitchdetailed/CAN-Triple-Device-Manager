@@ -2786,6 +2786,93 @@ static quint8 crc8Ref(const QByteArray &bytes, quint8 poly, quint8 init,
 // the last writer wins, so a composer that packed a selector-only signal would
 // write its own zero over the 0x77 — byte 1 would read 0x00 in variants 1 and
 // 3. Expecting 0x77 there is what makes the skip observable.
+// The transmit offset ADDS, and lands in raw counts.
+//
+// Reported from the bench: a channel at 1, resolution 1, offset 64, signed
+// 16-bit, sent 0xFFC1 (-63) where 0x0041 (65) was wanted. That was the
+// algebraic inverse of the receive path — (physical - offset) / resolution —
+// which is correct arithmetic and the wrong answer to what the offset FIELD is
+// asking. It now reads raw = physical / resolution + offset.
+//
+// Four 16-bit signed fields, all fed from one channel holding 1:
+//
+//   bytes 0-1  res 1,   offset  64, roll over  -> 65   0x0041  (the report)
+//   bytes 2-3  res 1,   offset -64, roll over  -> -63  0xFFC1  (its mirror)
+//   bytes 4-5  res 0.1, offset  64, roll over  -> 74   0x004A  (order: after)
+//   bytes 6-7  res 1,   offset  64, CLAMPED    -> 65   0x0041  (clamp agrees)
+//
+// The third field is the one that fixes the ORDER and cannot be got right by
+// accident: after the resolution it is 1/0.1 + 64 = 74, where offsetting first
+// would be (1 + 64)/0.1 = 650 and the old inverse would be (1 - 64)/0.1 = -630.
+// Three distinct answers, so the assertion picks exactly one convention.
+static void testTransmitOffsetAddsOnTheWayOut()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    g_txFrames.clear();
+
+    ct::CanMessageConfig msg{};
+    msg.can_id = 0x460;
+    msg.flags = ct::MSGFLAG_ACTIVE | ct::MSGFLAG_TRANSMIT;
+    msg.src_bus = 1;
+    msg.dlc = 8;
+    msg.period_ms = 10;
+    msg.tx_trigger_cond = ct::TX_TRIGGER_COND_NONE;
+    CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&msg)));
+
+    struct Field { float res, off; bool wrap; int expect; };
+    const Field fields[4] = {
+        {1.0f,  64.0f, true,   65},
+        {1.0f, -64.0f, true,  -63},
+        {0.1f,  64.0f, true,   74},
+        {1.0f,  64.0f, false,  65},
+    };
+
+    ct::CanSignalConfig sig[5]{};
+    for (int i = 0; i < 4; ++i) {
+        sig[i].factor = fields[i].res;
+        sig[i].offset = fields[i].off;
+        sig[i].min_val = -1.0e9f;
+        sig[i].max_val = 1.0e9f;
+        ct::sigSetTxWrap(sig[i], fields[i].wrap);
+        ct::sigSetHeader(sig[i], 0, 0, 1); // Intel byte order, active
+        ct::sigSetBits(sig[i], quint16(i * 16), 16, ct::SIGNAL_TYPE_INT16, 0, 0);
+        sig[i].tx_source = 5; // the value slot below, encoded +1
+    }
+    // The channel every field sends: a plain 1.
+    sig[4].factor = 1.0f;
+    sig[4].min_val = -1.0e9f;
+    sig[4].max_val = 1.0e9f;
+    ct::sigSetHeader(sig[4], ct::SIG_MSG_NONE, 0, 1);
+    std::memcpy(sig[4].label, "Value", 6);
+    CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 5,
+                             reinterpret_cast<const uint8_t *>(sig)));
+
+    ct::ConstantConfig k{};
+    k.dest_signal_idx = 4;
+    k.value = 1.0f;
+    k.is_active = 1;
+    CHECK(engine_table_write(ENGINE_TABLE_CONSTANTS, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&k)));
+
+    engine_tick(10);
+    CHECK(g_txFrames.size() == 1);
+    const CapturedTx &tx = g_txFrames.first();
+    CHECK(tx.len == 8);
+    for (int i = 0; i < 4; ++i) {
+        // Intel: low byte first, so the pair reassembles little-endian.
+        const int raw = int(qint16(quint16(tx.data[i * 2]) | (quint16(tx.data[i * 2 + 1]) << 8)));
+        CHECK(raw == fields[i].expect);
+    }
+    // Spelt out for the two the report named, so a failure says which is wrong
+    // rather than only that one of four is.
+    CHECK(tx.data[0] == 0x41 && tx.data[1] == 0x00); // offset  64 -> 0x0041
+    CHECK(tx.data[2] == 0xC1 && tx.data[3] == 0xFF); // offset -64 -> 0xFFC1
+}
+
 static void testSelectorOnlyVariantsAreTransmitted()
 {
     EngineCallbacks cb{};
@@ -7443,6 +7530,7 @@ int main(int argc, char *argv[])
     testConditionMessageEvents();
     testBatchCompoundEmitsAllVariantsBeforeItsEvent();
     testTriggeredTransmitBrokenReferenceIsSilent();
+    testTransmitOffsetAddsOnTheWayOut();
     testSelectorOnlyVariantsAreTransmitted();
     testTransmitClampOrRollOver();
     testRollOverIsIgnoredOnReceive();

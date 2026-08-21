@@ -241,11 +241,16 @@ keeps its values.</i></td></tr>
 channel's units. 0.1 means each count is a tenth. The same number reads both
 ways: a received count of 7 is 0.7, and transmitting 0.7 puts 7 on the
 wire.</td></tr>
-<tr><td><b>Offset :</b></td><td>Added to the scaled value to reach the
-channel's units — <b>-40</b> on a temperature whose counts start at -40 makes a
-raw 0 read as -40. Type the offset the channel HAS, in both directions; the
-device inverts it when transmitting. Previewed live under the
-fields.</td></tr>
+<tr><td><b>Offset :</b></td><td><b>Always added, never subtracted</b>, in
+whichever direction the row faces.
+<br><br>
+On a <b>receive</b> row it is added after scaling, to reach the channel's units:
+<b>-40</b> on a temperature whose counts start at -40 makes a raw 0 read as -40.
+<br><br>
+On a <b>transmit</b> row it is added to the raw count on its way out, after the
+resolution has been divided out — a bias in raw counts. Offset <b>64</b> puts 64
+more on the wire: a value of 1 at resolution 1 sends 65. The range the field can
+carry is previewed live under the fields.</td></tr>
 <tr><td><b>Clamp to Signal Limit :</b></td><td><b>Transmit rows
 only</b>, ticked by default. Ticked, a value too big for the field is sent as
 the biggest the field can hold — 256 into 8 bits sends <b>255</b>. Unticked,
