@@ -447,6 +447,42 @@ Type: filesandordirs; Name: "{autoprograms}\CAN Triple Manager"
 Type: files; Name: "{autodesktop}\CAN Triple Manager.lnk"
 
 
+[Dirs]
+; THE PRODUCT'S OWN FILE STRUCTURE, and the permission that makes it usable.
+;
+; The program keeps two libraries beside its own executable:
+;
+;     {app}\Configurations              .ct3 / .ct3s configurations
+;     {app}\Communications Templates    .ct3t communications templates
+;
+; Program Files grants write to TrustedInstaller, SYSTEM and Administrators and
+; to nobody else, and the account the program RUNS as is normally none of those
+; -- a standard user is refused outright, and even an administrator runs with a
+; filtered token unless the program was explicitly elevated. The executable is
+; x64, and 64-bit processes never receive UAC file virtualization (that
+; VirtualStore fallback only ever applied to 32-bit binaries), so without the
+; grant below a Save into either folder does not quietly land somewhere else
+; that works. It simply fails.
+;
+; users-modify is therefore not decoration. Drop these two lines and the two
+; features that write here stop working for every non-elevated user, which is
+; every user. ct::ensureWritableDirectory() probes for exactly this and reports
+; it by name, so the failure is at least legible -- but it is still a failure.
+;
+; SCOPE, deliberately: the grant is on these two subdirectories and NOT on
+; {app}. Everything else the installer lays down -- the executable, the Qt DLLs,
+; the firmware payload, the OpenOCD kit -- keeps the default read-only ACL, so a
+; writable folder here cannot become a way to replace something that gets
+; loaded or run. Neither folder is on any DLL or executable search path, and
+; nothing in them is ever executed: a .ct3 is JSON and a .ct3t is an encrypted
+; blob, both parsed by this program's own readers.
+;
+; WHAT IT COSTS, stated rather than discovered: every account on the machine
+; shares one library and may overwrite or delete another account's files. On a
+; shared workshop bench that is the point of siting them here. It is still true.
+Name: "{app}\Configurations"; Permissions: users-modify
+Name: "{app}\Communications Templates"; Permissions: users-modify
+
 [Files]
 ; The entire deploy/ tree, recursively, with no filtering. Every part of it is
 ; load-bearing and the non-obvious ones are the ones that look most droppable:
@@ -625,6 +661,13 @@ Type: dirifempty; Name: "{userappdata}\CANTriple"
 ; parent, so without this an uninstall leaves an empty "Minton Performance"
 ; directory behind. dirifempty for the same reason as above: a second program
 ; from the same workshop installed alongside this one must keep its home.
+; The two libraries, and then their parents, innermost first -- dirifempty only
+; fires on an empty directory, so the order matters: {app} cannot go until its
+; subdirectories have, and the vendor folder cannot go until {app} has. A user
+; who saved even one configuration keeps all of it, which is the point.
+Type: dirifempty; Name: "{app}\Configurations"
+Type: dirifempty; Name: "{app}\Communications Templates"
+Type: dirifempty; Name: "{app}"
 Type: dirifempty; Name: "{autopf}\{#MyAppVendor}"
 
 ; Deliberately NOT removed:
@@ -650,11 +693,48 @@ Type: dirifempty; Name: "{autopf}\{#MyAppVendor}"
 ;       regenerable data this program wrote for itself, not something a user
 ;       made.)
 ;
-;   .ct3 / .ct3s configurations, PDF and text summaries, .asc CAN logs
-;       Every one of these is written only to a path the user chose in a save
-;       dialog. The installer has no idea where they are and no business
-;       guessing. The app writes nothing else anywhere: no logs, no temp files,
-;       no autosave, no crash-recovery file.
+;   .ct3 / .ct3s configurations, PDF and text summaries, .asc CAN logs,
+;   .ct3t communications templates
+;       Written wherever the user chose in a save dialog. The installer has no
+;       idea where those are and no business guessing.
+;
+;   {app}\Configurations  and  {app}\Communications Templates
+;       THE EXCEPTION, and the one worth reading. These two are created by the
+;       [Dirs] section above and are where the program OFFERS to save, so most
+;       of a user's configurations and templates will be in them.
+;
+;       Inno removes what it INSTALLED. Nothing was installed into either folder
+;       -- they ship empty -- so every file in them is the user's own and every
+;       one of them SURVIVES the uninstall, as does the folder holding it. That
+;       is the intended outcome: an uninstaller that deleted them would be
+;       deleting the user's work, and a reinstall puts the program back around
+;       files that never went anywhere.
+;
+;       The cost is an orphan: uninstall a machine for good and those two
+;       folders sit in Program Files under a vendor directory with nothing else
+;       in it. Left deliberately, because "your configurations are still there"
+;       is a better surprise than the other one. The dirifempty entries below
+;       collect them when they ARE empty, so a machine that never saved anything
+;       leaves nothing behind.
+;
+;   Documents\CAN Triple Device Manager\
+;       THE PROGRAM CREATES THIS ITSELF, which the paragraph above does not
+;       cover, so it is listed separately rather than left to be discovered.
+;       Two sub-folders, each made on demand the first time its feature is
+;       used and never at install time:
+;
+;           Firmware Update Backups    the device's configuration, read back
+;                                      and saved before an update overwrites it
+;           Scripts                    the default home for saved .lua Device
+;                                      Scripts
+;
+;       Not removed, and the folder name is the reason: everything under it is
+;       the user's own work, sitting inside the user's own Documents. An
+;       uninstaller that deletes a folder below "Documents" has deleted
+;       documents, whatever was actually in it.
+;
+;       Nothing else is written anywhere: no logs, no temp files, no autosave,
+;       no crash-recovery file.
 
 
 ; ---------------------------------------------------------------------------

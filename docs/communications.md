@@ -39,7 +39,8 @@ The buttons beside the list:
 <table>
 <tr><th>Button</th><th>Action</th></tr>
 <tr><td><b>Select…</b></td><td>Predefined device templates — planned; currently
-disabled.</td></tr>
+disabled. <b>Load…</b> below does the same job from a template file you or a
+supplier saved.</td></tr>
 <tr><td><b>Import DBC…</b></td><td>Import messages and signals from a .dbc file —
 see <a href="dbc-import.md">DBC Import</a>.</td></tr>
 <tr><td><b>New…</b></td><td>Create a section and open the section
@@ -47,10 +48,14 @@ editor.</td></tr>
 <tr><td><b>Edit…</b></td><td>Open the selected section in the section editor.
 Double-clicking a row does the same. It needs a <i>single</i> row selected —
 there is no one section for it to open out of several.</td></tr>
-<tr><td><b>Remove</b></td><td>Delete the selected sections. Removing more than
-one asks first.</td></tr>
+<tr><td><b>Save…</b></td><td>Write the selected messages to a communications
+template (*.ct3t) — see below.</td></tr>
+<tr><td><b>Load…</b></td><td>Add a template's messages to this bus, creating the
+channels they need — see below.</td></tr>
 <tr><td><b>↑ Move Up</b> / <b>↓ Move Down</b></td><td>Reorder the
 list, and with it the transmit order.</td></tr>
+<tr><td><b>Remove</b></td><td>Delete the selected sections. Removing more than
+one asks first.</td></tr>
 <tr><td><b>Remove All</b></td><td>Delete every section on this bus, after
 confirmation.</td></tr>
 </table>
@@ -62,6 +67,70 @@ The list takes ordinary multiple selection: **shift-click** a second row to take
 Moving works the way you would expect from a file manager. The selection moves one place as a unit, keeping its own internal order, and stays selected afterwards so you can press the button again to keep going. A scattered selection is fine: each selected message steps one place and the unselected ones between them are pushed the other way. The two buttons grey out when the selection already reaches the end it would travel towards — the group has nowhere to go, and moving only part of it would change the order *within* your selection, which is the transmit order.
 
 The **Channels :** pane on the right lists the channels carried by the selected section, grouped by identifier for a compound message. A relay shows "(relay — forwards whole frames, no channels)"; a **Hidden** or **Protect Communication** message shows "(Channel information locked)". A **Read Only** message lists its channels normally — it conceals nothing.
+
+<a id="templates"></a>
+
+## Communications templates
+
+A template is a group of messages lifted out of one configuration so it can be dropped into another — the supplier's ECU, the dash that goes in every car, the lambda controller whose protocol never changes. **Save…** writes one, **Load…** reads one back, and what travels is everything the section editor's two tabs hold: every field on **Parameters**, every row on **Received Channels** or **Transmitted Channels**, the **CRC8** recipe where there is one, and the definitions of the channels those rows name.
+
+Templates are files, so they can be emailed, kept in version control, or handed to a customer.
+
+### Saving
+
+**Save…** writes *the messages you have selected*, not the whole bus — so it saves one message or thirty, and **Ctrl+A** in the list is how you save the lot. The button's tooltip names what it is about to write. The bus settings (rate, FD data rate and termination) are recorded alongside them, because a template for a 500 k device is not much use if it arrives on a 1 M bus and says nothing about it.
+
+> **Note:** A message that is **Hidden** or **Protect Communication** and concealed from this session cannot be saved into a template, and Save says so. A template is a file meant to be handed on, and writing a message out is exactly what a viewer without its password may not do — the same rule **File → Save** applies to the whole configuration. Unlock the message first, or deselect it and save the rest. A message you *can* read keeps its marking and its Message Password through the template, so loading it elsewhere produces a padlocked row rather than an open one.
+
+### The file is not readable
+
+A .ct3t is binary and encrypted. Nothing in it can be read with a text editor, found by searching the file for a channel name or a CAN ID, or recovered by any tool that does not implement the format — which is the point, since the file exists to be given away. Two saves of the same messages produce different bytes, so the files cannot be compared against each other either.
+
+> **Warning:** Be clear about the limit, because it is the same one a [secure configuration](files.md) (.ct3s) has in its standard mode: the key that decrypts the file travels inside it. This stops a customer reading your protocol out of a file you sent them. It does not stop someone who sets out to reverse-engineer the program itself. If that is your concern, the protection you want is per-message **Hidden** or **Protect Communication** marking, which survives inside the template.
+
+### Loading
+
+**Load…** adds a template's messages to the end of the current bus's list and selects them, so they are ready to reorder or think better of.
+
+<a id="folders"></a>
+
+### Where the files are kept
+
+The program keeps two folders of its own, beside the program itself:
+
+<table>
+<tr><th>Folder</th><th>Holds</th></tr>
+<tr><td><code>Communications Templates</code></td><td>Templates (*.ct3t). Both
+<b>Save…</b> and <b>Load…</b> start here.</td></tr>
+<tr><td><code>Configurations</code></td><td>Configurations (*.ct3, *.ct3s).
+<b>File → Open</b>, <b>Save As</b> and <b>Save Secure Config</b>
+start here when the document has no file of its own yet.</td></tr>
+</table>
+
+On a standard install that means:
+
+`C:\Program Files\Minton Performance\CAN Triple Device Manager\Communications Templates`
+
+Both are ordinary folders — put files in them, take them out, keep sub-folders of your own — and both are only a *starting point*. Every one of those dialogs lets you browse anywhere, and once a configuration has been saved somewhere, its own folder is where it opens and saves from next.
+
+Because they sit with the program rather than in one person's Documents, the whole machine shares them: every Windows account on that PC sees the same templates and the same configurations. On a workshop bench with several technicians that is usually what you want. It also means anyone using that PC can overwrite or delete what is in them, so they are shared storage, not private storage.
+
+> **Note:** The installer is what grants permission to write to these two folders — nothing else inside the program directory is writable. A copy put there by an older installer, or on a machine whose IT policy has since removed that permission, will refuse to save and say so, naming the folder. Re-running the current installer repairs it.
+
+> **Note:** Uninstalling does *not* delete what you put in them. The uninstaller removes only the files it installed, and both folders ship empty, so everything in them is yours and stays — which does mean that after an uninstall they are left behind in the program directory with your files still in them.
+
+Two other folders are unchanged and still live under your Documents, because that is where earlier releases put them and moving the folder would not move the files already in it: **Documents → CAN Triple Device Manager → Firmware Update Backups** and **… → Scripts**.
+
+The messages arrive naming channels, and those channels have to exist in *this* configuration for the rows to decode into anything. Loading resolves them one at a time:
+- a channel this configuration does not have is **created**, with the units, data type, base resolution, decimal places and range it was saved with;
+- a channel it already has, meaning the same thing, is **reused** — so loading the same template twice does not fill the catalogue with copies;
+- a channel it already has that means something *different* — a different resolution, different units — is left alone, and the incoming one is **renamed** ("Coolant Temp 2"). Overwriting yours would silently change what every other message using that channel decodes to, with nothing on screen to explain the new numbers.
+
+Anything that could not be resolved cleanly is listed under **Show Details** in the box that appears afterwards: every rename, a relay whose forwarding target was the bus you loaded it onto (that target is dropped — a bus cannot relay to itself), and any channel the template refers to that this configuration does not have. The one that always appears is a **Triggered** transmit message: it names a [User Condition](#triggered), and a template cannot carry conditions, so you have to build that condition before the message will send.
+
+If the template's bus settings differ from the bus you are loading onto, you are asked whether to apply them. Answering no leaves the bus exactly as it was.
+
+> **Note:** The channels a load creates go into the configuration immediately, and stay there even if you then press **Cancel** — only the messages are discarded. **Import DBC…** has always behaved this way, and the two match on purpose. **Calculations → Remove Unused Channels** clears up anything left behind.
 
 <a id="marking"></a>
 

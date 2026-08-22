@@ -40,11 +40,19 @@ private:
         QLabel *availableLabel = nullptr;
         QPushButton *newButton = nullptr;
         QPushButton *editButton = nullptr;
+        QPushButton *saveButton = nullptr;
+        QPushButton *loadButton = nullptr;
         QPushButton *removeButton = nullptr;
         QPushButton *upButton = nullptr;
         QPushButton *downButton = nullptr;
         QPushButton *removeAllButton = nullptr;
     };
+
+    // The bus's settings AS THE USER IS LOOKING AT THEM. The four combos are
+    // only copied into m_buses in accept(), so a template saved mid-session
+    // would otherwise record the rate the tab was opened with rather than the
+    // one on screen — and a template exists to say what bus its device needs.
+    BusConfig currentBusSettings(int busIndex) const;
 
     QWidget *buildBusTab(int busIndex);
     // The working-copy buses as a patch over the document — this dialog does
@@ -80,6 +88,14 @@ private:
     // be recorded until all of them have passed. Reports its own failures; false
     // means leave the section shut.
     bool unlockConcealedSection(int busIndex, const CommsSection &section);
+    // Save the SELECTED sections as a .ct3t. Refuses while the selection holds
+    // a concealed message this session cannot read, for the reason
+    // Configuration::saveToFile refuses the same thing: writing a message out is
+    // exactly what a viewer without its password may not do, and a template is a
+    // file meant to be handed on.
+    void onSaveTemplate(int busIndex);
+    // Append a .ct3t's messages to this bus, creating the channels they name.
+    void onLoadTemplate(int busIndex);
     void onRemoveSection(int busIndex);
     void onMoveSection(int busIndex, int delta);
     void onRemoveAll(int busIndex);

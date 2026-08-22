@@ -28,6 +28,7 @@
 #include "../scripting/script_compiler.h"
 #include "../protocol/config_transfer.h"
 #include "../protocol/device_session.h"
+#include "../model/user_paths.h"
 
 namespace ct {
 
@@ -46,13 +47,13 @@ QString versionText(quint16 major, quint16 minor, quint16 patch)
     return QStringLiteral("%1.%2.%3").arg(major).arg(minor).arg(patch);
 }
 
-// Where backups go. Documents rather than AppData: this is a file the user may
-// need to find and send back by hand months later, and AppData is somewhere
-// people do not look.
+// Where backups go. Documents rather than AppData — this is a file the user
+// may need to find and send back by hand months later, and AppData is somewhere
+// people do not look. The path itself is user_paths.h's, which is the one place
+// that knows the layout.
 QString backupDirectory()
 {
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-    return base + QStringLiteral("/CAN Triple Device Manager/Firmware Update Backups");
+    return firmwareBackupsDirectory();
 }
 
 } // namespace
@@ -248,8 +249,24 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
 
 void FirmwareUpdateDialog::onBrowse()
 {
+    // Open where the image actually is. The installer stages the paired
+    // can-triple-<version>.ctf into {app}\Firmware precisely so a bench machine
+    // that never saw the repositories can restore a unit from it, and this
+    // dialog used to pass no start directory at all — so it opened wherever the
+    // last file dialog in the process happened to be, and the user navigated to
+    // the install directory by hand.
+    //
+    // A build no installer ever ran has no such folder, and aiming a file
+    // dialog at a path that does not exist is the one answer worse than aiming
+    // it nowhere. An empty string is QFileDialog's "no preference": the old
+    // behaviour, kept for exactly the case it was right for.
+    QString startDirectory = firmwareImagesDirectory();
+    if (!QDir(startDirectory).exists()) {
+        startDirectory.clear();
+    }
+
     const QString path = QFileDialog::getOpenFileName(
-        this, tr("Select Firmware Image"), QString(),
+        this, tr("Select Firmware Image"), startDirectory,
         tr("CAN Triple firmware (*.ctf);;All files (*)"));
     if (path.isEmpty()) {
         return;
@@ -432,7 +449,24 @@ bool FirmwareUpdateDialog::backupConfiguration(QString *savedPath, QString *erro
         backup.setConfigTitle(deviceName);
     }
 
-    QDir().mkpath(backupDirectory());
+    // Prove the folder before trusting it with the file. mkpath's answer was
+    // thrown away here, which did not lose the failure — saveToFile below
+    // refuses a path whose folder is missing, and onUpdate() stops the update
+    // on that — but it lost the DIAGNOSIS, at the one moment the user is
+    // relying on this file existing: what came back was a QFile sentence about
+    // a timestamped .ct3 nobody chose the name of, when the thing that is
+    // actually wrong is a folder.
+    //
+    // And it hid the second failure entirely. mkpath returns true for a folder
+    // that merely EXISTS, so one that exists and refuses the write passed for
+    // success here and surfaced as "Access is denied" from the writer instead.
+    // The probe inside ensureWritableDirectory is what separates the two, and
+    // both now come back as a sentence naming the folder, before anything is
+    // written and well before the device is touched.
+    if (!ensureWritableDirectory(backupDirectory(), error)) {
+        return false;
+    }
+
     const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
     const QString path = QStringLiteral("%1/device-config-%2.ct3").arg(backupDirectory(), stamp);
 

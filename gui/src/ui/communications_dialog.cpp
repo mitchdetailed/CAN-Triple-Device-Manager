@@ -6,6 +6,7 @@
 #include <QColor>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -27,7 +28,9 @@
 #include <algorithm>
 
 #include "../model/channel_catalog.h"
+#include "../model/comms_template.h"
 #include "../model/dbc_import.h"
+#include "../model/user_paths.h"
 #include "../protocol/wire_structs.h"
 #include "color_item_delegate.h"
 #include "import_dbc_dialog.h"
@@ -333,7 +336,9 @@ QWidget *CommunicationsDialog::buildBusTab(int busIndex)
     auto *buttonColumn = new QVBoxLayout;
     auto *selectButton = new QPushButton(tr("Select…"));
     selectButton->setEnabled(false);
-    selectButton->setToolTip(tr("Predefined device templates — planned"));
+    selectButton->setToolTip(tr("A library of predefined device templates — planned. "
+                                "Load… below already does this from a template file you or "
+                                "a supplier saved."));
     buttonColumn->addWidget(selectButton);
     auto *importButton = new QPushButton(tr("Import DBC…"));
     importButton->setToolTip(tr("Import messages and signals from a .dbc file"));
@@ -345,10 +350,22 @@ QWidget *CommunicationsDialog::buildBusTab(int busIndex)
     tab.editButton = new QPushButton(tr("Edit…"));
     connect(tab.editButton, &QPushButton::clicked, this, [this, busIndex]() { onEditSection(busIndex); });
     buttonColumn->addWidget(tab.editButton);
-    tab.removeButton = new QPushButton(tr("Remove"));
-    connect(tab.removeButton, &QPushButton::clicked, this,
-            [this, busIndex]() { onRemoveSection(busIndex); });
-    buttonColumn->addWidget(tab.removeButton);
+    // SAVE / LOAD — communications templates. They sit between Edit and the
+    // reordering pair because that is where they belong by subject: Select,
+    // Import DBC, New, Edit, Save and Load are the six ways a message gets INTO
+    // this list or out of it, and Move/Remove are what you do to it afterwards.
+    tab.saveButton = new QPushButton(tr("Save…"));
+    tab.saveButton->setObjectName(QStringLiteral("saveTemplateButton"));
+    connect(tab.saveButton, &QPushButton::clicked, this,
+            [this, busIndex]() { onSaveTemplate(busIndex); });
+    buttonColumn->addWidget(tab.saveButton);
+    tab.loadButton = new QPushButton(tr("Load…"));
+    tab.loadButton->setObjectName(QStringLiteral("loadTemplateButton"));
+    tab.loadButton->setToolTip(tr("Add the messages from a saved communications template "
+                                  "(*.ct3t) to this bus, creating the channels they need."));
+    connect(tab.loadButton, &QPushButton::clicked, this,
+            [this, busIndex]() { onLoadTemplate(busIndex); });
+    buttonColumn->addWidget(tab.loadButton);
     // Section order is the transmit order: on each tick the firmware composes
     // and enqueues its transmit messages in list order (top first), so moving a
     // message up sends it earlier.
@@ -364,6 +381,10 @@ QWidget *CommunicationsDialog::buildBusTab(int busIndex)
     connect(tab.downButton, &QPushButton::clicked, this,
             [this, busIndex]() { onMoveSection(busIndex, +1); });
     buttonColumn->addWidget(tab.downButton);
+    tab.removeButton = new QPushButton(tr("Remove"));
+    connect(tab.removeButton, &QPushButton::clicked, this,
+            [this, busIndex]() { onRemoveSection(busIndex); });
+    buttonColumn->addWidget(tab.removeButton);
     tab.removeAllButton = new QPushButton(tr("Remove All"));
     connect(tab.removeAllButton, &QPushButton::clicked, this,
             [this, busIndex]() { onRemoveAll(busIndex); });
@@ -601,6 +622,33 @@ void CommunicationsDialog::updateButtons(int busIndex)
     tab.upButton->setEnabled(!rows.isEmpty() && rows.first() > 0);
     tab.downButton->setEnabled(!rows.isEmpty() && rows.last() < count - 1);
     tab.removeAllButton->setEnabled(count > 0);
+
+    // Save takes the SELECTION, not the bus, so it needs one — and saying so in
+    // the tooltip is the whole of the discoverability here, since a button that
+    // writes a different number of messages depending on what is highlighted
+    // has to state which. It stays LIVE for a concealed message rather than
+    // greying out: the refusal has a reason worth reading, and
+    // onSaveTemplate() gives it. Same argument as Edit above.
+    tab.saveButton->setEnabled(!rows.isEmpty());
+    tab.saveButton->setToolTip(
+        rows.isEmpty()
+            ? tr("Select the messages to save as a communications template.")
+            : (rows.size() == 1
+                   ? tr("Save \"%1\" as a communications template (*.ct3t).")
+                         .arg(m_buses[busIndex].sections.at(rows.first()).name)
+                   : tr("Save the %1 selected messages as a communications template (*.ct3t).")
+                         .arg(rows.size())));
+}
+
+BusConfig CommunicationsDialog::currentBusSettings(int busIndex) const
+{
+    const BusTab &tab = m_busTabs[busIndex];
+    BusConfig bus = m_buses[busIndex];
+    bus.enabled = tab.modeCombo->currentData().toBool();
+    bus.rateKbps = tab.rateCombo->currentData().toInt();
+    bus.dataRateKbps = tab.fdRateCombo->currentData().toInt();
+    bus.termination = tab.terminationCombo->currentData().toBool();
+    return bus;
 }
 
 ConfigPatch CommunicationsDialog::liveView() const
@@ -855,6 +903,292 @@ QList<int> CommunicationsDialog::selectedRows(int busIndex) const
     // otherwise remove and move different things.
     std::sort(rows.begin(), rows.end());
     return rows;
+}
+
+// ---------------------------------------------------------------- templates
+//
+// Save… and Load… move a GROUP OF MESSAGES between configurations: the
+// supplier's ECU, the dash that goes in every car, the lambda controller whose
+// protocol never changes. What travels is exactly what the section editor's two
+// tabs hold — every Parameters field and every channel row — plus the
+// definitions of the channels those rows name, because a row whose channel does
+// not exist in the target document decodes into nothing.
+//
+// The file is binary and encrypted (comms_template.h explains the container and
+// is candid about what that is and is not worth). Nothing in this dialog needs
+// to know how; it hands sections in and gets sections back.
+
+// A section name is the user's to choose and routinely holds characters Windows
+// will not accept in a file name — "Engine/Trans" is a name somebody types, and
+// a colon arrives with half the DBCs in the world. Substituted rather than
+// dropped, so two messages differing only in punctuation do not propose the
+// same file. This only SEEDS the Save dialog; what the user types there wins.
+static QString fileNameFromSection(const QString &name)
+{
+    static const QString forbidden = QStringLiteral("<>:\"/\\|?*");
+    QString out;
+    out.reserve(name.size());
+    for (const QChar c : name)
+        out += (c.unicode() < 0x20 || forbidden.contains(c)) ? QLatin1Char('-') : c;
+    // Windows drops trailing dots and spaces silently, which would turn
+    // "Rev 1." into "Rev 1" and make a second save overwrite the first without
+    // the overwrite prompt ever appearing.
+    out = out.trimmed();
+    while (out.endsWith(QLatin1Char('.')))
+        out.chop(1);
+    return out.trimmed();
+}
+
+void CommunicationsDialog::onSaveTemplate(int busIndex)
+{
+    const QList<int> rows = selectedRows(busIndex);
+    if (rows.isEmpty())
+        return;
+
+    // THE SAME REFUSAL Configuration::saveToFile and saveSecureToFile make, on
+    // the same predicate, for the same reason: a session that cannot READ a
+    // message must not be the one that writes it into a file to be handed on.
+    // Keyless concealed sections are excluded here exactly as they are there—
+    // no password for them exists anywhere, so refusing would make them
+    // permanently unexportable rather than protected.
+    QStringList concealed;
+    QList<CommsSection> chosen;
+    for (int r : rows) {
+        const CommsSection &s = m_buses[busIndex].sections.at(r);
+        if (s.messageKey != kNoAccessKey && s.isConcealed(sectionRevealed(busIndex, s)))
+            concealed << s.name;
+        chosen.append(s);
+    }
+    if (!concealed.isEmpty()) {
+        QMessageBox::warning(
+            this, tr("Save Communications Template"),
+            tr("These messages are concealed from this session, so they cannot be written "
+               "into a template:\n\n%1\n\n"
+               "A template is a file meant to be handed on, and writing a message out is "
+               "exactly what a viewer without its password may not do. Unlock them first — a "
+               "Hidden message takes its own Message Password, and a Protect Communication "
+               "message takes that password and the Edit Protected Comms password confirmed "
+               "by a connected device — or deselect them and save the rest.")
+                .arg(concealed.join(QStringLiteral("\n"))));
+        return;
+    }
+
+    QString error;
+    if (!ensureWritableDirectory(commsTemplatesDirectory(), &error)) {
+        QMessageBox::warning(this, tr("Save Communications Template"), error);
+        return;
+    }
+
+    const QString suggested = rows.size() == 1
+                                  ? fileNameFromSection(chosen.first().name)
+                                  : tr("CAN %1 messages").arg(busIndex + 1);
+    QString path = QFileDialog::getSaveFileName(
+        this, tr("Save Communications Template"),
+        commsTemplatesDirectory() + QLatin1Char('/') + suggested + QLatin1Char('.')
+            + commsTemplateExtension(),
+        commsTemplateFilter());
+    if (path.isEmpty())
+        return;
+    // Qt appends the selected filter's suffix, but only while that filter is
+    // the selected one — pick "All Files" and it does not. A template with
+    // no extension is one Load… will not list.
+    if (QFileInfo(path).suffix().compare(commsTemplateExtension(), Qt::CaseInsensitive) != 0)
+        path += QLatin1Char('.') + commsTemplateExtension();
+
+    const CommsTemplate tmpl =
+        buildCommsTemplate(m_config->catalog(), currentBusSettings(busIndex), chosen,
+                           QFileInfo(path).completeBaseName());
+    if (!writeCommsTemplate(path, tmpl, &error)) {
+        // With the path, because the commonest cause is where the file was
+        // going rather than what was in it.
+        QMessageBox::warning(this, tr("Save Communications Template"),
+                             tr("%1 could not be written.\n\n%2")
+                                 .arg(QDir::toNativeSeparators(path), error));
+        return;
+    }
+
+    // Says what was written and where, and stops there. The box used to add a
+    // line about the file being encrypted and unreadable in a text editor. That
+    // is true, and it is documented in the help where there is room to state its
+    // limit alongside it — the key travels inside the file, so it defeats a text
+    // search and not a determined reader. A confirmation box has no room for the
+    // qualifier, and a bare security claim with the qualifier missing is the kind
+    // of thing somebody repeats to a customer.
+    QMessageBox::information(
+        this, tr("Save Communications Template"),
+        tr("Saved %1 message(s) and %2 channel definition(s) to:\n\n%3")
+            .arg(tmpl.sections.size())
+            .arg(tmpl.channels.size())
+            .arg(QDir::toNativeSeparators(path)));
+}
+
+void CommunicationsDialog::onLoadTemplate(int busIndex)
+{
+    // Best effort, and NOT the writability probe Save uses: loading only reads,
+    // so a folder this account cannot write to is still a perfectly good place
+    // to browse. Refusing here would block a technician from loading the shop's
+    // templates on a machine where only an administrator may add to them.
+    //
+    // Best effort still means reading the answer, which this discarded. Not
+    // because the dialog misbehaves without it: Qt resolves a starting
+    // directory that does not exist to the same fallback it gives an empty
+    // string, measured against 6.7 rather than assumed. The point is that
+    // handing it a path already known to be missing offers a default that is
+    // then silently dropped, where an empty string says the true thing —
+    // there is no folder to start in.
+    QString startDirectory = commsTemplatesDirectory();
+    if (!QDir().mkpath(startDirectory)) {
+        startDirectory.clear();
+    }
+
+    const QString path =
+        QFileDialog::getOpenFileName(this, tr("Load Communications Template"),
+                                     startDirectory, commsTemplateFilter());
+    if (path.isEmpty())
+        return;
+
+    CommsTemplate tmpl;
+    QString error;
+    if (!readCommsTemplate(path, &tmpl, &error)) {
+        QMessageBox::warning(this, tr("Load Communications Template"), error);
+        return;
+    }
+
+    // How many of the device's message slots a list consumes, counted the way
+    // the "N of M device messages used" label counts them: an Off section
+    // configures nothing and a relay lives in its own 32-rule table, so neither
+    // takes one. (Not named `slots` — Qt defines that as an empty macro, and
+    // the lambda would vanish taking its name with it.)
+    const auto slotsUsed = [](const QList<CommsSection> &list) {
+        int n = 0;
+        for (const CommsSection &s : list)
+            if (s.device != SectionDevice::Off && !s.isRelay())
+                ++n;
+        return n;
+    };
+    int used = 0;
+    for (const auto &bus : m_buses)
+        used += slotsUsed(bus.sections);
+    const int adding = slotsUsed(tmpl.sections);
+    // CHECKED BEFORE ANYTHING IS CREATED. The alternative is a document over the
+    // device's limit and a Send that refuses it, with the repair being to work
+    // out which of the thirty messages just added are the surplus.
+    if (used + adding > MAX_MESSAGES) {
+        QMessageBox::warning(this, tr("Load Communications Template"),
+                             tr("This template adds %1 message(s), and this configuration "
+                                "already uses %2 of the device's %3. Remove some messages "
+                                "first.")
+                                 .arg(adding)
+                                 .arg(used)
+                                 .arg(MAX_MESSAGES));
+        return;
+    }
+
+    // THE BUS SETTINGS ARE OFFERED, NOT APPLIED. They belong to the user's
+    // configuration and not to this file — but a template for a 500k device
+    // dropped onto a 1M bus does not work and says nothing about why, so
+    // staying silent is not the neutral choice it looks like.
+    const BusConfig current = currentBusSettings(busIndex);
+    bool applyBus = false;
+    if (tmpl.hasBusSettings
+        && (tmpl.rateKbps != current.rateKbps || tmpl.dataRateKbps != current.dataRateKbps
+            || tmpl.termination != current.termination)) {
+        // Spelled the way the FD Data dropdown spells it, so the question and
+        // the control behind it are talking about the same thing: a box saying
+        // "2000k" next to a menu offering "2M" reads as a third value.
+        const auto fdLabel = [](int kbps) {
+            if (kbps <= 0)
+                return tr("off (classic)");
+            if (kbps == 1000)
+                return tr("1M");
+            if (kbps == 2000)
+                return tr("2M");
+            return tr("%1k").arg(kbps);
+        };
+        applyBus =
+            QMessageBox::question(
+                this, tr("Load Communications Template"),
+                tr("This template was saved from a bus running at %1k, FD data %2, "
+                   "termination %3.\n\nCAN %4 is currently %5k, FD data %6, termination %7."
+                   "\n\nApply the template's bus settings?")
+                    .arg(busRateLabel(tmpl.rateKbps), fdLabel(tmpl.dataRateKbps),
+                         tmpl.termination ? tr("on") : tr("off"))
+                    .arg(busIndex + 1)
+                    .arg(busRateLabel(current.rateKbps), fdLabel(current.dataRateKbps),
+                         current.termination ? tr("on") : tr("off")),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+            == QMessageBox::Yes;
+    }
+
+    CommsTemplateMerge merge;
+    if (!mergeCommsTemplate(m_config->catalog(), busIndex, tmpl, &merge, &error)) {
+        QMessageBox::warning(this, tr("Load Communications Template"), error);
+        return;
+    }
+    // The channels went into the DOCUMENT's catalogue, not into this dialog's
+    // working copies, so the document is dirty whatever happens to the sections
+    // from here — including a Cancel. That is DBC import's behaviour too, and
+    // being consistent about it is worth more than being clever in one of the
+    // two; the help says so where a user will read it.
+    if (merge.channelsCreated > 0)
+        m_config->setDirty();
+
+    if (applyBus) {
+        BusTab &busTab = m_busTabs[busIndex];
+        // Rate first: the FD list enables and disables its entries from the
+        // base rate, so setting FD before the rate that has to clear it would
+        // land on a disabled row.
+        const int rateIdx = busTab.rateCombo->findData(tmpl.rateKbps);
+        if (rateIdx >= 0)
+            busTab.rateCombo->setCurrentIndex(rateIdx);
+        const int fdIdx = busTab.fdRateCombo->findData(tmpl.dataRateKbps);
+        if (fdIdx >= 0)
+            busTab.fdRateCombo->setCurrentIndex(fdIdx);
+        busTab.terminationCombo->setCurrentIndex(tmpl.termination ? 1 : 0);
+    }
+
+    const int firstNew = m_buses[busIndex].sections.size();
+    m_buses[busIndex].sections.append(merge.sections);
+
+    // Every tab, because the "N of M device messages used" label counts all
+    // three buses — the same reason the DBC import rebuilds them all.
+    for (int i = 0; i < 3; ++i) {
+        rebuildSections(i);
+        updateButtons(i);
+    }
+    m_tabs->setCurrentIndex(busIndex);
+    // Select what just arrived, and nothing else. The messages a load added are
+    // the ones the user is about to look at, reorder or think better of, and
+    // leaving the selection wherever it was would make Remove aim at the wrong
+    // rows immediately afterwards.
+    BusTab &tab = m_busTabs[busIndex];
+    tab.sectionTree->clearSelection();
+    if (QTreeWidgetItem *first = tab.sectionTree->topLevelItem(firstNew))
+        tab.sectionTree->setCurrentItem(first);
+    for (int r = firstNew; r < m_buses[busIndex].sections.size(); ++r)
+        if (QTreeWidgetItem *item = tab.sectionTree->topLevelItem(r))
+            item->setSelected(true);
+    updateButtons(busIndex);
+
+    QString summary =
+        tr("Added %1 message(s) to CAN %2.").arg(merge.sections.size()).arg(busIndex + 1);
+    if (merge.channelsCreated > 0 || merge.channelsReused > 0)
+        summary += tr("\n\n%1 channel(s) created, %2 reused from this configuration.")
+                       .arg(merge.channelsCreated)
+                       .arg(merge.channelsReused);
+    if (merge.notes.isEmpty()) {
+        QMessageBox::information(this, tr("Load Communications Template"), summary);
+    } else {
+        // One line per rename, dropped route target or unresolved reference. A
+        // thirty-message template produces a lot of them, so they go in the
+        // scrollable details pane rather than growing the box — the same shape
+        // the DBC import uses for the same reason.
+        QMessageBox box(QMessageBox::Information, tr("Load Communications Template"),
+                        summary + tr("\n\n%1 note(s) — see Show Details.").arg(merge.notes.size()),
+                        QMessageBox::Ok, this);
+        box.setDetailedText(merge.notes.join(QLatin1Char('\n')));
+        box.exec();
+    }
 }
 
 void CommunicationsDialog::onRemoveSection(int busIndex)

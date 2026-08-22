@@ -8,6 +8,7 @@
 #include <QJsonObject>
 
 #include "../protocol/wire_structs.h" // TABLE_2X16_SITES, MSGPROT_*
+#include "comms_template.h"          // kCommsTemplateFileType - the .ct3t marker
 
 // The application version, stamped into every saved file as `writtenBy`. Only
 // the application target defines it; the test binaries link this translation
@@ -1639,6 +1640,14 @@ bool Configuration::mayBeSentTo(const QString &uid) const
 // behaviour change on a real bus. Refusing to open the file says so instead.
 static constexpr int kConfigSchemaVersion = 19;
 
+// The one accessor, so nothing outside this file has to hold a second copy of
+// the number. Communications templates stamp it into the file they write and
+// hand it back to CommsSection::fromJson on the way in.
+int configSchemaVersion()
+{
+    return kConfigSchemaVersion;
+}
+
 namespace {
 
 // Reads and validates the outer wrapper. Shared by peekFile and loadFromFile so
@@ -1829,6 +1838,22 @@ bool Configuration::loadFromFile(const QString &path, QString *error, const QStr
             return false;
         }
         body = bodyDoc.object();
+        // A COMMUNICATIONS TEMPLATE is the same container with different
+        // contents, and this is where the two are told apart. Without this
+        // check a .ct3t would decrypt perfectly, parse as a configuration with
+        // every key absent, and REPLACE the open document with an empty one —
+        // a wrong file must produce a sentence, not a blank document. Asked of
+        // the template's own marker rather than by requiring "fileType" to say
+        // CANTripleConfig, because a .ct3s body has never carried a fileType
+        // and demanding one now would refuse every secure file already written.
+        if (body.value(QStringLiteral("fileType")).toString()
+            == QLatin1String(kCommsTemplateFileType)) {
+            if (error)
+                *error = QStringLiteral("This is a communications template, not a "
+                                        "configuration. Load it from Connections > "
+                                        "Communications with the Load… button.");
+            return false;
+        }
         // A .ct3s has no legible wrapper to hold the schema version, so
         // saveSecureToFile writes it inside the body and it is checked here —
         // the container's own formatVersion covers the layout of the bytes, not

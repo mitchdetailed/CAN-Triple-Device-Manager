@@ -18,6 +18,18 @@ namespace ct {
 
 class Configuration;
 
+// The .ct3 SCHEMA number this build writes and is the newest it can read. Not
+// the application version and not the .ct3s container's formatVersion: it
+// describes the shape of the document's JSON, and it is the only number
+// CommsSection::fromJson consults to decide which migrations a file needs.
+//
+// Exposed as a function because the constant itself lives beside the loader in
+// configuration.cpp, where every other user of it is, and a second definition
+// in this header is a second thing to forget to bump. Communications templates
+// need it: they carry sections spelled at this schema, and reading one back
+// means telling fromJson which spelling it is looking at.
+int configSchemaVersion();
+
 // Every grid dialog edits a working copy of one slice of the document and
 // writes it back only on OK, so mid-session the document is stale in BOTH
 // directions: it lacks rows just added and still carries rows just deleted or

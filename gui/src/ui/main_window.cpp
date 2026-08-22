@@ -6,6 +6,7 @@
 #include <QCloseEvent>
 #include <QDialogButtonBox>
 #include <QFileDialog>
+#include <QDir>
 #include <QFileInfo>
 #include <QGroupBox>
 #include <QInputDialog>
@@ -27,6 +28,7 @@
 #include "../model/access_keys.h"
 #include "../model/device_mapper.h"
 #include "../model/secure_file.h"
+#include "../model/user_paths.h"
 #include "../model/validation.h"
 #include "../protocol/config_transfer.h"
 #include "../protocol/device_session.h"
@@ -67,6 +69,30 @@ const char *kFileFilter = "CAN Triple Configurations (*.ct3 *.ct3s);;All Files (
 // that — offering *.ct3 there would suggest the format followed the extension,
 // which it does not.
 const char *kSecureFileFilter = "CAN Triple Secure Configurations (*.ct3s);;All Files (*)";
+
+// WHERE A FILE DIALOG STARTS. Every one of these used to pass {} and let Qt
+// decide, which in practice means "wherever the last file dialog in this
+// process happened to be" — so opening a DBC, or saving an .asc log, moved
+// where Save Configuration would next offer to write. That is the kind of thing
+// that puts a configuration in a folder nobody meant.
+//
+// So: the document's OWN folder when it has one, because a Save As on an open
+// file belongs beside it, and the program's Configurations folder otherwise.
+//
+// Only ever a STARTING POINT. It is not enforced and it is not a refusal: the
+// user may browse anywhere from there, and a configuration saved somewhere else
+// entirely is a perfectly ordinary thing to do. So this deliberately does not
+// probe writability the way saving a template does — an unwritable default
+// should quietly leave the user in the dialog, free to pick another folder,
+// rather than stop them with a message before they have chosen anything.
+QString startIn(const QString &currentFile)
+{
+    if (!currentFile.isEmpty())
+        return QFileInfo(currentFile).absolutePath();
+    const QString dir = ct::configurationsDirectory();
+    QDir().mkpath(dir); // best effort; the dialog copes with an absent folder
+    return dir;
+}
 
 // Blocks interaction while a synchronous device command runs its nested
 // event loop, so the user can't re-enter menus mid-command.
@@ -539,8 +565,9 @@ void MainWindow::onOpen()
 {
     if (!maybeSave())
         return;
-    const QString path = QFileDialog::getOpenFileName(this, tr("Open Configuration"), {},
-                                                      tr(kFileFilter));
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Open Configuration"),
+        startIn(m_config.filePath()), tr(kFileFilter));
     if (path.isEmpty())
         return;
     openPath(path);
@@ -660,8 +687,9 @@ bool MainWindow::onSave()
 
 bool MainWindow::onSaveAs()
 {
-    QString path = QFileDialog::getSaveFileName(this, tr("Save Configuration"), {},
-                                                tr(kFileFilter));
+    QString path = QFileDialog::getSaveFileName(
+        this, tr("Save Configuration"),
+        startIn(m_config.filePath()), tr(kFileFilter));
     if (path.isEmpty())
         return false;
     if (QFileInfo(path).suffix().isEmpty())
@@ -833,8 +861,9 @@ bool MainWindow::onSaveSecureConfig()
         }
     }
 
-    QString path = QFileDialog::getSaveFileName(this, tr("Save Secure Config"), {},
-                                                tr(kSecureFileFilter));
+    QString path = QFileDialog::getSaveFileName(
+        this, tr("Save Secure Config"),
+        startIn(m_config.filePath()), tr(kSecureFileFilter));
     if (path.isEmpty())
         return false;
     if (QFileInfo(path).suffix().isEmpty())
@@ -1146,8 +1175,10 @@ void MainWindow::onSendSecureConfiguration()
     if (!ensureConnected())
         return;
 
+    // No document of its own to sit beside: this command installs a sealed
+    // package without opening it, so it starts where the packages are kept.
     const QString path =
-        QFileDialog::getOpenFileName(this, title, {}, tr(kSecureFileFilter));
+        QFileDialog::getOpenFileName(this, title, startIn({}), tr(kSecureFileFilter));
     if (path.isEmpty())
         return;
 

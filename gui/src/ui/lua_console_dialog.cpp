@@ -24,6 +24,7 @@
 
 #include "../model/configuration.h"
 #include "../scripting/script_runner.h"
+#include "../model/user_paths.h"
 
 namespace ct {
 
@@ -241,10 +242,27 @@ void LuaConsoleDialog::onRun()
 
 QString LuaConsoleDialog::scriptsDirectory() const
 {
-    const QString base =
-        QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-    const QString dir = base + QStringLiteral("/CAN Triple Device Manager/Scripts");
-    QDir().mkpath(dir);
+    // The path is user_paths.h's; creating it on demand is this dialog's, since
+    // it is the only caller that wants the folder to exist merely for browsing.
+    //
+    // Empty when it could not be created, because mkpath's answer — discarded
+    // until now — is the only thing here that knows.
+    //
+    // Nothing the user sees turns on it, and claiming otherwise would be the
+    // easy mistake: Qt resolves a starting directory that does not exist to
+    // the SAME fallback it gives an empty string, so returning the path anyway
+    // would not have opened that folder either. Measured against 6.7 rather
+    // than assumed — QFileDialog::directory() lands in the identical place for
+    // both. What changes is that this stops handing a caller a path it has
+    // already been told is not there, and stops offering the dialog a default
+    // that gets silently dropped.
+    //
+    // No message goes with it. Nothing is at stake until a save, and onSave()
+    // reports that with the real error.
+    const QString dir = deviceScriptsDirectory();
+    if (!QDir().mkpath(dir)) {
+        return QString();
+    }
     return dir;
 }
 
@@ -310,8 +328,14 @@ bool LuaConsoleDialog::onSave()
 
 bool LuaConsoleDialog::onSaveAs()
 {
+    // A bare file name when there is no folder to offer, rather than the
+    // "/script.lua" that concatenating onto an empty directory would produce.
+    const QString dir = scriptsDirectory();
+    const QString suggestion =
+        dir.isEmpty() ? QStringLiteral("script.lua") : dir + QStringLiteral("/script.lua");
+
     const QString path = QFileDialog::getSaveFileName(
-        this, tr("Save Script"), scriptsDirectory() + QStringLiteral("/script.lua"),
+        this, tr("Save Script"), suggestion,
         tr("Lua scripts (*.lua)"));
     if (path.isEmpty()) {
         return false;

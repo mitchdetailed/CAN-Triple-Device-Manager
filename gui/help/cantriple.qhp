@@ -62,6 +62,9 @@
             <keyword name="start bit" ref="pages/communications.html"/>
             <keyword name="bit length" ref="pages/channels.html"/>
             <keyword name="Section Editor" ref="pages/communications.html"/>
+            <keyword name="communications template" ref="pages/communications.html#templates"/>
+            <keyword name="template" ref="pages/communications.html#templates"/>
+            <keyword name="ct3t" ref="pages/communications.html#templates"/>
             <keyword name="protected comms" ref="pages/communications.html"/>
 
             <!-- Channels -->

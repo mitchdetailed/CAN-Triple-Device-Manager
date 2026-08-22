@@ -34,12 +34,28 @@ cmake_minimum_required(VERSION 3.21)
 # happen is the app naming a version older than the work inside it.
 #
 # NOT part of this reset, deliberately: the internal format epochs. The
-# config store is still v7, the .ct3 schema still 15, the wire protocol
-# still v1, and FW_BOOTLOADER_VERSION still 2 — that last one is a flash-map
-# GENERATION, not a version (see fw_image.h), and winding it back would tell
-# bootloaders this image uses the old memory map. Compatibility gates keep
-# counting; only the product number starts over.
-project(CANTripleDeviceManager VERSION 1.1.2 LANGUAGES C CXX RC)
+# config store, the .ct3 schema, the wire protocol and FW_BOOTLOADER_VERSION
+# all kept their own numbering — that last one is a flash-map GENERATION,
+# not a version (see fw_image.h), and winding it back would tell bootloaders
+# this image uses the old memory map. Compatibility gates keep counting;
+# only the product number starts over.
+#
+# Their values are deliberately NOT restated here. This block twice named
+# epochs that had since moved on — it claimed store v7 and schema 15 long
+# after they were 11 and 19 — and a stale number in a comment that reads as
+# authoritative is worse than no number at all, because it gets believed
+# instead of checked. Each counter is declared in exactly one place, and
+# that place is the only answer worth trusting:
+#
+#   config store    FLASH_STORE_VERSION     firmware  flash_store.h
+#                   EXPECTED_STORE_VERSION  gui       wire_structs.h
+#   .ct3 schema     kConfigSchemaVersion    gui       configuration.cpp
+#   wire protocol   PROTOCOL_VERSION        firmware  protocol.h
+#   flash-map gen   FW_BOOTLOADER_VERSION   firmware  fw_image.h
+#
+# The two store constants are a firmware value and the GUI's mirror of it;
+# they must agree, and test_firmware_link asserts exactly that.
+project(CANTripleDeviceManager VERSION 1.1.3 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -288,6 +304,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/model/channel.h
     src/model/channel_catalog.cpp
     src/model/channel_catalog.h
+    src/model/comms_template.cpp
+    src/model/comms_template.h
     src/model/comms_types.h
     src/model/config_lock.cpp
     src/model/config_lock.h
@@ -301,6 +319,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/model/device_mapper.h
     src/model/secure_file.cpp
     src/model/secure_file.h
+    src/model/user_paths.cpp
+    src/model/user_paths.h
     src/model/validation.cpp
     src/model/validation.h
     src/ui/access_passwords_dialog.cpp
@@ -523,6 +543,7 @@ qt_add_executable(test_roundtrip
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
     # THE DEVICE'S SCRIPT VERIFIER, here because device_mapper.cpp needs it and
     # not because this test asks for it. A Get now KEEPS the compiled script
@@ -565,6 +586,7 @@ qt_add_executable(test_firmware_link
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
     ${FIRMWARE_DIR}/src/engine_core.c
     # The MathOp evaluator, split out of engine_core.c so the script VM can link
@@ -653,6 +675,7 @@ qt_add_executable(scriptc
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(scriptc PRIVATE ${FIRMWARE_DIR}/include)
@@ -675,6 +698,7 @@ qt_add_executable(test_script_compiler
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(test_script_compiler PRIVATE ${FIRMWARE_DIR}/include)
@@ -703,6 +727,7 @@ qt_add_executable(test_script_sim
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(test_script_sim PRIVATE ${FIRMWARE_DIR}/include)
@@ -731,6 +756,7 @@ qt_add_executable(test_script_editor
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(test_script_editor PRIVATE ${FIRMWARE_DIR}/include)
@@ -772,6 +798,7 @@ qt_add_executable(test_help_access
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(test_help_access PRIVATE ${FIRMWARE_DIR}/include)
@@ -801,6 +828,7 @@ qt_add_executable(test_channel_labels
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(test_channel_labels PRIVATE ${FIRMWARE_DIR}/include)
@@ -822,6 +850,7 @@ qt_add_executable(ct3check
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(ct3check PRIVATE ${FIRMWARE_DIR}/include)
@@ -866,16 +895,58 @@ qt_add_executable(test_comms_multiselect
     src/ui/numeric_grid.cpp
     src/model/access_keys.cpp
     src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(test_comms_multiselect PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_comms_multiselect PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
+    ct_device_core) # device_mapper.cpp — see test_roundtrip
+
+# Communications templates: the .ct3t container, the channel merge, and the
+# Save… / Load… buttons driven through the real Communications Setup dialog.
+#
+# Three properties this pins, and each of them is a way a template quietly
+# corrupts a configuration rather than failing:
+#   1. the file gives up NOTHING to a text search — that is the entire reason it
+#      is not JSON, and "encrypted" is a claim worth testing rather than
+#      asserting;
+#   2. loading never rewrites a channel the target document already had, because
+#      re-scaling somebody's existing channel changes what every other message
+#      using it decodes to, silently;
+#   3. a template round-trips a message BYTE FOR BYTE through its JSON — a
+#      dropped field is a message that looks right in the list and is wrong on
+#      the wire.
+qt_add_executable(test_comms_template
+    test/test_comms_template.cpp
+    src/ui/communications_dialog.cpp
+    src/ui/section_editor_dialog.cpp
+    src/ui/import_dbc_dialog.cpp
+    src/ui/select_channel_dialog.cpp
+    src/ui/edit_channel_dialog.cpp
+    src/ui/add_channel_dialog.cpp
+    src/ui/bit_layout_table.cpp
+    src/ui/numeric_grid.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_comms_template PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_comms_template PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
     ct_device_core) # device_mapper.cpp — see test_roundtrip
 
 # The CAN Viewer's display filters and Overwrite Mode, driven through the real
@@ -911,6 +982,7 @@ qt_add_executable(test_script_examples
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(test_script_examples PRIVATE ${FIRMWARE_DIR}/include)
@@ -937,6 +1009,7 @@ qt_add_executable(test_tables
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(test_tables PRIVATE ${FIRMWARE_DIR}/include)
@@ -959,6 +1032,7 @@ qt_add_executable(test_lua
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(test_lua PRIVATE ${FIRMWARE_DIR}/include)
@@ -994,12 +1068,14 @@ qt_add_executable(test_protection
     src/ui/numeric_grid.cpp
     src/model/access_keys.cpp
     src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/user_paths.cpp
     src/model/validation.cpp
 )
 target_include_directories(test_protection PRIVATE ${FIRMWARE_DIR}/include)
@@ -1100,52 +1176,32 @@ if(WIN32)
         # single [Files] entry stays the only path into {app}.
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${CMAKE_SOURCE_DIR}/installer/drivers" "${DEPLOY_DIR}/Drivers"
-        # The firmware this Manager release pairs with, named with its own
-        # version (read from the firmware repo's VERSION file below). Lands in
-        # Firmware/ inside the install so Online -> Update Firmware has a
-        # known place to browse to, and so a bench machine that never saw the
-        # repositories can still restore a unit. Requires the firmware to have
-        # been built — build.ps1 does that before this target in every release
-        # path, and the installer refuses to compile without the folder.
+        # The initial-programming tool, built from this repository: statically
+        # linked, no DLL needs, so the Firmware/ folder works from a USB stick.
+        #
+        # The make_directory is NOT redundant with the one inside
+        # stage_firmware.cmake below. `cmake -E copy_if_different <file> <dest>`
+        # treats a dest that does not exist as a FILE NAME, so on a clean tree
+        # this copy would silently produce a 500 KB file called Firmware and the
+        # staging script would then fail trying to make a directory over it.
         COMMAND ${CMAKE_COMMAND} -E make_directory "${DEPLOY_DIR}/Firmware"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${FIRMWARE_DIR}/.pio/build/CAN_Triple/firmware.ctf"
-                "${DEPLOY_DIR}/Firmware/can-triple-${FW_VERSION}.ctf"
-        # The initial-programming kit, completing the Firmware/ folder into
-        # something a bench machine can bring a BLANK OR BRICKED board to life
-        # with: CANTripleInitialProgramming.exe (statically linked, no DLL
-        # needs), the
-        # bootloader image it programs, and the OpenOCD it drives — binaries
-        # from the same PlatformIO package every SWD flash in this project
-        # uses, plus the exact three scripts the invocation touches and the
-        # project's 512K-bank target config (stock OpenOCD trusts the part's
-        # FLASH_SIZE register, which lies — see firmware/openocd/). The whole
-        # folder is deliberately self-contained: copy it to a USB stick and it
-        # still works. A missing tool-openocd package fails the copy loudly
-        # here rather than producing a kit that cannot flash.
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "$<TARGET_FILE:CANTripleInitialProgramming>" "${DEPLOY_DIR}/Firmware"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${FIRMWARE_DIR}/bootloader/.pio/build/bootloader/firmware.bin"
-                "${DEPLOY_DIR}/Firmware/bootloader.bin"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "$ENV{USERPROFILE}/.platformio/packages/tool-openocd/bin"
-                "${DEPLOY_DIR}/Firmware/openocd/bin"
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-                "${DEPLOY_DIR}/Firmware/openocd/scripts/interface"
-                "${DEPLOY_DIR}/Firmware/openocd/scripts/target"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$ENV{USERPROFILE}/.platformio/packages/tool-openocd/openocd/scripts/interface/stlink.cfg"
-                "${DEPLOY_DIR}/Firmware/openocd/scripts/interface"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$ENV{USERPROFILE}/.platformio/packages/tool-openocd/openocd/scripts/target/swj-dp.tcl"
-                "${DEPLOY_DIR}/Firmware/openocd/scripts/target"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$ENV{USERPROFILE}/.platformio/packages/tool-openocd/openocd/scripts/mem_helper.tcl"
-                "${DEPLOY_DIR}/Firmware/openocd/scripts"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${FIRMWARE_DIR}/openocd/stm32g4x_512k.cfg"
-                "${DEPLOY_DIR}/Firmware/openocd/scripts"
+        # The rest of Firmware/ — the .ctf this Manager release pairs with, the
+        # bootloader image, and the OpenOCD kit — is staged by a script rather
+        # than by copies listed here, because WHERE those files live depends on
+        # which tree this is. The private tree builds them under .pio/; the
+        # public repository ships the released binaries instead and has no
+        # PlatformIO at all, so the copies this replaced died on it with a bare
+        # file-not-found. See cmake/stage_firmware.cmake for the full reasoning,
+        # including why the choice is made here at build time and not at
+        # configure time.
+        COMMAND ${CMAKE_COMMAND}
+                -D "FIRMWARE_DIR=${FIRMWARE_DIR}"
+                -D "DEPLOY_DIR=${DEPLOY_DIR}"
+                -D "FW_VERSION=${FW_VERSION}"
+                -D "PIO_PACKAGES=$ENV{USERPROFILE}/.platformio/packages"
+                -P "${CMAKE_SOURCE_DIR}/cmake/stage_firmware.cmake"
         DEPENDS CANTripleDeviceManager CANTripleInitialProgramming help_docs
         COMMENT "Deploying standalone build to deploy/"
         VERBATIM
