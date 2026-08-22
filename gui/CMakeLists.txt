@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.1.3 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.2.0 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -319,7 +319,9 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/model/device_mapper.h
     src/model/secure_file.cpp
     src/model/secure_file.h
+    src/model/config_file.cpp
     src/model/user_paths.cpp
+    src/model/config_file.h
     src/model/user_paths.h
     src/model/validation.cpp
     src/model/validation.h
@@ -543,6 +545,7 @@ qt_add_executable(test_roundtrip
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
     # THE DEVICE'S SCRIPT VERIFIER, here because device_mapper.cpp needs it and
@@ -586,6 +589,7 @@ qt_add_executable(test_firmware_link
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
     ${FIRMWARE_DIR}/src/engine_core.c
@@ -675,6 +679,7 @@ qt_add_executable(scriptc
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -698,6 +703,7 @@ qt_add_executable(test_script_compiler
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -727,6 +733,7 @@ qt_add_executable(test_script_sim
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -756,6 +763,7 @@ qt_add_executable(test_script_editor
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -798,6 +806,7 @@ qt_add_executable(test_help_access
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -828,6 +837,7 @@ qt_add_executable(test_channel_labels
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -850,6 +860,7 @@ qt_add_executable(ct3check
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -902,6 +913,7 @@ qt_add_executable(test_comms_multiselect
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -942,6 +954,7 @@ qt_add_executable(test_comms_template
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -982,6 +995,7 @@ qt_add_executable(test_script_examples
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -1009,6 +1023,7 @@ qt_add_executable(test_tables
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -1032,6 +1047,7 @@ qt_add_executable(test_lua
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )
@@ -1075,6 +1091,7 @@ qt_add_executable(test_protection
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
     src/model/secure_file.cpp
+    src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
 )

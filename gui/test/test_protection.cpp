@@ -65,6 +65,7 @@
 #include <functional>
 
 #include "../src/model/comms_types.h"
+#include "../src/model/config_file.h"
 #include "../src/model/configuration.h"
 #include "../src/model/device_mapper.h"
 #include "../src/protocol/wire_structs.h"
@@ -97,6 +98,20 @@ static constexpr int kLegacySchemaVersion = 13;
     } while (0)
 
 using namespace ct;
+
+// The body of a format-2 .ct3, for the checks that assert on what the writer
+// PUT IN THE FILE rather than on what a reload produces. Reading the file as
+// JSON is what these used to do and it no longer works: the body is sealed, and
+// going through the container is the only honest way to look at it. A round
+// trip through Configuration would prove something weaker — it cannot tell a
+// key that was written from one the loader defaulted.
+static QJsonObject configBodyOf(const QString &path)
+{
+    QByteArray plain;
+    if (!ct::readBinaryConfigFile(path, &plain, nullptr, nullptr))
+        return QJsonObject();
+    return QJsonDocument::fromJson(plain).object();
+}
 
 // The document's own section, by name, on one bus. A grant now names a SECTION —
 // bus, name and the messageKey it was proved against — rather than a bare string,
@@ -303,10 +318,7 @@ static void testJsonRoundTrip()
         const QString path = dir.filePath(QStringLiteral("tiers.ct3"));
         CHECK(cfg.saveToFile(path, &err));
 
-        QFile f(path);
-        CHECK(f.open(QIODevice::ReadOnly));
-        const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
-        f.close();
+        const QJsonObject root = configBodyOf(path);
         // The bump is not cosmetic. A shipped v13 build hard-refuses a v14 file;
         // without the bump it would open one, find no key it recognised, load a
         // Hidden message as ordinary and print its CAN ID and every bit position

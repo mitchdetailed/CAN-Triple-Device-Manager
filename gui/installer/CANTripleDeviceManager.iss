@@ -474,7 +474,7 @@ Type: files; Name: "{autodesktop}\CAN Triple Manager.lnk"
 ; the firmware payload, the OpenOCD kit -- keeps the default read-only ACL, so a
 ; writable folder here cannot become a way to replace something that gets
 ; loaded or run. Neither folder is on any DLL or executable search path, and
-; nothing in them is ever executed: a .ct3 is JSON and a .ct3t is an encrypted
+; nothing in them is ever executed: a .ct3 and a .ct3t are both encrypted
 ; blob, both parsed by this program's own readers.
 ;
 ; WHAT IT COSTS, stated rather than discovered: every account on the machine

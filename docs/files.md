@@ -1,22 +1,32 @@
 # Configuration Files (.ct3)
 
-One document — one configuration file. The document holds everything: buses, messages, channels, calculations, the fleet identity and the upload policy. There are two on-disk formats, and the difference between them is who can read the bytes.
+One document — one configuration file. The document holds everything: buses, messages, channels, calculations, the fleet identity and the upload policy. There are two on-disk formats, and both are binary.
 
 <table>
 <tr><th>Format</th><th>Written by</th><th>What it is</th></tr>
 <tr><td><b>.ct3</b></td><td>File → Save / Save As…</td>
-<td>Indented JSON. Every CAN ID, bit layout and scaling factor is legible in
-any text editor.</td></tr>
+<td>A short readable header — the format, the schema and the version that wrote
+it — followed by the document as an encrypted binary body.</td></tr>
 <tr><td><b>.ct3s</b></td><td>File → Save Secure Config…</td>
-<td>An opaque, encrypted binary container of the same document, for shipping
-a configuration whose protocol detail must stay unreadable.</td></tr>
+<td>The same container with no readable header, plus the two things a .ct3 does
+not have: concealment that survives the file, and an optional password.</td></tr>
 </table>
 
-> **Warning:** A plain .ct3 contains every field in clear JSON, and nothing in it is signed. Marking a message **Read Only**, **Hidden** or **Protect Communication** only stops *this application* from displaying or editing it — none of the three survives a text editor, which reads the protocol straight out of the file and can delete the marking outright. None of them survives a different serial tool talking to the device either, because the device enforces none of them. Only Save Secure Config… makes the bytes themselves unreadable. See [Marking a message](communications.md#marking).
+**Configurations saved before this version were indented JSON**, and they still open normally — there is nothing to convert and nothing to do. The first time you save one it is written in the new format. Going back is not offered.
+
+<a id="whatbinary"></a>
+
+## What "binary" does and does not mean
+
+It means the obvious, ordinary thing: your CAN IDs, bit layouts, scaling factors and channel names are no longer sitting in a file that any text editor opens and any drive-wide text search finds. That was the old behaviour and it surprised people.
+
+> **Warning:** It is **not** a protection feature, and it should never be described to a customer as one. The key that unscrambles a .ct3 travels inside the .ct3, so it defeats Notepad, a text search and any tool that does not implement the format — and it does not defeat somebody determined to pull the format apart. If a configuration genuinely must not be read, use **Save Secure Config…** with **Require access password for use**, which is the only thing here that cannot be opened without a secret the file does not contain.
+
+> **Warning:** A .ct3 still confers no concealment. Marking a message **Read Only**, **Hidden** or **Protect Communication** stops *this application* from displaying or editing it, and opening a .ct3 gives all of it back to whoever opened the file. None of the three survives a different serial tool talking to the device either, because the device enforces none of them. A .ct3s is what carries the marking across to somebody else's machine. See [Marking a message](communications.md#marking).
 
 ## Opening files
 
-**File → Open…** offers both formats in one filter ("CAN Triple Configurations (\*.ct3 \*.ct3s)"). The program decides which reader to use from the file's magic bytes, not its extension, so a renamed file still opens correctly and a .ct3s can never be misparsed as JSON.
+**File → Open…** offers both formats in one filter ("CAN Triple Configurations (\*.ct3 \*.ct3s)"). The program decides which reader to use from the first bytes of the file, not from its extension, so a renamed file still opens correctly, an older JSON .ct3 is recognised for what it is, and a .ct3s is never fed to the wrong reader.
 
 Two kinds of file ask for a password before they open:
 - A **.ct3s saved with "Require access password for use"** prompts for its Edit Protected Comms password.
@@ -29,8 +39,8 @@ In both cases the prompt appears *before* the current document is touched — ca
 **File → Recent Files** keeps the last 8 files you opened or saved, most recent first, with the full path shown as a tooltip. Opening one behaves exactly like Open…, including the password handling. The submenu is disabled while the list is empty.
 
 ## Saving
-- **Save** writes back to the file's own path *in the format the file already has*. A secure .ct3s is never silently rewritten as legible JSON just because Save was the quick path.
-- **Save As…** always writes a plain .ct3, whatever the document came from. This is deliberate: Save As… is how you deliberately produce a legible copy, and Save Secure Config… is its counterpart. A name typed without an extension gets ".ct3" appended.
+- **Save** writes back to the file's own path *in the format the file already has*. A secure .ct3s is never silently downgraded to a .ct3 just because Save was the quick path — that would drop its concealment and its password. An older JSON .ct3 is the one thing Save does change: it comes back in the current format.
+- **Save As…** always writes a plain .ct3, whatever the document came from. This is deliberate: Save As… is how you produce an ordinary working copy, and Save Secure Config… is its counterpart for one that has to keep its concealment. A name typed without an extension gets ".ct3" appended.
 - **Save Secure Config…** always writes a .ct3s (its file dialog offers only "CAN Triple Secure Configurations (\*.ct3s)"), and appends ".ct3s" to an extensionless name.
 
 Closing the program, File → New and File → Open… all ask about unsaved changes first ("The configuration has unsaved changes. Do you want to save them?" — Save / Discard / Cancel).
@@ -56,6 +66,6 @@ Refusing is deliberate, and the reason is worth knowing: a setting an older prog
 ## What the file carries besides the configuration
 - The **fleet identity and upload policy** — which fleet the file is for and how strictly a device must match before Upload Configuration will install it. See [Fleet Identity &amp; Access Keys](fleet-identity.md).
 - An **access verifier** for the Edit Protected Comms password, so the program can check a typed password offline. It cannot be turned back into the key that opens hardware, so a file lying around leaks nothing usable.
-- In a .ct3s only: the embedded comms key that lets a customer's copy satisfy a device's protected-comms gate without them ever typing the password. The fleet key is written only into the encrypted .ct3s body, never into plain JSON.
+- In a .ct3s only: the embedded comms key that lets a customer's copy satisfy a device's protected-comms gate without them ever typing the password, and the fleet key. Both are kept out of a .ct3 on purpose. A .ct3 is scrambled but its key rides along inside it, so it is the wrong place for the fleet's only real secret — and a .ct3 is the file that gets mailed around without much thought, which is the other half of the reason.
 
 To install a .ct3s on a device without ever displaying its contents, use **Online → Send Secure Configuration…** or **Online → Upload Configuration…** — see [Online: Send, Get &amp; Flash](online.md).

@@ -1,14 +1,25 @@
 // The .ct3s container — "File > Save Secure Config".
 //
-// A .ct3 is indented JSON: every CAN ID, bit layout and scaling factor is
-// legible in Notepad, and marking a message Read Only, Hidden or Protected only
-// stops THIS APPLICATION from displaying and editing it. All three tiers are
-// conventions of this app — a text editor defeats them on a plain .ct3, and so
-// does any other serial tool talking to the device, which as of 2.3.0 enforces
-// nothing about message protection at all. That is fine for a configuration you
-// own and useless for one you ship to a customer. A .ct3s is the same document
-// as an opaque binary blob, and it is the only thing here that makes the bytes
-// themselves unreadable.
+// Marking a message Read Only, Hidden or Protected stops THIS APPLICATION from
+// displaying and editing it. All three tiers are conventions of this app: any
+// other serial tool talking to the device defeats them, and the device itself
+// enforces nothing about message protection at all. That is fine for a
+// configuration you own and useless for one you ship to a customer, which is
+// what a .ct3s is for.
+//
+// WHAT A .ct3s STILL ADDS OVER A .ct3, now that both are opaque. As of format 2
+// a plain .ct3 is this same sealed container behind a readable preamble (see
+// config_file.h), so "the bytes are unreadable" is no longer the difference
+// between them. What remains is:
+//
+//   - Concealment SURVIVES the round trip. Open a .ct3s and its Hidden and
+//     Protected messages stay concealed in the UI; open a .ct3 and everything
+//     in it is yours to read and edit. That is the difference that matters to
+//     someone shipping a configuration to a customer, and it is a property of
+//     how the document is treated, not of how the file is encoded.
+//   - The embedded Edit Protected Comms key, so a customer's copy can satisfy
+//     the device's protected-comms gate without them ever typing the password.
+//   - The password mode below, which a .ct3 has no equivalent of at all.
 //
 // ---------------------------------------------------------------------------
 // What it actually protects against, and what it does not
@@ -156,6 +167,18 @@ bool peekSecureFile(const QString &path, SecureFileInfo *out, QString *error = n
 // Write `plainBody` (the compact JSON body a .ct3 would carry) as a .ct3s.
 bool writeSecureFile(const QString &path, const QByteArray &plainBody,
                      const SecureSaveOptions &options, QString *error = nullptr);
+
+// THE CONTAINER WITHOUT THE FILE. Everything above and below works on a path,
+// because a .ct3s IS the container and starts at byte zero. A .ct3 puts the
+// same bytes after a readable preamble, so it needs the container as a buffer
+// rather than as a file — and the one thing that must not happen is a second
+// implementation of the sealing, drifting against this one.
+//
+// writeSecureFile and readSecureFile are thin wrappers over these two.
+bool sealSecureBlob(const QByteArray &plainBody, const SecureSaveOptions &options,
+                    QByteArray *blobOut, QString *error = nullptr);
+bool openSecureBlob(const QByteArray &blob, const QString &password, QByteArray *plainBody,
+                    SecureFileInfo *info, QString *error = nullptr);
 
 // Recover the body. `password` is ignored unless the file requires one, and a
 // wrong one fails the payload's integrity check rather than yielding garbage —

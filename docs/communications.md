@@ -179,7 +179,7 @@ You can no longer *create* a marking without a password either: the section edit
 
 ### What these levels actually are
 
-> **Warning:** **All three are conventions of this application.** Nothing on the device enforces any of them. A CAN Triple hands its full message table to anything that speaks its protocol and accepts a write over any record, so any other serial tool reads a marked message in full and overwrites it freely. A plain `.ct3` is legible JSON with nothing signed in it, so a text editor changes or deletes a marking in seconds. The only thing that makes the bytes themselves unreadable is **File &gt; Save Secure Config…** (`.ct3s`). If a protocol must stay secret from a determined reader, do not ship it to them.
+> **Warning:** **All three are conventions of this application.** Nothing on the device enforces any of them. A CAN Triple hands its full message table to anything that speaks its protocol and accepts a write over any record, so any other serial tool reads a marked message in full and overwrites it freely. A plain `.ct3` is scrambled rather than legible, which stops a text editor reading a marking straight out of it — but the key to a .ct3 travels inside the .ct3, and opening one in this program gives back every marked message in full. The marking that survives being handed to somebody else is **File &gt; Save Secure Config…** (`.ct3s`). If a protocol must stay secret from a determined reader, do not ship it to them.
 
 > **Warning:** **Read Only is accident prevention, not security.** The viewer sees every field of the message and may remove it, so removing it and retyping what they read reproduces the message without the password. Treat it as a guard rail against an accidental edit and nothing more.
 

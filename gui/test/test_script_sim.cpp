@@ -32,6 +32,7 @@
 #include <cstring>
 
 #include "../src/model/channel.h"
+#include "../src/model/config_file.h"
 #include "../src/model/configuration.h"
 #include "../src/model/device_mapper.h"
 #include "../src/scripting/script_compiler.h"
@@ -52,6 +53,18 @@ static int fails = 0;
             ++fails;                                                                 \
         }                                                                            \
     } while (0)
+
+// The body of a format-2 .ct3, for the checks that assert on what the writer
+// PUT IN THE FILE rather than on what a reload produces. Reading the file as
+// JSON is what this used to do and it no longer works: the body is sealed, and
+// going through the container is the only honest way to look at it.
+static QJsonObject configBodyOf(const QString &path)
+{
+    QByteArray plain;
+    if (!ct::readBinaryConfigFile(path, &plain, nullptr, nullptr))
+        return QJsonObject();
+    return QJsonDocument::fromJson(plain).object();
+}
 
 #define CHECK_NEAR(a, b)                                                             \
     do {                                                                             \
@@ -662,10 +675,7 @@ void testACorruptImageIsRefusedBeforeTheSendClearsTheDevice()
 
     // Corrupt the stored image the way a damaged file would: same length, wrong
     // bytes, so nothing but the verifier can tell.
-    QFile f(path);
-    CHECK(f.open(QIODevice::ReadOnly));
-    QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
-    f.close();
+    QJsonObject root = configBodyOf(path);
     QByteArray stored =
         QByteArray::fromBase64(root.value(QStringLiteral("scriptBytecode")).toString().toLatin1());
     CHECK(stored == image);
@@ -677,9 +687,14 @@ void testACorruptImageIsRefusedBeforeTheSendClearsTheDevice()
     }
     stored[int(sizeof(ScriptHeader)) + 3] = char(stored.at(int(sizeof(ScriptHeader)) + 3) ^ 0x5A);
     root[QStringLiteral("scriptBytecode")] = QString::fromLatin1(stored.toBase64());
-    CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
-    f.write(QJsonDocument(root).toJson());
-    f.close();
+    // Written back through the container, not as raw JSON. Re-sealing keeps
+    // this a test of the CURRENT format: a rewrite as JSON would still load,
+    // because format 1 is still read, and the case would have quietly stopped
+    // covering the writer it was aimed at.
+    CHECK(ct::writeBinaryConfigFile(path,
+                                    QJsonDocument(root).toJson(QJsonDocument::Compact),
+                                    root.value(QStringLiteral("fileVersion")).toInt(),
+                                    QStringLiteral("test"), &error));
 
     Configuration loaded;
     CHECK(loaded.loadFromFile(path, &error));

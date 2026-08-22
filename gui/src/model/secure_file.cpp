@@ -405,8 +405,8 @@ bool peekSecureFile(const QString &path, SecureFileInfo *out, QString *error)
     return true;
 }
 
-bool writeSecureFile(const QString &path, const QByteArray &plainBody,
-                     const SecureSaveOptions &options, QString *error)
+bool sealSecureBlob(const QByteArray &plainBody, const SecureSaveOptions &options,
+                    QByteArray *blobOut, QString *error)
 {
     const auto fail = [&](const QString &why) {
         if (error)
@@ -510,20 +510,59 @@ bool writeSecureFile(const QString &path, const QByteArray &plainBody,
     const QByteArray padding = randomBytes(kPaddingBytes);
     std::memcpy(header.data() + kOffPadding, padding.constData(), size_t(kPaddingBytes));
 
-    // QSaveFile rather than QFile: a half-written .ct3s is not a partly-readable
-    // configuration, it is an unopenable one, and overwriting a good file with a
-    // truncated one is the way somebody loses a config to a full disk.
+    if (blobOut)
+        *blobOut = header + carrier;
+    return true;
+}
+
+bool writeSecureFile(const QString &path, const QByteArray &plainBody,
+                     const SecureSaveOptions &options, QString *error)
+{
+    QByteArray blob;
+    if (!sealSecureBlob(plainBody, options, &blob, error))
+        return false;
+
+    // QSaveFile rather than QFile: a half-written container is not a
+    // partly-readable configuration, it is an unopenable one, and overwriting a
+    // good file with a truncated one is the way somebody loses a config to a
+    // full disk.
+    //
+    // config_file.cpp deliberately does NOT follow this for a .ct3, even though
+    // it writes the same container. A .ct3s is written by an explicit Save
+    // Secure Config to a file the user just named; a .ct3 is written by Ctrl+S
+    // over a file that may well be sitting in a synced folder, and QSaveFile's
+    // rename cannot replace a target another process holds open. The trade is
+    // decided by which failure is common for that path, not by the format.
     QSaveFile f(path);
-    if (!f.open(QIODevice::WriteOnly))
-        return fail(f.errorString());
-    f.write(header);
-    f.write(carrier);
-    if (!f.commit())
-        return fail(f.errorString());
+    if (!f.open(QIODevice::WriteOnly)) {
+        if (error)
+            *error = f.errorString();
+        return false;
+    }
+    f.write(blob);
+    if (!f.commit()) {
+        if (error)
+            *error = f.errorString();
+        return false;
+    }
     return true;
 }
 
 bool readSecureFile(const QString &path, const QString &password, QByteArray *plainBody,
+                    SecureFileInfo *info, QString *error)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (error)
+            *error = f.errorString();
+        return false;
+    }
+    const QByteArray raw = f.readAll();
+    f.close();
+    return openSecureBlob(raw, password, plainBody, info, error);
+}
+
+bool openSecureBlob(const QByteArray &raw, const QString &password, QByteArray *plainBody,
                     SecureFileInfo *info, QString *error)
 {
     const auto fail = [&](const QString &why) {
@@ -535,12 +574,6 @@ bool readSecureFile(const QString &path, const QString &password, QByteArray *pl
         return fail(QStringLiteral("This secure configuration file is damaged and cannot be "
                                    "opened."));
     };
-
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
-        return fail(f.errorString());
-    const QByteArray raw = f.readAll();
-    f.close();
 
     Header h;
     if (!parseHeader(raw, &h, error))

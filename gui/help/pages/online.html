@@ -221,10 +221,12 @@ answer is to say so plainly, not to publish the message.</p>
 are conventions of this program.</b> The device enforces nothing about them: it
 holds those fields and hands them to anything that speaks its protocol, so any
 other serial tool reads a marked message in full and writes over it freely. A
-plain <code>.ct3</code> is legible JSON, so a text editor defeats all three
-there too. The one promise that is actually kept is a <b>.ct3s</b> package,
-which makes the bytes themselves unreadable. If the protocol must stay secret
-from a determined reader, the answer is not to ship it to them.</p>
+plain <code>.ct3</code> is scrambled rather than legible, so a text editor no
+longer defeats them there — but this program does, because a .ct3 carries its
+own key and opening one reveals everything in it. The one promise that is
+actually kept is a <b>.ct3s</b> package, which keeps the markings closed on
+somebody else's machine. If the protocol must stay secret from a determined
+reader, the answer is not to ship it to them.</p>
 
 <p class="note">The device could have been made to refuse overwriting or
 erasing a marked message without its password, and deliberately was not. Such

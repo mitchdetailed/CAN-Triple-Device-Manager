@@ -9,6 +9,7 @@
 
 #include "../protocol/wire_structs.h" // TABLE_2X16_SITES, MSGPROT_*
 #include "comms_template.h"          // kCommsTemplateFileType - the .ct3t marker
+#include "config_file.h"             // the format-2 .ct3 container
 
 // The application version, stamped into every saved file as `writtenBy`. Only
 // the application target defines it; the test binaries link this translation
@@ -1787,6 +1788,26 @@ bool Configuration::peekFile(const QString &path, FilePeek *out, QString *error)
         // .ct3s opens without a password and stays concealed either way, and a
         // password-protected one is already covered by requiresPassword.
         peek.commsProtected = false;
+    } else if (isBinaryConfigFile(path)) {
+        // FORMAT 2. Neither secure nor password-bearing: a .ct3 has never had a
+        // password and gaining a container did not give it one, so both flags
+        // stay false and Open goes straight through without a prompt.
+        //
+        // The verifier set costs a decrypt to reach, because it lives in the
+        // sealed body where it belongs. Paid rather than skipped: the JSON
+        // wrapper answered this question, and a peek that quietly stopped
+        // answering it would be a difference between the two formats that
+        // nothing announced and nothing tested.
+        QByteArray plain;
+        if (!readBinaryConfigFile(path, &plain, nullptr, error))
+            return false;
+        const QJsonDocument bodyDoc = QJsonDocument::fromJson(plain);
+        plain.fill('\0');
+        peek.commsProtected = AccessVerifierSet::fromJson(
+                                  bodyDoc.object()
+                                      .value(QStringLiteral("accessVerifiers"))
+                                      .toObject())
+                                  .isSet(AccessFunction::EditProtectedComms);
     } else {
         QJsonObject root;
         if (!readWrapper(path, &root, error))
@@ -1873,6 +1894,43 @@ bool Configuration::loadFromFile(const QString &path, QString *error, const QStr
         secureOptions.password = info.requiresPassword ? password : QString();
         secureOptions.embeddedCommsKey = info.embeddedCommsKey;
         embeddedKey = info.embeddedCommsKey;
+    } else if (isBinaryConfigFile(path)) {
+        // FORMAT 2 — the sealed .ct3. What comes out of the container is the
+        // same object the JSON wrapper used to be, fileType and fileVersion
+        // included, so everything below this point reads it without caring
+        // which of the three routes produced it.
+        QByteArray plain;
+        if (!readBinaryConfigFile(path, &plain, nullptr, error))
+            return false;
+        const QJsonDocument bodyDoc = QJsonDocument::fromJson(plain);
+        plain.fill('\0');
+        if (!bodyDoc.isObject()) {
+            if (error)
+                *error =
+                    QStringLiteral("This configuration file is damaged and cannot be opened.");
+            return false;
+        }
+        body = bodyDoc.object();
+        // The marker is REQUIRED here, unlike on the .ct3s path where demanding
+        // one would refuse every secure file already written. A format-2 body
+        // has carried fileType since the first one existed, so anything sealed
+        // behind this preamble without it is not a configuration.
+        if (body.value(QStringLiteral("fileType")).toString()
+            != QLatin1String("CANTripleConfig")) {
+            if (error)
+                *error = QStringLiteral("This file is not a CAN Triple configuration.");
+            return false;
+        }
+        // The preamble says a schema too, and it is deliberately not consulted:
+        // it is cleartext and editable, this one is covered by the payload's
+        // tag, and two sources for one answer is how they come to disagree.
+        fileVersion = body.value(QStringLiteral("fileVersion")).toInt(1);
+        if (fileVersion > kConfigSchemaVersion) {
+            if (error)
+                *error = QStringLiteral("This file was saved by a newer version of "
+                                        "CAN Triple Device Manager and can't be opened.");
+            return false;
+        }
     } else {
         QJsonObject root;
         if (!readWrapper(path, &root, error))
@@ -2101,15 +2159,30 @@ namespace {
 // is structurally incapable of writing.
 //
 // FleetIdentity::fleetKey is the fleet secret — the thing a device proves it
-// holds before it will accept an update — and a plain .ct3 is a text file
-// people mail to each other. buildBody() therefore passes `false` to
+// holds before it will accept an update. buildBody() passes `false` to
 // FleetIdentity::toJson as a literal, so no caller, present or future, can talk
 // it into emitting the key. Only this function can, and the only place it is
-// called is the save path that ends inside an encrypted container.
+// called is saveSecureToFile.
 //
-// The obvious alternative — a bool parameter on buildBody() — was rejected on
-// purpose. It would have been shorter and it would have put the fleet secret
-// one mistyped argument away from a file anybody can open in Notepad. This is a
+// THE ORIGINAL REASON WAS "a plain .ct3 is a text file people mail to each
+// other", AND THAT REASON IS GONE: as of format 2 a .ct3 is the same sealed
+// container a .ct3s is. The behaviour is kept anyway, on the two reasons that
+// survive, and they are weaker than the one they replace — worth saying so
+// rather than pretending the argument is as strong as it was.
+//
+//   - A .ct3 is scrambled, not secret. Its key travels inside it, exactly as a
+//     standard .ct3s's does, so neither is a vault; but a .ct3s is produced by
+//     a deliberate act through a dialog that says what it carries, and a .ct3
+//     is what gets attached to an email without much thought. The fleet's only
+//     secret belongs in the file somebody had to mean to create.
+//   - Nothing needs it there. A .ct3 is a working file; the fleet key matters
+//     when a configuration is handed to somebody who must deploy it, which is
+//     what a .ct3s is for.
+//
+// If that ever stops being convincing, the change is to call this from
+// saveToFile as well — not to loosen buildBody(). A bool parameter on
+// buildBody() was rejected on purpose: it would put the fleet secret one
+// mistyped argument away from every file the program writes, and that is a
 // mistake worth making impossible rather than merely unlikely.
 QJsonObject withFleetKey(QJsonObject body, const FleetIdentity &identity)
 {
@@ -2279,35 +2352,25 @@ bool Configuration::saveToFile(const QString &path, QString *error)
     for (auto it = body.constBegin(); it != body.constEnd(); ++it)
         root.insert(it.key(), it.value());
 
-    // The write must be PROVEN to have reached disk before this reports
-    // success. The bug this guards against: QFile buffers, and QFile::error()
-    // checked straight after write() returns NoError for anything the OS has
-    // merely queued — so on a full disk a small config would "save", the dirty
-    // flag would clear, and the user would be left with a truncated file and no
-    // warning, not even a prompt at exit. flush() forces the buffered write to
-    // succeed or fail HERE, where the failure can be returned; the caller then
-    // keeps the document dirty and the data is still safe in memory.
-    //
-    // Deliberately NOT QSaveFile (which the secure writer does use): its atomic
-    // write-beside-and-rename cannot replace a target another process holds
-    // open, and on Windows that routinely includes a .ct3 being synced by
-    // OneDrive/Dropbox or open in an editor — so it would trade this rare silent
-    // truncation for a common, surprising "Access is denied" on save. Failing
-    // loudly with the document still in hand is the right outcome here; a torn
-    // .ct3s is unreadable rather than merely stale, which is why the secure path
-    // makes the opposite trade.
-    const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Indented);
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly)) {
-        if (error)
-            *error = f.errorString();
+    // COMPACT, not indented. These bytes are the plaintext of a sealed
+    // container now, so indentation would pad the ciphertext without making
+    // anything legible — the same call saveSecureToFile and the template writer
+    // make, for the same reason.
+    QByteArray plain = QJsonDocument(root).toJson(QJsonDocument::Compact);
+    const bool written = writeBinaryConfigFile(path, plain, kConfigSchemaVersion,
+                                               QStringLiteral(CT_APP_VERSION), error);
+    // The body passed through this buffer on its way into the container; do not
+    // leave a legible copy of it in freed heap when the whole point of the
+    // format is that it is not lying around legible.
+    plain.fill('\0');
+    if (!written)
         return false;
-    }
-    if (f.write(json) != json.size() || !f.flush()) {
-        if (error)
-            *error = f.errorString();
-        return false;
-    }
+
+    // The write is still PROVEN to have reached disk before this returns, and
+    // it is still an in-place QFile write rather than an atomic replace, for
+    // the reason config_file.cpp sets out at length: a rename cannot overwrite
+    // a file OneDrive happens to have open, and that is a far commoner event
+    // than a full disk.
     m_filePath = path;
     // What is on disk is now legible JSON, so that is what this document is.
     // Choosing between the two formats — and in particular not downgrading a

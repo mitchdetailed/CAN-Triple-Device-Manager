@@ -358,18 +358,24 @@ public:
     };
     static bool peekFile(const QString &path, FilePeek *out, QString *error = nullptr);
 
-    // Reads either format; the magic decides, not the extension. `password` is
-    // used for a .ct3s that requires one and to reveal protected comms on load
-    // when it happens to be the right one; it is never required for a plain
-    // .ct3, which always opens.
+    // Reads ALL THREE shapes a configuration has ever had, and the first bytes
+    // of the file decide which — never the extension. A format-2 .ct3, a .ct3s,
+    // and the indented-JSON .ct3 that every release up to 1.1.3 wrote. That last
+    // one is not a compatibility afterthought: it is what is on users' disks.
+    //
+    // `password` is used for a .ct3s that requires one, for a pre-v8 .ct3 sealed
+    // under the retired Configuration Password, and to reveal protected comms on
+    // load when it happens to be the right one. It is never required for a .ct3
+    // of either format, which always opens.
     bool loadFromFile(const QString &path, QString *error = nullptr,
                       const QString &password = QString());
-    // Plain .ct3 — indented JSON, everything legible. Refuses while a KEYED
-    // section is concealed, for the reason saveSecureToFile does and then some:
-    // "everything legible" includes the protected messages, so a session that may
-    // not read them must not be the one that writes them out in the clear. See
-    // anyKeyedSectionConcealed() for why a keyless concealed section is not that
-    // case and does not refuse.
+    // Plain .ct3, format 2 — a readable preamble over a sealed body; see
+    // config_file.h. Refuses while a KEYED section is concealed, and the format
+    // change does NOT soften that: the bytes being opaque is not concealment,
+    // because opening the file in this program hands back every message in it.
+    // A session that may not read the protected messages must still not be the
+    // one that writes the file carrying them. See anyKeyedSectionConcealed() for
+    // why a keyless concealed section is not that case and does not refuse.
     bool saveToFile(const QString &path, QString *error = nullptr);
     // Binary .ct3s — see secure_file.h. Refuses while a KEYED section is
     // concealed: the body has to be assembled in full to be sealed, and a session

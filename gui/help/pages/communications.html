@@ -377,11 +377,12 @@ this release.</p>
 the device enforces any of them. A CAN Triple hands its full message table to
 anything that speaks its protocol and accepts a write over any record, so any
 other serial tool reads a marked message in full and overwrites it freely. A
-plain <code>.ct3</code> is legible JSON with nothing signed in it, so a text
-editor changes or deletes a marking in seconds. The only thing that makes the
-bytes themselves unreadable is <b>File &gt; Save Secure Config…</b>
-(<code>.ct3s</code>). If a protocol must stay secret from a determined reader,
-do not ship it to them.</p>
+plain <code>.ct3</code> is scrambled rather than legible, which stops a text
+editor reading a marking straight out of it — but the key to a .ct3 travels
+inside the .ct3, and opening one in this program gives back every marked
+message in full. The marking that survives being handed to somebody else is
+<b>File &gt; Save Secure Config…</b> (<code>.ct3s</code>). If a protocol must
+stay secret from a determined reader, do not ship it to them.</p>
 
 <p class="warn"><b>Read Only is accident prevention, not security.</b> The
 viewer sees every field of the message and may remove it, so removing it and

@@ -95,8 +95,9 @@ rules, 8 integrators, and
   permitted at every level** — in the dialog, from a script and on the device —
   because protecting a message protects its protocol, not its place in a
   configuration. All three are conventions of this application: the device
-  enforces none of them, and a plain `.ct3` is unsigned JSON, so only a `.ct3s`
-  makes the bytes unreadable.
+  enforces none of them, and a plain `.ct3` — scrambled though it now is —
+  carries its own key, so only a `.ct3s` keeps a marking closed on somebody
+  else's machine.
 - **Online → Fleet Identity…** — who a unit is (Vendor / Model / Serial Number /
   plus a fleet key it proves it holds) and which fleet a configuration
   is *for*. The device half is **read-only here on purpose: a unit's identity is
@@ -142,9 +143,11 @@ rules, 8 integrators, and
   Generates/From and Uses/For tables with the DBC extraction detail, compound
   Id[n] groups, calculations), incomplete channels, unused channels — with
   Print, Save PDF, and Save Text.
-- **File → Save Secure Config…** — writes the document as a binary `.ct3s`
-  instead of legible JSON, so a customer can deploy and update a configuration
-  without ever reading its CAN layout. Optionally wrapped under the Edit
+- **File → Save Secure Config…** — writes the document as a `.ct3s`, which
+  keeps Hidden and Protected messages concealed in the copy the customer opens,
+  so they can deploy and update a configuration without ever reading its CAN
+  layout. A plain `.ct3` is binary too, but confers no concealment.
+  Optionally wrapped under the Edit
   Protected Comms password, in which case the file will not open without it and
   there is no recovery. See `DESIGN.md` for the container format and an honest
   account of what each mode does and does not defeat.
@@ -201,9 +204,11 @@ Firmware: `pio run` (and `pio run -t upload`) inside `firmware/` — see
 - `FIRMWARE-NOTES.md` — firmware findings the GUI works around (flash sizing,
   unimplemented commands, Motorola extraction, UART burst limits…), with
   suggested fixes.
-- Configurations are saved as JSON (`*.ct3`), or as the binary **`*.ct3s`**
-  (File → Save Secure Config…) when the CAN protocol inside them is not for the
-  reader to see — same document, opaque bytes, optionally unopenable without the
+- Configurations are saved as **`*.ct3`** — a short readable header giving the
+  format, schema and writing version, then an encrypted binary body — or as
+  **`*.ct3s`** (File → Save Secure Config…) when the CAN protocol inside them is
+  not for the reader to see — same document, concealment that survives the file,
+  optionally unopenable without the
   Edit Protected Comms password. Open… picks the reader from the file's contents,
   not its extension. With the firmware in `firmware/` the device reloads its
   saved config from flash at every power-up; the PC file remains the editable

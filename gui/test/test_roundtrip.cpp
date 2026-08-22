@@ -25,6 +25,7 @@
 #include "../src/model/configuration.h"
 #include "../src/model/dbc_import.h"
 #include "../src/model/device_mapper.h"
+#include "../src/model/config_file.h"
 #include "../src/model/secure_file.h"
 #include "../src/model/validation.h"
 #include "../src/protocol/asc_log.h"
@@ -64,6 +65,20 @@ static constexpr int kFutureSchemaProbe = kCurrentSchemaVersion + 1;
             ++failures;                                                                          \
         }                                                                                        \
     } while (0)
+
+// The body of a format-2 .ct3, for the checks that assert on what the writer
+// PUT IN THE FILE rather than on what a reload produces. Reading the file as
+// JSON is what these used to do and it no longer works: the body is sealed, and
+// going through the container is the only honest way to look at it. A round
+// trip through Configuration would prove something weaker — it cannot tell a
+// key that was written from one the loader defaulted.
+static QJsonObject configBodyOf(const QString &path)
+{
+    QByteArray plain;
+    if (!ct::readBinaryConfigFile(path, &plain, nullptr, nullptr))
+        return QJsonObject();
+    return QJsonDocument::fromJson(plain).object();
+}
 
 // Give a condition the Reset that makes it behave like the level these tests
 // were written against: the exact inverse of its Set, which is also what the
@@ -699,10 +714,7 @@ static void testConfigJson()
         const QString resavedPath = resavedFile.fileName();
         resavedFile.close();
         CHECK(legacy.saveToFile(resavedPath, &error));
-        QFile rf(resavedPath);
-        CHECK(rf.open(QIODevice::ReadOnly));
-        const QJsonObject resaved = QJsonDocument::fromJson(rf.readAll()).object();
-        rf.close();
+        const QJsonObject resaved = configBodyOf(resavedPath);
         CHECK(resaved.contains(QStringLiteral("tables2x16")));
         CHECK(!resaved.contains(QStringLiteral("tables2x8")));
         CHECK(resaved["tables2x16"].toArray().size() == 1);
@@ -834,10 +846,7 @@ static void testConfigJson()
         const QString p12 = f12.fileName();
         f12.close();
         CHECK(migrated.saveToFile(p12, &error));
-        QFile r12(p12);
-        CHECK(r12.open(QIODevice::ReadOnly));
-        const QJsonObject saved = QJsonDocument::fromJson(r12.readAll()).object();
-        r12.close();
+        const QJsonObject saved = configBodyOf(p12);
         CHECK(saved["fileVersion"].toInt() == kCurrentSchemaVersion);
         CHECK(saved.contains(QStringLiteral("tables8x8")));
         CHECK(!saved.contains(QStringLiteral("tables4x4")));
@@ -4987,10 +4996,7 @@ static void testRetainedScriptDocument()
     const QString plain = dir.filePath(QStringLiteral("retained.ct3"));
     CHECK(cfg.saveToFile(plain, &error));
 
-    QFile pf(plain);
-    CHECK(pf.open(QIODevice::ReadOnly));
-    const QJsonObject root = QJsonDocument::fromJson(pf.readAll()).object();
-    pf.close();
+    const QJsonObject root = configBodyOf(plain);
     // The bump is the point: a shipped 2.3.2 build knows nothing of
     // "scriptBytecode", would load this document as scriptless, and the next
     // Send would STRIP THE SCRIPT off the unit. The version guard refuses the
@@ -5025,10 +5031,7 @@ static void testRetainedScriptDocument()
     sourceCfg.setScriptSource(QStringLiteral("function on_tick()\nend\n"));
     const QString sourcePath = dir.filePath(QStringLiteral("source.ct3"));
     CHECK(sourceCfg.saveToFile(sourcePath, &error));
-    QFile sf(sourcePath);
-    CHECK(sf.open(QIODevice::ReadOnly));
-    const QJsonObject sourceRoot = QJsonDocument::fromJson(sf.readAll()).object();
-    sf.close();
+    const QJsonObject sourceRoot = configBodyOf(sourcePath);
     CHECK(sourceRoot.contains(QStringLiteral("scriptSource")));
     CHECK(!sourceRoot.contains(QStringLiteral("scriptBytecode")));
 
@@ -5064,9 +5067,248 @@ static void testRetainedScriptDocument()
     CHECK(oldLoaded.scriptBytecode().isEmpty());
 }
 
+
+// ---------------------------------------------------------------- format 2
+//
+// The .ct3 container itself: the preamble, the refusals, and — the case that
+// matters most to anyone upgrading — that every format-1 file still opens.
+//
+// v1.1.3 shipped JSON .ct3 files to real users. If this function ever starts
+// failing, those people cannot open their configurations, so it is written to
+// build the old format by hand rather than by asking any current code to
+// produce it: a migration test whose "old" input comes from the new writer
+// tests nothing.
+static void testBinaryConfigFormat()
+{
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    QString error;
+
+    Configuration cfg;
+    cfg.setConfigTitle(QStringLiteral("Format Two"));
+    Channel ch;
+    ch.name = QStringLiteral("Distinctive Channel Name");
+    ch.unit = QStringLiteral("rpm");
+    ch.quantity = QStringLiteral("Rotational Speed");
+    ch.dataType = QStringLiteral("u16");
+    cfg.catalog().addOrUpdateUserChannel(ch);
+
+    const QString path = dir.filePath(QStringLiteral("fmt2.ct3"));
+    CHECK(cfg.saveToFile(path, &error));
+
+    // ---- the preamble says what it should, and is readable without the key --
+    QFile f(path);
+    CHECK(f.open(QIODevice::ReadOnly));
+    const QByteArray raw = f.readAll();
+    f.close();
+
+    CHECK(raw.startsWith(ct::kConfigPreambleMagic));
+    CHECK(raw.size() > ct::kConfigPreambleBytes);
+    const QByteArray preamble = raw.left(ct::kConfigPreambleBytes);
+    CHECK(preamble.contains("format 2\r\n"));
+    CHECK(preamble.contains("schema "));
+    CHECK(preamble.contains("written-by "));
+    // DOS end-of-file, so `type` at a command prompt stops here instead of
+    // spraying ciphertext over the terminal.
+    CHECK(preamble.contains('\x1a'));
+    // Everything after the preamble is the sealed container, which begins with
+    // the .ct3s magic — the same bytes, deliberately, because it is the same
+    // container and there is only one implementation of it.
+    CHECK(!raw.mid(ct::kConfigPreambleBytes).isEmpty());
+
+    ct::ConfigFileInfo info;
+    CHECK(ct::peekBinaryConfigFile(path, &info, &error));
+    CHECK(info.formatVersion == ct::kConfigFileFormatVersion);
+    CHECK(info.schemaVersion == kCurrentSchemaVersion);
+    CHECK(!info.writtenBy.isEmpty());
+
+    // The channel name is in the document and not in the file.
+    Configuration back;
+    CHECK(back.loadFromFile(path, &error));
+    CHECK(back.configTitle() == QStringLiteral("Format Two"));
+    CHECK(back.catalog().findByName(QStringLiteral("Distinctive Channel Name")).isValid());
+    CHECK(!raw.contains("Distinctive Channel Name"));
+
+    // ---- routing: a .ct3 is not a .ct3s and neither is mistaken for the other
+    CHECK(ct::isBinaryConfigFile(path));
+    CHECK(!ct::isSecureFile(path));
+    Configuration::FilePeek peek;
+    CHECK(Configuration::peekFile(path, &peek, &error));
+    CHECK(!peek.secure);
+    CHECK(!peek.requiresPassword); // a .ct3 has never needed one and still does not
+
+    const QString securePath = dir.filePath(QStringLiteral("also.ct3s"));
+    SecureSaveOptions opts;
+    CHECK(cfg.saveSecureToFile(securePath, opts, &error));
+    CHECK(ct::isSecureFile(securePath));
+    CHECK(!ct::isBinaryConfigFile(securePath));
+
+    // ---- a damaged body is refused WHOLE, not half-parsed -------------------
+    //
+    // Aimed at the SALT rather than at a byte picked by position, and the first
+    // draft of this test got that wrong in an instructive way: most of the
+    // carrier is unclaimed CSPRNG noise, so a bit flipped at the midpoint has
+    // roughly even odds of landing somewhere that carries nothing, and the file
+    // opens — correctly, because none of its content changed. A tamper test
+    // that passes at random is worse than none.
+    //
+    // The salt is material by construction: it seeds both the chunk placement
+    // and the wrap mask, so changing it moves every chunk and produces a wrong
+    // file key. It sits at offset 12 of the container's own header, which
+    // begins where the preamble ends.
+    const auto writeFile = [&](const QString &name, const QByteArray &bytes) {
+        const QString p = dir.filePath(name);
+        QFile out(p);
+        CHECK(out.open(QIODevice::WriteOnly));
+        out.write(bytes);
+        out.close();
+        return p;
+    };
+    {
+        QByteArray torn = raw;
+        const int saltByte = ct::kConfigPreambleBytes + 12;
+        torn[saltByte] = char(torn.at(saltByte) ^ 0x40);
+        const QString tornPath = writeFile(QStringLiteral("torn.ct3"), torn);
+
+        Configuration ruined;
+        QString why;
+        CHECK(!ruined.loadFromFile(tornPath, &why));
+        CHECK(!why.isEmpty());
+        // Still recognisably a configuration file, so the message is about
+        // damage rather than about the file being some other thing entirely.
+        CHECK(ct::isBinaryConfigFile(tornPath));
+    }
+
+    // NOT tested here, deliberately: that a byte changed in a slot the
+    // container never claimed leaves the file openable. It is true, and it is
+    // the reason the case above had to aim at the salt — but there is no slot a
+    // test can name as unclaimed without reimplementing buildPlacement, because
+    // the placement is a shuffle and material can land in the last slot as
+    // readily as the first. An attempt at it here picked the final sixteen
+    // bytes and failed, which is the flaky test this note exists to stop
+    // somebody rewriting.
+
+    // ---- truncation is refused too -----------------------------------------
+    {
+        const QString cutPath = dir.filePath(QStringLiteral("cut.ct3"));
+        QFile cf(cutPath);
+        CHECK(cf.open(QIODevice::WriteOnly));
+        cf.write(raw.left(raw.size() / 2));
+        cf.close();
+        Configuration ruined;
+        QString why;
+        CHECK(!ruined.loadFromFile(cutPath, &why));
+    }
+
+    // ---- a preamble claiming the future is refused before anything decrypts -
+    {
+        QByteArray future = raw;
+        future.replace("format 2\r\n", "format 9\r\n");
+        const QString futurePath = dir.filePath(QStringLiteral("future.ct3"));
+        QFile ff(futurePath);
+        CHECK(ff.open(QIODevice::WriteOnly));
+        ff.write(future);
+        ff.close();
+        Configuration ruined;
+        QString why;
+        CHECK(!ruined.loadFromFile(futurePath, &why));
+        CHECK(why.contains(QLatin1String("newer version")));
+    }
+
+    // ---- FORMAT 1 STILL OPENS ----------------------------------------------
+    //
+    // Format 1 was an INDENTED JSON object: fileType, fileVersion, writtenBy,
+    // and then the body's own keys at the top level. The body is unchanged
+    // between the two formats by design — only the container moved — so it is
+    // taken from the real writer here and re-wrapped, rather than re-spelled by
+    // hand. Re-spelling it is what the first draft did, and it tested the
+    // spelling: it named the catalog "channels" when the key is "userChannels",
+    // so the channel silently did not survive a load that otherwise looked
+    // fine. The hand-built old BODIES that pin the schema migrations belong to
+    // those migrations' own tests and stay there.
+    {
+        QJsonObject legacy = configBodyOf(path);
+        CHECK(legacy.value(QStringLiteral("fileType")).toString()
+              == QLatin1String("CANTripleConfig"));
+        legacy[QStringLiteral("writtenBy")] = QStringLiteral("1.1.3");
+        legacy[QStringLiteral("configTitle")] = QStringLiteral("Written By The Old Build");
+
+        const QString legacyPath = dir.filePath(QStringLiteral("format1.ct3"));
+        QFile lf(legacyPath);
+        CHECK(lf.open(QIODevice::WriteOnly));
+        lf.write(QJsonDocument(legacy).toJson(QJsonDocument::Indented));
+        lf.close();
+        // Legible, which is the whole reason this is being left behind.
+        QFile check1(legacyPath);
+        CHECK(check1.open(QIODevice::ReadOnly));
+        CHECK(check1.readAll().contains("Distinctive Channel Name"));
+        check1.close();
+
+        // Not mistaken for either binary format on the way in.
+        CHECK(!ct::isBinaryConfigFile(legacyPath));
+        CHECK(!ct::isSecureFile(legacyPath));
+        Configuration::FilePeek oldPeek;
+        CHECK(Configuration::peekFile(legacyPath, &oldPeek, &error));
+        CHECK(!oldPeek.secure);
+        CHECK(!oldPeek.requiresPassword);
+
+        Configuration opened;
+        CHECK(opened.loadFromFile(legacyPath, &error));
+        CHECK(opened.configTitle() == QStringLiteral("Written By The Old Build"));
+        CHECK(opened.catalog().findByName(QStringLiteral("Distinctive Channel Name")).isValid());
+
+        // ---- and saving it converts it, with no user action ----------------
+        // The whole migration story is this line: open the old one, save, and
+        // the file on disk is format 2. There is deliberately no way back.
+        const QString convertedPath = dir.filePath(QStringLiteral("converted.ct3"));
+        CHECK(opened.saveToFile(convertedPath, &error));
+        CHECK(ct::isBinaryConfigFile(convertedPath));
+        QFile cvf(convertedPath);
+        CHECK(cvf.open(QIODevice::ReadOnly));
+        const QByteArray convertedRaw = cvf.readAll();
+        cvf.close();
+        CHECK(!convertedRaw.contains("Distinctive Channel Name"));
+        CHECK(!convertedRaw.contains("Written By The Old Build"));
+
+        Configuration reopened;
+        CHECK(reopened.loadFromFile(convertedPath, &error));
+        CHECK(reopened.configTitle() == QStringLiteral("Written By The Old Build"));
+        CHECK(reopened.catalog()
+                  .findByName(QStringLiteral("Distinctive Channel Name"))
+                  .isValid());
+
+        // Saving IN PLACE over the original works too, which is what File >
+        // Save does to an old file and the one path a user actually takes.
+        CHECK(opened.saveToFile(legacyPath, &error));
+        CHECK(ct::isBinaryConfigFile(legacyPath));
+        Configuration inPlace;
+        CHECK(inPlace.loadFromFile(legacyPath, &error));
+        CHECK(inPlace.configTitle() == QStringLiteral("Written By The Old Build"));
+    }
+
+    // ---- a file something else holds open still saves -----------------------
+    // The reason config_file.cpp writes in place instead of using QSaveFile: an
+    // atomic replace cannot overwrite a target another handle owns, which on
+    // Windows means any folder OneDrive or Dropbox is syncing. QTemporaryFile
+    // is the smallest honest stand-in for that, and this exact shape is what
+    // caught the mistake the first time.
+    {
+        QTemporaryFile held;
+        CHECK(held.open());
+        const QString heldPath = held.fileName();
+        held.close(); // closed, but the QTemporaryFile still owns the path
+        CHECK(cfg.saveToFile(heldPath, &error));
+        Configuration fromHeld;
+        CHECK(fromHeld.loadFromFile(heldPath, &error));
+        CHECK(fromHeld.configTitle() == QStringLiteral("Format Two"));
+    }
+}
+
 // The identity and the policy as they reach disk. The sharp edge is the fleet
-// key: it is the fleet's only secret, a plain .ct3 is legible text, and a .ct3s
-// body is sealed — so the same document has to write two different things.
+// key: it is the fleet's only secret and only a .ct3s carries it, so the same
+// document has to write two different things. Both files are sealed now, so the
+// asymmetry is a deliberate choice rather than a consequence of one format
+// being legible — see withFleetKey() for the reasons it survived format 2.
 static void testFleetDocument()
 {
     QTemporaryDir dir;
@@ -5328,17 +5570,45 @@ static void testProtectedDocument()
         back.grantSectionAccess(0, back.bus[0].sections[0]);
         CHECK(!back.isChannelConcealed(QStringLiteral("Secret RPM")));
 
-        // A plain .ct3 is still legible JSON, and the test says so out loud:
-        // protecting a message stops this app DISPLAYING it and nothing more.
-        // Only "Save Secure Config" makes the bytes themselves unreadable.
+        // THE POINT OF FORMAT 2, asserted against the bytes on disk rather
+        // than inferred from the fact that a container was used. A format-1
+        // .ct3 carried every one of these strings in the clear; this file
+        // carries none of them, so the channel name and the message structure
+        // are no longer findable with a text search of the drive.
         QFile f(path);
         CHECK(f.open(QIODevice::ReadOnly));
         const QByteArray raw = f.readAll();
         f.close();
-        CHECK(raw.contains("7AB"));
-        CHECK(raw.contains("Secret RPM"));
-        // What must NOT be in there is the password itself, in any form.
+        CHECK(!raw.contains("Secret RPM"));
+        CHECK(!raw.contains("sections"));
+        CHECK(!raw.contains("fileVersion"));
+        // The CAN ID is checked as the JSON spelling rather than as the bare
+        // three characters "7AB". Three bytes turn up in forty kilobytes of
+        // CSPRNG noise about once in four hundred runs, and a suite that fails
+        // one build in four hundred teaches people to re-run it.
+        CHECK(!raw.contains("\"7AB\""));
+        // Never in any format, and the reason this line predates the change:
+        // the password is not in the file, sealed or otherwise.
         CHECK(!raw.contains(pass.toUtf8()));
+
+        // The preamble IS legible, and only the preamble. That is deliberate:
+        // a person, a support ticket or a script can see what the file is and
+        // which schema it holds without this program and without the key.
+        CHECK(raw.startsWith(ct::kConfigPreambleMagic));
+        CHECK(raw.contains("schema "));
+        CHECK(!raw.mid(ct::kConfigPreambleBytes).contains("schema "));
+        // Two saves of the same document share no bytes: the container keys
+        // and pads each one independently. Worth pinning, because a writer that
+        // quietly became deterministic would be one that stopped encrypting.
+        const QString twin = dir.filePath(QStringLiteral("twin.ct3"));
+        CHECK(cfg.saveToFile(twin, &err));
+        QFile tf(twin);
+        CHECK(tf.open(QIODevice::ReadOnly));
+        const QByteArray twinRaw = tf.readAll();
+        tf.close();
+        CHECK(twinRaw.mid(ct::kConfigPreambleBytes) != raw.mid(ct::kConfigPreambleBytes));
+        // ...while the preamble, which says nothing secret, is identical.
+        CHECK(twinRaw.left(ct::kConfigPreambleBytes) == raw.left(ct::kConfigPreambleBytes));
 
         Configuration::FilePeek fp;
         CHECK(Configuration::peekFile(path, &fp, &err));
@@ -6330,6 +6600,7 @@ int main(int argc, char *argv[])
     testCryptoPrimitives();
     testAccessKeys();
     testSecureFile();
+    testBinaryConfigFormat();
     testFleetIdentity();
     testUploadPolicy();
     testFleetDocument();
