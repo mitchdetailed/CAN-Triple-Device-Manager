@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Lua Scripting</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Lua Scripting</h1>
+
+<p><b>Tools&nbsp;→&nbsp;Lua Console…</b> runs Lua 5.4 scripts against the open
+document. Anything you would do four hundred times by hand — generating a block
+of channels, renaming across a whole configuration, building a message from a
+spreadsheet-shaped table — is a short loop here.</p>
+
+<p class="note">This page is about scripting the <em>document</em>, on your PC.
+For a script that runs <em>on the unit</em> — reading and writing channels 100
+times a second — see <a href="device-scripts.html">Device Scripts</a>. The two
+share a language and nothing else: nothing the Lua Console does reaches a
+device, and a device script cannot edit a configuration.</p>
+
+<h2>The safety rules</h2>
+
+<ul>
+<li><b>All or nothing.</b> If a script fails — an error, a typo three loops in,
+the 10-second time limit — every change it made is rolled back. There is no
+"it died halfway and now 400 of 900 channels are renamed".</li>
+<li><b>Scripts cannot touch your machine.</b> No files, no processes, no
+environment, no network. A script shared by someone else can waste ten seconds
+of your time and nothing else. (<code>os.time</code>, <code>os.clock</code>,
+<code>os.date</code> and <code>os.difftime</code> work; the rest of
+<code>os</code> and all of <code>io</code> do not exist.)</li>
+<li><b>Message markings are honoured.</b> A concealed (<b>Hidden</b> or
+<b>Protect Communication</b>) message lists as its name and level and nothing
+more, and reading its detail is an error until it is revealed. <em>Changing</em>
+one — or a channel it carries — is an error at every level, <b>Read Only</b>
+included, because the edit lock is not lifted by revealing. <em>Removing</em> a
+section or a channel is allowed at every level, exactly as it is everywhere else
+in the program.</li>
+<li><b>The document is only marked changed when a script changes it.</b> A
+read-only report script leaves the file exactly as it was.</li>
+</ul>
+
+<h2>First script</h2>
+
+<pre>for i = 1, 16 do
+    ct.addChannel{ name = ('Cell Volt %02d'):format(i),
+                   quantity = 'Voltage', unit = 'V',
+                   dataType = 'u16', baseResolution = 0.001,
+                   decimalPlaces = 3, minValue = 0, maxValue = 5 }
+end
+print(ct.channelCount() .. ' channels now')</pre>
+
+<p>Run with <b>Ctrl+Return</b>. <code>print()</code> goes to the output pane.
+Scripts save as <code>.lua</code> files under
+<code>Documents\CAN&nbsp;Triple&nbsp;Device&nbsp;Manager\Scripts</code>.</p>
+
+<h2>The ct API</h2>
+
+<h3>Document</h3>
+<table>
+<tr><th>call</th><th>meaning</th></tr>
+<tr><td><code>ct.title()</code> / <code>ct.setTitle(s)</code></td>
+<td>The configuration title (32 bytes max).</td></tr>
+<tr><td><code>ct.comments()</code> / <code>ct.setComments(s)</code></td>
+<td>The document's free-text comments.</td></tr>
+<tr><td><code>ct.validate()</code></td>
+<td>Runs Check Channels; returns an array of
+<code>{severity, location, message}</code> with severity
+<code>"error"</code>, <code>"warning"</code> or <code>"info"</code>.</td></tr>
+</table>
+
+<h3>Channels</h3>
+<table>
+<tr><th>call</th><th>meaning</th></tr>
+<tr><td><code>ct.channels()</code></td><td>Array of channel tables (snapshots).</td></tr>
+<tr><td><code>ct.channel(name)</code></td><td>One channel, or <code>nil</code>.</td></tr>
+<tr><td><code>ct.channelCount()</code></td><td>How many user channels exist.</td></tr>
+<tr><td><code>ct.addChannel{...}</code></td>
+<td>Creates a channel. <code>name</code> required (31 bytes max); optional
+<code>quantity</code>, <code>unit</code>, <code>dataType</code>
+(u8/u16/u32/s8/s16/s32/float/boolean), <code>baseResolution</code>,
+<code>decimalPlaces</code>, <code>minValue</code>, <code>maxValue</code>,
+<code>category</code>. Errors if the name exists.</td></tr>
+<tr><td><code>ct.setChannel{...}</code></td><td>Add-or-update by <code>name</code>.</td></tr>
+<tr><td><code>ct.removeChannel(name)</code></td><td>Removes it.</td></tr>
+<tr><td><code>ct.renameChannel(old, new)</code></td>
+<td>Renames AND updates every reference — comms rows, math, User Conditions.
+Returns the number of references updated.</td></tr>
+<tr><td><code>ct.allocatedChannels()</code> /
+<code>ct.generatedChannels()</code> / <code>ct.protectedChannels()</code></td>
+<td>Name lists, as the Channel Editor classifies them.
+<code>ct.protectedChannels()</code> lists the channels that are <b>not
+editable</b> — every marked message's channels, <b>Read Only</b> included. That
+is the list a script needs before it tries to change one. The channels whose
+detail is currently <em>withheld</em> is a different and smaller set; read
+<code>concealed</code> on the sections instead.</td></tr>
+</table>
+
+<h3>Buses and messages</h3>
+<table>
+<tr><th>call</th><th>meaning</th></tr>
+<tr><td><code>ct.bus(n)</code> / <code>ct.setBus(n, {...})</code></td>
+<td>Bus 1..3: <code>enabled</code>, <code>rateKbps</code>,
+<code>dataRateKbps</code>, <code>termination</code>.</td></tr>
+<tr><td><code>ct.sections(n)</code></td>
+<td>The bus's message sections. Every entry carries
+<code>protection</code> = <code>"none"|"readOnly"|"hidden"|"protected"</code>,
+<code>concealed</code> (may its detail be read?) and <code>editLocked</code>
+(may it be changed?) — two separate questions, and they differ for
+<code>"readOnly"</code>. A concealed section appears as
+<code>{name, protection, concealed=true, editLocked=true}</code> and nothing
+else; a Read Only one returns its full scalars, <code>id</code>
+included.</td></tr>
+<tr><td><code>ct.section(n, name)</code></td>
+<td>Full detail including <code>rows</code> (or <code>identifiers</code> for
+compound sections). Errors if concealed; a Read Only section returns
+normally.</td></tr>
+<tr><td><code>ct.addSection(n, {...})</code></td>
+<td><code>name</code> required; <code>device</code> =
+<code>"receive"|"transmit"|"relay"|"off"</code>, <code>id</code>,
+<code>extended</code>, <code>fd</code>, <code>lengthBytes</code>,
+<code>alignment</code> = <code>"normal"|"wordswap"</code>,
+<code>rateHz</code>/<code>cyclic</code> (transmit),
+<code>timeoutMs</code> (receive), and <code>rows</code> — an array of
+<code>{channel, startBit, bitLength, dbcType, factor, offset, default,
+clampToRange}</code> with <code>dbcType</code> =
+<code>"unsigned"|"signed"|"float"</code>. <code>clampToRange</code> defaults to
+<code>true</code>; <code>false</code> makes a transmit row send the low
+<code>bitLength</code> bits and roll over.</td></tr>
+<tr><td><code>ct.setSection(n, name, {...})</code></td>
+<td>Updates fields; include <code>name</code> to rename; include
+<code>rows</code> to replace the rows.</td></tr>
+<tr><td><code>ct.removeSection(n, name)</code></td><td>Removes it. Allowed at
+every protection level, concealed or not — removal is permitted everywhere in
+the program, and this is no exception.</td></tr>
+</table>
+
+<p>A section's <code>protection</code> is deliberately <i>not</i> settable from
+a script, in either direction. That is mechanism rather than policy: changing it
+is authorised by a password prompt, and a batch run has nowhere to put one.
+Raising is refused along with lowering, so a script cannot conceal a message from
+the operator running it. Passing the value a section already has is fine, so an
+ordinary read-modify-write does not trip over a field it never meant to
+touch.</p>
+
+<h3>Calculations</h3>
+<table>
+<tr><th>call</th><th>meaning</th></tr>
+<tr><td><code>ct.constants()</code> / <code>ct.addConstant{...}</code> /
+<code>ct.removeConstant(name)</code></td>
+<td><code>{name, dataType, decimalPlaces, value, active}</code>.</td></tr>
+<tr><td><code>ct.mathRows()</code> / <code>ct.addMath{...}</code> /
+<code>ct.removeMath(i)</code></td>
+<td>Operands <code>a</code>, <code>b</code>, <code>c</code> are a channel name
+(string) or a constant (number); <code>dest</code> is the output channel;
+<code>op</code> is <code>ct.ops.NAME</code> or the name string. Math rows have
+no name, so removal is by 1-based index.</td></tr>
+<tr><td><code>ct.ops</code></td>
+<td>Every math operation by name: <code>ADD SUB MUL DIV SCALE MIN MAX AND OR
+ABS NEG SQRT FLOOR CEIL ROUND MOD XOR LAND LOR LNOT GT GE LT LE EQ NE MULADD
+CLAMP LERP SELECT WRAP</code>.</td></tr>
+<tr><td><code>ct.conditions()</code>, <code>ct.counters()</code>,
+<code>ct.timers()</code>, <code>ct.integrators()</code>,
+<code>ct.tables2x16()</code>, <code>ct.tables8x8()</code></td>
+<td>Read-only summaries (phase 1). Create these in their dialogs.</td></tr>
+</table>
+
+<h2>A worked example</h2>
+
+<pre>-- A receive message and the maths to go with it, in one script.
+ct.addChannel{ name = 'Raw Pressure', dataType = 'u16' }
+ct.addChannel{ name = 'Pressure kPa', dataType = 'float', decimalPlaces = 1 }
+
+ct.addSection(1, {
+    name = 'Sensor Node', device = 'receive', id = 0x310, lengthBytes = 8,
+    rows = { { channel = 'Raw Pressure', startBit = 0, bitLength = 16,
+               dbcType = 'unsigned' } },
+})
+
+-- kPa = raw * 0.75 + 12.5
+ct.addMath{ op = ct.ops.MULADD, a = 'Raw Pressure', b = 0.75, c = 12.5,
+            dest = 'Pressure kPa' }
+
+-- And prove the document still checks out before anyone sends it.
+for _, issue in ipairs(ct.validate()) do
+    print(issue.severity, issue.location, issue.message)
+end</pre>
+
+<h2>Limits worth knowing</h2>
+
+<p>These are limits on <b>this program, on your PC</b>. A console script never
+reaches a device, so none of them describes the unit or its memory — for what a
+script running <em>on the device</em> is allowed, see
+<a href="device-scripts.html">Device Scripts</a>.</p>
+
+<ul>
+<li>A console script runs for at most <b>10 seconds</b> and may allocate at most
+<b>64&nbsp;MB of Lua memory</b>. Both are generous for what this is
+for: generating hundreds of channels takes milliseconds and a fraction of a
+megabyte. They exist to stop a runaway loop hanging the program, not to ration
+anything.</li>
+<li>The interface freezes while a script runs — by design, so nothing can
+interleave with a script that is halfway through changing the document.</li>
+<li>Scripts see the open document only. They cannot open, save or send
+configurations, and they cannot talk to a device.</li>
+<li>Reads are snapshots: a table from <code>ct.channels()</code> does not
+change when the document does. Re-read after writing.</li>
+</ul>
+
+<p class="note">The device is far smaller than these numbers might suggest — it
+has 128&nbsp;KB of RAM in total — which is exactly why a device script is a
+different thing with different limits, measured in instructions and
+microseconds rather than seconds and megabytes.</p>
+
+<h2>See also</h2>
+<ul>
+<li><a href="device-scripts.html">Device Scripts</a> — the other kind: code that
+runs <em>on the unit</em>, 100 times a second. Shares a language with this page
+and nothing else.</li>
+<li><a href="channels.html">Channels</a></li>
+<li><a href="communications.html">Communications: Messages &amp; Sections</a></li>
+<li><a href="math-channels.html">Math Channels</a></li>
+</ul>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

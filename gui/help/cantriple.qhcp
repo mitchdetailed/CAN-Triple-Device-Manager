@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Collection project: compiles cantriple.qhp into cantriple.qch and
+     registers that document into the cantriple.qhc collection file the
+     in-app viewer opens. The register path is deliberately relative so the
+     pair keeps working wherever the two files are copied together — next to
+     the executable at build time, then into AppData by HelpWindow (the help
+     engine needs a writable collection). The build stages this file and the
+     whole help/ tree into the build directory before running qhelpgenerator,
+     so the generated outputs land there and never in the source tree. -->
+<QHelpCollectionProject version="1.0">
+    <docFiles>
+        <generate>
+            <file>
+                <input>cantriple.qhp</input>
+                <output>cantriple.qch</output>
+            </file>
+        </generate>
+        <register>
+            <file>cantriple.qch</file>
+        </register>
+    </docFiles>
+</QHelpCollectionProject>

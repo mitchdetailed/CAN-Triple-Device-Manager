@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Qt Help project for the CAN Triple Device Manager manual. Compiled by
+     qhelpgenerator (driven from CMakeLists.txt, target help_docs) into
+     cantriple.qch. Page refs are relative to this file, so everything the
+     compiled help serves lives under pages/ and the in-help URLs read
+     qthelp://org.cantriple.devicemanager.10/doc/pages/<page>.html — the
+     viewer's home URL in src/ui/help_window.cpp must stay in step with the
+     namespace and virtual folder declared here. -->
+<QtHelpProject version="1.0">
+    <namespace>org.cantriple.devicemanager.10</namespace>
+    <virtualFolder>doc</virtualFolder>
+    <filterSection>
+        <toc>
+            <section title="CAN Triple Device Manager" ref="pages/index.html">
+                <section title="Getting Started" ref="pages/getting-started.html"/>
+                <section title="Communications: Messages &amp; Sections" ref="pages/communications.html">
+                    <section title="Channels" ref="pages/channels.html"/>
+                    <section title="Data Types &amp; Decimal Places" ref="pages/datatypes.html"/>
+                    <section title="DBC Import" ref="pages/dbc-import.html"/>
+                    <section title="Message Relays" ref="pages/relays.html"/>
+                </section>
+                <section title="Math Channels &amp; Calculations" ref="pages/math-channels.html">
+                    <section title="User Conditions" ref="pages/conditions.html"/>
+                    <section title="Constants" ref="pages/constants.html"/>
+                    <section title="Lookup Tables" ref="pages/tables.html"/>
+                    <section title="Up/Down Counters" ref="pages/counters.html"/>
+                    <section title="Timers" ref="pages/timers.html"/>
+                    <section title="Integrators" ref="pages/integrators.html"/>
+                    <section title="Device Scripts" ref="pages/device-scripts.html"/>
+                </section>
+                <section title="Order &amp; Timing of Operations" ref="pages/engine.html"/>
+                <section title="Online: Send, Get &amp; Flash" ref="pages/online.html">
+                    <section title="Fleet Identity &amp; Access Keys" ref="pages/fleet-identity.html"/>
+                    <section title="Updating Firmware" ref="pages/firmware-update.html"/>
+                </section>
+                <section title="Lua Scripting" ref="pages/scripting.html"/>
+                <section title="Monitoring Live Values" ref="pages/monitor.html"/>
+                <section title="Validation &amp; the Config Summary" ref="pages/validation-report.html"/>
+                <section title="Configuration Files (.ct3)" ref="pages/files.html"/>
+                <section title="Troubleshooting" ref="pages/troubleshooting.html"/>
+                <section title="License (MIT)" ref="pages/license.html"/>
+            </section>
+        </toc>
+        <keywords>
+            <!-- Orientation -->
+            <keyword name="Getting Started" ref="pages/getting-started.html"/>
+            <keyword name="workflow" ref="pages/getting-started.html"/>
+            <keyword name="first configuration" ref="pages/getting-started.html"/>
+
+            <!-- Communications -->
+            <keyword name="Communications" ref="pages/communications.html"/>
+            <keyword name="messages" ref="pages/communications.html"/>
+            <keyword name="sections" ref="pages/communications.html"/>
+            <keyword name="receive message" ref="pages/communications.html"/>
+            <keyword name="transmit message" ref="pages/communications.html"/>
+            <keyword name="Triggered transmit" ref="pages/communications.html"/>
+            <keyword name="transmit condition" ref="pages/communications.html"/>
+            <keyword name="base address" ref="pages/communications.html"/>
+            <keyword name="CAN ID" ref="pages/communications.html"/>
+            <keyword name="alignment" ref="pages/communications.html"/>
+            <keyword name="word swap" ref="pages/communications.html"/>
+            <keyword name="start bit" ref="pages/communications.html"/>
+            <keyword name="bit length" ref="pages/channels.html"/>
+            <keyword name="Section Editor" ref="pages/communications.html"/>
+            <keyword name="communications template" ref="pages/communications.html#templates"/>
+            <keyword name="template" ref="pages/communications.html#templates"/>
+            <keyword name="ct3t" ref="pages/communications.html#templates"/>
+            <keyword name="protected comms" ref="pages/communications.html"/>
+
+            <!-- Channels -->
+            <keyword name="channels" ref="pages/channels.html"/>
+            <keyword name="Channel Editor" ref="pages/channels.html"/>
+            <keyword name="units" ref="pages/channels.html"/>
+            <keyword name="Device Channels" ref="pages/channels.html"/>
+            <keyword name="Device OnTime" ref="pages/channels.html"/>
+            <keyword name="uptime" ref="pages/channels.html"/>
+            <keyword name="on time" ref="pages/channels.html"/>
+            <keyword name="CAN diagnostics" ref="pages/channels.html"/>
+            <keyword name="error counter" ref="pages/channels.html"/>
+            <keyword name="receive error counter" ref="pages/channels.html"/>
+            <keyword name="transmit error counter" ref="pages/channels.html"/>
+            <keyword name="error passive" ref="pages/channels.html"/>
+            <keyword name="bus off" ref="pages/channels.html"/>
+            <keyword name="bus off recovery" ref="pages/channels.html"/>
+            <keyword name="bus off recoveries" ref="pages/channels.html"/>
+            <keyword name="recovery" ref="pages/channels.html"/>
+            <keyword name="error frames" ref="pages/channels.html"/>
+            <keyword name="bus load" ref="pages/channels.html"/>
+            <!-- MCU health. "brownout" and "watchdog" are what someone types
+                 when a unit reboots by itself; the answer is the reset-reason
+                 channel and the VDDA minimum beside it. -->
+            <keyword name="MCU health" ref="pages/channels.html"/>
+            <keyword name="MCU temperature" ref="pages/channels.html"/>
+            <keyword name="die temperature" ref="pages/channels.html"/>
+            <keyword name="VDDA" ref="pages/channels.html"/>
+            <keyword name="supply voltage" ref="pages/channels.html"/>
+            <keyword name="reset reason" ref="pages/channels.html"/>
+            <keyword name="brownout" ref="pages/channels.html"/>
+            <keyword name="watchdog" ref="pages/channels.html"/>
+
+            <!-- Data types & decimal places -->
+            <keyword name="data type" ref="pages/datatypes.html"/>
+            <keyword name="Data Types" ref="pages/datatypes.html"/>
+            <keyword name="decimal places" ref="pages/datatypes.html"/>
+            <keyword name="resolution" ref="pages/datatypes.html"/>
+            <keyword name="precision" ref="pages/datatypes.html"/>
+            <keyword name="base resolution" ref="pages/datatypes.html"/>
+            <keyword name="storage type" ref="pages/datatypes.html"/>
+            <keyword name="boolean" ref="pages/datatypes.html"/>
+            <keyword name="u8" ref="pages/datatypes.html"/>
+            <keyword name="u16" ref="pages/datatypes.html"/>
+            <keyword name="u32" ref="pages/datatypes.html"/>
+            <keyword name="s8" ref="pages/datatypes.html"/>
+            <keyword name="s16" ref="pages/datatypes.html"/>
+            <keyword name="s32" ref="pages/datatypes.html"/>
+            <keyword name="float" ref="pages/datatypes.html"/>
+            <keyword name="signed and unsigned" ref="pages/datatypes.html"/>
+            <keyword name="clamping" ref="pages/datatypes.html"/>
+            <keyword name="fixed-point" ref="pages/datatypes.html"/>
+
+            <!-- DBC import -->
+            <keyword name="DBC" ref="pages/dbc-import.html"/>
+            <keyword name="DBC Import" ref="pages/dbc-import.html"/>
+            <keyword name="Import DBC" ref="pages/dbc-import.html"/>
+            <keyword name="factor and offset" ref="pages/dbc-import.html"/>
+
+            <!-- Relays -->
+            <keyword name="Message Relays" ref="pages/relays.html"/>
+            <keyword name="relay" ref="pages/relays.html"/>
+            <keyword name="forwarding" ref="pages/relays.html"/>
+            <keyword name="gateway" ref="pages/relays.html"/>
+
+            <!-- Transmit CRC8. "checksum" and the recipe names are what
+                 someone holding an OEM spec sheet actually types. -->
+            <keyword name="Transmit CRC8" ref="pages/communications.html"/>
+            <keyword name="CRC8" ref="pages/communications.html"/>
+            <keyword name="checksum" ref="pages/communications.html"/>
+            <keyword name="polynomial" ref="pages/communications.html"/>
+            <keyword name="SAE J1850" ref="pages/communications.html"/>
+            <keyword name="J1850" ref="pages/communications.html"/>
+
+            <!-- Math channels: dialog plus every operation name -->
+            <keyword name="Math Channels" ref="pages/math-channels.html"/>
+            <keyword name="operations" ref="pages/math-channels.html"/>
+            <keyword name="Add (A + B)" ref="pages/math-channels.html"/>
+            <keyword name="Subtract (A − B)" ref="pages/math-channels.html"/>
+            <keyword name="Multiply (A × B)" ref="pages/math-channels.html"/>
+            <keyword name="Divide (A ÷ B)" ref="pages/math-channels.html"/>
+            <keyword name="Scale" ref="pages/math-channels.html"/>
+            <keyword name="Min" ref="pages/math-channels.html"/>
+            <keyword name="Max" ref="pages/math-channels.html"/>
+            <keyword name="Bitwise AND" ref="pages/math-channels.html"/>
+            <keyword name="Bitwise OR" ref="pages/math-channels.html"/>
+            <keyword name="Absolute" ref="pages/math-channels.html"/>
+            <keyword name="Negate" ref="pages/math-channels.html"/>
+            <keyword name="Square root" ref="pages/math-channels.html"/>
+            <keyword name="Floor" ref="pages/math-channels.html"/>
+            <keyword name="Ceiling" ref="pages/math-channels.html"/>
+            <keyword name="Round" ref="pages/math-channels.html"/>
+            <keyword name="Modulo" ref="pages/math-channels.html"/>
+            <keyword name="XOR" ref="pages/math-channels.html"/>
+            <keyword name="Logical AND" ref="pages/math-channels.html"/>
+            <keyword name="Logical OR" ref="pages/math-channels.html"/>
+            <keyword name="Logical NOT" ref="pages/math-channels.html"/>
+            <keyword name="Greater than" ref="pages/math-channels.html"/>
+            <keyword name="Greater or equal" ref="pages/math-channels.html"/>
+            <keyword name="Less than" ref="pages/math-channels.html"/>
+            <keyword name="Less or equal" ref="pages/math-channels.html"/>
+            <keyword name="Equal" ref="pages/math-channels.html"/>
+            <keyword name="Not equal" ref="pages/math-channels.html"/>
+            <keyword name="Multiply-add" ref="pages/math-channels.html"/>
+            <keyword name="Clamp" ref="pages/math-channels.html"/>
+            <keyword name="Interpolate" ref="pages/math-channels.html"/>
+            <keyword name="Select" ref="pages/math-channels.html"/>
+            <keyword name="Wrap" ref="pages/math-channels.html"/>
+            <keyword name="division by zero" ref="pages/math-channels.html"/>
+            <keyword name="chaining" ref="pages/math-channels.html"/>
+
+            <!-- Other calculations -->
+            <keyword name="User Conditions" ref="pages/conditions.html"/>
+            <keyword name="comparisons" ref="pages/conditions.html"/>
+            <keyword name="joins" ref="pages/conditions.html"/>
+            <keyword name="condition mode" ref="pages/conditions.html"/>
+            <keyword name="Momentary" ref="pages/conditions.html"/>
+            <keyword name="Set / Reset" ref="pages/conditions.html"/>
+            <keyword name="Latch Frequency" ref="pages/conditions.html"/>
+            <keyword name="latch" ref="pages/conditions.html"/>
+            <keyword name="was received" ref="pages/conditions.html"/>
+            <keyword name="was transmitted" ref="pages/conditions.html"/>
+            <keyword name="Message Received" ref="pages/conditions.html"/>
+            <keyword name="Message Transmitted" ref="pages/conditions.html"/>
+            <keyword name="request/response" ref="pages/conditions.html"/>
+            <keyword name="Constants" ref="pages/constants.html"/>
+            <keyword name="Lookup Tables" ref="pages/tables.html"/>
+            <keyword name="tables" ref="pages/tables.html"/>
+            <keyword name="interpolation" ref="pages/tables.html"/>
+            <keyword name="2x16 table" ref="pages/tables.html"/>
+            <keyword name="8x8 table" ref="pages/tables.html"/>
+            <!-- The 4x4 keeps a keyword although the table is gone: someone
+                 opening an older configuration will search for the name they
+                 know, and tables.html is where the migration is explained. -->
+            <keyword name="4x4 table" ref="pages/tables.html"/>
+            <keyword name="discrete centered" ref="pages/tables.html"/>
+            <keyword name="sites" ref="pages/tables.html"/>
+            <keyword name="Up/Down Counters" ref="pages/counters.html"/>
+            <keyword name="counters" ref="pages/counters.html"/>
+            <keyword name="Every x Hz" ref="pages/counters.html"/>
+            <keyword name="rate counter" ref="pages/counters.html"/>
+            <keyword name="increment" ref="pages/counters.html"/>
+            <keyword name="decrement" ref="pages/counters.html"/>
+            <keyword name="Timers" ref="pages/timers.html"/>
+            <keyword name="Integrators" ref="pages/integrators.html"/>
+            <keyword name="rate accumulator" ref="pages/integrators.html"/>
+            <keyword name="preserve" ref="pages/integrators.html"/>
+            <keyword name="flash wear" ref="pages/integrators.html"/>
+
+            <!-- Order & timing. "order of operations" and its synonyms all
+                 land on the one page that answers them; "latency" and
+                 "update rate" are what someone types when a value looks one
+                 step stale. -->
+            <keyword name="Order &amp; Timing of Operations" ref="pages/engine.html"/>
+            <keyword name="order of operations" ref="pages/engine.html"/>
+            <keyword name="evaluation order" ref="pages/engine.html"/>
+            <keyword name="execution order" ref="pages/engine.html"/>
+            <keyword name="evaluation pass" ref="pages/engine.html"/>
+            <keyword name="update rate" ref="pages/engine.html"/>
+            <keyword name="frequency" ref="pages/engine.html"/>
+            <keyword name="100 Hz" ref="pages/engine.html"/>
+            <keyword name="10 ms" ref="pages/engine.html"/>
+            <keyword name="latency" ref="pages/engine.html"/>
+            <keyword name="one-pass lag" ref="pages/engine.html"/>
+            <keyword name="transmit timing" ref="pages/engine.html"/>
+            <keyword name="phase spreading" ref="pages/engine.html"/>
+            <keyword name="transmit order" ref="pages/engine.html"/>
+            <keyword name="scheduling" ref="pages/engine.html"/>
+
+            <!-- Monitoring -->
+            <keyword name="Monitor Channels" ref="pages/monitor.html"/>
+            <keyword name="live values" ref="pages/monitor.html"/>
+            <keyword name="CAN Viewer" ref="pages/monitor.html"/>
+            <keyword name="bus filter" ref="pages/monitor.html"/>
+            <keyword name="filter by bus" ref="pages/monitor.html"/>
+
+            <!-- Online -->
+            <keyword name="Send Configuration" ref="pages/online.html"/>
+            <keyword name="Get Configuration" ref="pages/online.html"/>
+            <keyword name="Verify Configuration" ref="pages/online.html"/>
+            <keyword name="Save to Flash" ref="pages/online.html"/>
+            <!-- The dedicated clear command is gone (wiping is File > New +
+                 Send), but "clear" is still what someone types to find out
+                 how — online.html's Reset Device note answers it. -->
+            <keyword name="clear device" ref="pages/online.html"/>
+            <keyword name="wiping a device" ref="pages/online.html"/>
+            <keyword name="Reset Device" ref="pages/online.html"/>
+            <keyword name="Device Status" ref="pages/online.html"/>
+            <keyword name="flash" ref="pages/online.html"/>
+
+            <!-- Firmware update. "firmware update" also appears under
+                 Troubleshooting for the empty-configuration symptom; a user
+                 typing the phrase should reach this page too. -->
+            <keyword name="Update Firmware" ref="pages/firmware-update.html"/>
+            <keyword name="firmware update" ref="pages/firmware-update.html"/>
+            <keyword name="firmware" ref="pages/firmware-update.html"/>
+            <keyword name="bootloader" ref="pages/firmware-update.html"/>
+            <keyword name="ctf" ref="pages/firmware-update.html"/>
+            <keyword name=".ctf" ref="pages/firmware-update.html"/>
+            <keyword name="firmware image" ref="pages/firmware-update.html"/>
+            <keyword name="firmware backup" ref="pages/firmware-update.html"/>
+            <keyword name="staging" ref="pages/firmware-update.html"/>
+
+            <!-- Lua scripting -->
+            <keyword name="Lua" ref="pages/scripting.html"/>
+            <keyword name="Lua Console" ref="pages/scripting.html"/>
+            <keyword name="script" ref="pages/scripting.html"/>
+            <keyword name="scripting" ref="pages/scripting.html"/>
+            <keyword name="automation" ref="pages/scripting.html"/>
+            <keyword name="batch edit" ref="pages/scripting.html"/>
+            <keyword name="generate channels" ref="pages/scripting.html"/>
+            <keyword name="ct" ref="pages/scripting.html"/>
+            <keyword name="sandbox" ref="pages/scripting.html"/>
+            <keyword name="64 MB" ref="pages/scripting.html"/>
+            <keyword name="10 seconds" ref="pages/scripting.html"/>
+            <keyword name=".lua" ref="pages/scripting.html"/>
+
+            <!-- Device scripts. Distinct from the Lua Console above and easy to
+                 confuse with it, so the terms someone would actually search for
+                 when they mean "code that runs on the unit" point here. -->
+            <keyword name="Device Scripts" ref="pages/device-scripts.html"/>
+            <keyword name="device scripting" ref="pages/device-scripts.html"/>
+            <keyword name="on_tick" ref="pages/device-scripts.html"/>
+            <keyword name="sig" ref="pages/device-scripts.html"/>
+            <keyword name="setSig" ref="pages/device-scripts.html"/>
+            <keyword name="state machine" ref="pages/device-scripts.html"/>
+            <keyword name="hysteresis" ref="pages/device-scripts.html"/>
+            <keyword name="simulator" ref="pages/device-scripts.html"/>
+            <keyword name="script budget" ref="pages/device-scripts.html"/>
+            <keyword name="Overrun" ref="pages/device-scripts.html"/>
+            <keyword name="suspended" ref="pages/device-scripts.html"/>
+            <keyword name="bytecode" ref="pages/device-scripts.html"/>
+            <keyword name="state()" ref="pages/device-scripts.html"/>
+            <keyword name="Lua subset" ref="pages/device-scripts.html"/>
+
+            <!-- Fleet identity / access control -->
+            <keyword name="Fleet Identity" ref="pages/fleet-identity.html"/>
+            <keyword name="access keys" ref="pages/fleet-identity.html"/>
+            <keyword name="Set Access Passwords" ref="pages/fleet-identity.html"/>
+            <keyword name="Upload Configuration" ref="pages/fleet-identity.html"/>
+            <keyword name="provisioning" ref="pages/fleet-identity.html"/>
+
+            <!-- Validation -->
+            <keyword name="validation" ref="pages/validation-report.html"/>
+            <keyword name="Config Summary" ref="pages/validation-report.html"/>
+            <keyword name="Check Channels" ref="pages/validation-report.html"/>
+
+            <!-- Files -->
+            <keyword name="configuration files" ref="pages/files.html"/>
+            <keyword name=".ct3" ref="pages/files.html"/>
+            <keyword name=".ct3s" ref="pages/files.html"/>
+            <keyword name="secure configuration" ref="pages/files.html"/>
+            <keyword name="Save Secure Config" ref="pages/files.html"/>
+
+            <!-- Troubleshooting -->
+            <keyword name="Troubleshooting" ref="pages/troubleshooting.html"/>
+            <keyword name="NACK" ref="pages/troubleshooting.html"/>
+            <keyword name="serial port" ref="pages/troubleshooting.html"/>
+            <keyword name="COM port" ref="pages/troubleshooting.html"/>
+            <keyword name="firmware update" ref="pages/troubleshooting.html"/>
+            <keyword name="empty configuration" ref="pages/troubleshooting.html"/>
+            <keyword name="two writers" ref="pages/troubleshooting.html"/>
+
+            <!-- License. "LGPL" stays a keyword because the page is where the
+                 bundled Qt's terms are explained. -->
+            <keyword name="License" ref="pages/license.html"/>
+            <keyword name="MIT" ref="pages/license.html"/>
+            <keyword name="MIT License" ref="pages/license.html"/>
+            <keyword name="LGPL" ref="pages/license.html"/>
+            <keyword name="COPYING" ref="pages/license.html"/>
+        </keywords>
+        <files>
+            <file>pages/help.css</file>
+            <file>pages/index.html</file>
+            <file>pages/getting-started.html</file>
+            <file>pages/files.html</file>
+            <file>pages/troubleshooting.html</file>
+            <file>pages/communications.html</file>
+            <file>pages/channels.html</file>
+            <file>pages/datatypes.html</file>
+            <file>pages/dbc-import.html</file>
+            <file>pages/relays.html</file>
+            <file>pages/math-channels.html</file>
+            <file>pages/conditions.html</file>
+            <file>pages/constants.html</file>
+            <file>pages/tables.html</file>
+            <file>pages/counters.html</file>
+            <file>pages/timers.html</file>
+            <file>pages/integrators.html</file>
+            <file>pages/device-scripts.html</file>
+            <file>pages/engine.html</file>
+            <file>pages/monitor.html</file>
+            <file>pages/scripting.html</file>
+            <file>pages/online.html</file>
+            <file>pages/firmware-update.html</file>
+            <file>pages/fleet-identity.html</file>
+            <file>pages/validation-report.html</file>
+            <file>pages/license.html</file>
+        </files>
+    </filterSection>
+</QtHelpProject>

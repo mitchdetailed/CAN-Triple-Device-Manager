@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Constants</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Constants</h1>
+
+<p>A constant creates a channel that always carries a fixed value. The device
+writes the value into the channel at the start of every evaluation pass —
+before <a href="tables.html">tables</a>, <a href="math-channels.html">math</a>
+and <a href="conditions.html">User Conditions</a> run — so anything downstream
+can read it: a calibration factor for a math channel, a threshold for a
+condition, a fixed field in a transmit message. The device supports up to <b>100</b>
+constants.</p>
+
+<p>A constant is essentially a custom channel (name, data type, decimal places,
+with the range derived from the type) plus the value itself; it has no Channel
+Type or Display Units. Saving the dialog registers the channel in the document,
+so the constant is immediately selectable wherever a channel can be picked.</p>
+
+<h2>The Constants dialog</h2>
+
+<p>To add a constant, choose <b>Calculations → Constants…</b>. The dialog lists
+every row with the columns <b>#</b>, <b>Active</b>, <b>Name</b>,
+<b>Data Type</b> and <b>Value</b>, with <b>Add…</b>, <b>Change…</b> and
+<b>Remove</b> buttons at the right. Double-clicking a row opens it for change.
+OK commits the changes; Cancel discards them.</p>
+
+<p class="note">Adding beyond the limit reports "The device supports at most 100
+constants."</p>
+
+<h2>Adding or changing a constant</h2>
+
+<p>The <b>Constant</b> editor holds two groups plus the Active tick:</p>
+
+<ul>
+<li><b>Channel Name</b> — <b>Channel Name:</b>, up to 31 characters (the device
+stores a 32-byte label). A new constant starts as "New Constant" with the name
+selected for typing over.</li>
+<li><b>Constant Details</b>:
+  <ul>
+  <li><b>Data Type:</b> — boolean, u8, u16, u32, s8, s16, s32 or float. The
+  field starts blank and a choice is required.</li>
+  <li><b>Decimal Places:</b> — 0–8, capped by the type: boolean is locked at 0,
+  u8/s8 allow up to 2, u16/s16 up to 4, u32/s32/float up to 8.</li>
+  <li><b>Base Resolution:</b>, <b>Range Minimum:</b>, <b>Range Maximum:</b> —
+  derived and read-only. The resolution is 10<sup>−decimals</sup>; for integer
+  types the range is the raw type range scaled by that resolution (a u16 with
+  2 decimal places spans 0…655.35), while boolean is 0…1 and float is shown as
+  ±10⁹.</li>
+  <li><b>Value:</b> — the fixed value, limited to the derived range and entered
+  at the chosen number of decimal places.</li>
+  </ul>
+</li>
+<li><b>Active</b> — an inactive constant is kept in the configuration but its
+value is not written on the device.</li>
+</ul>
+
+<h2>Name rules</h2>
+
+<p>OK enforces the same rules as the other channel editors:</p>
+
+<ul>
+<li>The name must not be empty, and must fit the device's 31-byte label budget —
+a name with non-ASCII characters can exceed the byte limit within the character
+cap and is refused with "Names are limited to 31 bytes on the device."</li>
+<li>No two constants may share a name (case-insensitive): "A constant named
+&quot;X&quot; already exists."</li>
+<li>A constant may not take the name of an unrelated existing channel — it
+would overwrite that channel's definition: "A channel named &quot;X&quot;
+already exists. Choose a different name."</li>
+</ul>
+
+<p class="note">Renaming a constant carries its references along: math inputs,
+User Condition comparisons, transmit rows and table axes that used the old name
+are rewritten to the new one when the dialog is closed with OK.</p>
+
+<p class="warn">Deleting a constant removes its channel from the document. Any
+calculation still referencing the old name will be flagged by File → Check
+Channels, so run it after a clean-up.</p>
+
+<h2>See also</h2>
+
+<p><a href="math-channels.html">Math Channels</a> ·
+<a href="conditions.html">User Conditions</a> ·
+<a href="tables.html">Lookup Tables</a> ·
+<a href="channels.html">Channels</a> ·
+<a href="monitor.html">Monitoring Live Values</a></p>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program
+and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

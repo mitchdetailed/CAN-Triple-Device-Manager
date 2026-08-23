@@ -1,0 +1,1638 @@
+#include "communications_dialog.h"
+
+#include <array>
+
+#include <QBrush>
+#include <QColor>
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QDir>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QMessageBox>
+#include <QPalette>
+#include <QPushButton>
+#include <QStandardItemModel>
+#include <QTabWidget>
+#include <QTreeWidget>
+#include <QVBoxLayout>
+
+#include <algorithm>
+
+#include "../model/channel_catalog.h"
+#include "../model/comms_template.h"
+#include "../model/dbc_import.h"
+#include "../model/user_paths.h"
+#include "../protocol/wire_structs.h"
+#include "color_item_delegate.h"
+#include "import_dbc_dialog.h"
+#include "section_editor_dialog.h"
+
+namespace ct {
+
+namespace {
+
+// The Section column: normally the direction, a padlock for a message the
+// viewer may not read. MoTeC's own list does exactly this, and the substitution
+// is deliberate — the row's job for a concealed message is to say "locked",
+// which is also why opening it asks for a password. The direction is not itself
+// the secret (the Config Summary report still names it, see
+// CommsSection::displayDetail); it is simply displaced by the thing the user
+// needs to know first.
+//
+// Read Only is the tier that changed. It conceals NOTHING, so it keeps its
+// direction and gains a lock-with-pen marker instead: the message is fully
+// legible and simply cannot be edited. Hidden and Protected share the plain
+// padlock — which of the two it is, and therefore which password opens it, is
+// said in the Name column by sectionSummary, where there is room to say it in
+// words rather than by asking the reader to tell two glyphs apart.
+QString sectionKind(const CommsSection &s, bool revealed)
+{
+    if (s.isConcealed(revealed))
+        return QStringLiteral("🔒");
+    QString kind;
+    switch (s.device) {
+    case SectionDevice::ReceiveMessage: kind = QObject::tr("CAN Rx"); break;
+    case SectionDevice::TransmitMessage: kind = QObject::tr("CAN Tx"); break;
+    case SectionDevice::TransmitCrc8: kind = QObject::tr("CAN Tx CRC8"); break;
+    case SectionDevice::MessageRelay: kind = QObject::tr("Relay"); break;
+    case SectionDevice::Off: kind = QObject::tr("Off"); break;
+    }
+    if (s.isEditLocked())
+        kind += QStringLiteral("  🔏");
+    return kind;
+}
+
+QString sectionSummary(const CommsSection &s, bool revealed)
+{
+    const QString address = QStringLiteral("0x") + QString::number(s.baseAddress, 16).toUpper();
+    // A concealed message shows its name and nothing else — no ID, no extended
+    // marker, no compound tag. Note the name itself is the user's to choose:
+    // the default "Receive 0x640" would give the ID away, so the section editor
+    // warns about that when the box is ticked.
+    //
+    // Hidden and Protected are named apart rather than both reading
+    // "(protected)". They are not the same promise: Hidden is opened by this
+    // section's own password, held in this document, while Protected wants that
+    // password AND a live device confirming Protected Comms. A viewer
+    // deciding whether it is worth going to find a password has to be told which
+    // of the two they are looking at.
+    //
+    // A section with NO Message Password is named apart AGAIN, for the same
+    // reason one step further on: there is no password anywhere for it, so a row
+    // reading "(hidden)" would send its reader looking for something that does
+    // not exist — through their notes, their colleagues and the original .ct3 —
+    // and every one of those searches would fail without ever explaining why.
+    // This is the ordinary state of a configuration read back off a device: the
+    // wire carries no key, so a Get returns every section keyless.
+    if (s.isConcealed(revealed)) {
+        if (s.messageKey == kNoAccessKey) {
+            return s.protection == CommsProtection::Protected
+                       ? QObject::tr("%1  (protected — no password)").arg(s.name)
+                       : QObject::tr("%1  (hidden — no password)").arg(s.name);
+        }
+        return s.protection == CommsProtection::Protected
+                   ? QObject::tr("%1  (protected)").arg(s.name)
+                   : QObject::tr("%1  (hidden)").arg(s.name);
+    }
+    QString text = s.name;
+    if (!s.name.contains(address, Qt::CaseInsensitive))
+        text += QStringLiteral("  —  ") + address;
+    if (s.extended)
+        text += QStringLiteral(" x");
+    if (s.compound && !s.isRelay())
+        text += QObject::tr("  (compound)");
+    if (s.isRelay()) {
+        QStringList buses;
+        for (int i = 0; i < 3; ++i)
+            if (s.routeBusMask & (1 << i))
+                buses << QStringLiteral("CAN %1").arg(i + 1);
+        text += QObject::tr("  → %1").arg(buses.isEmpty() ? QObject::tr("(no target)")
+                                                          : buses.join(QStringLiteral(", ")));
+    }
+    return text;
+}
+
+// Mode colours per palette. Picked numerically, not by eye: in every state the
+// delegate can paint (resting / hover / selected) the fill clears the WCAG AA
+// 4.5:1 threshold against its own text, and stays distinguishable from both the
+// popup background and the neighbouring combos. The dark set is the one that
+// matters in practice — this app runs under the Windows dark palette — but the
+// light set keeps it correct if that ever changes.
+struct ModeColors
+{
+    QColor canFill, canText, offFill, offText;
+};
+
+ModeColors modeColorsFor(const QPalette &pal)
+{
+    if (pal.color(QPalette::Window).lightness() < 128)
+        return {QColor(0x2A, 0x55, 0x33), QColor(0xF1, 0xFA, 0xF1),
+                QColor(0x7E, 0x2C, 0x2F), QColor(0xFF, 0xEB, 0xEE)};
+    return {QColor(0xC8, 0xE6, 0xC9), QColor(0x14, 0x47, 0x18),
+            QColor(0xFF, 0xCD, 0xD2), QColor(0x8C, 0x15, 0x15)};
+}
+
+} // namespace
+
+CommunicationsDialog::CommunicationsDialog(Configuration *config, QWidget *parent,
+                                           ProtectedCommsProver prover)
+    : QDialog(parent)
+    , m_config(config)
+    , m_prover(std::move(prover))
+{
+    setWindowTitle(tr("Communications Setup"));
+    resize(720, 480);
+
+    for (int i = 0; i < 3; ++i)
+        m_buses[i] = config->bus[i];
+
+    auto *layout = new QVBoxLayout(this);
+    m_tabs = new QTabWidget;
+    for (int i = 0; i < 3; ++i)
+        m_tabs->addTab(buildBusTab(i), tr("CAN %1").arg(i + 1));
+    // AFTER the three buses, because it is not one. The four passwords are
+    // document-wide: a message on CAN 3 names the same slot 2 that a message on
+    // CAN 1 does.
+    m_tabs->addTab(buildPasswordsTab(), tr("Passwords"));
+    layout->addWidget(m_tabs);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, this, &CommunicationsDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    // A rename can arrive from deep inside a section editor's picker while
+    // these working copies are open — see Configuration::channelRenamed. It
+    // also keeps accept()'s per-bus toJson comparison honest: a bus whose only
+    // difference was the rename stays identical to the document and is
+    // skipped, rather than writing the stale names back through
+    // applyBusSections.
+    connect(m_config, &Configuration::channelRenamed, this,
+            [this](const QString &oldName, const QString &newName) {
+                for (int i = 0; i < 3; ++i)
+                    if (renameChannelRefs(m_buses[i].sections, oldName, newName) > 0)
+                        rebuildSections(i);
+            });
+
+    for (int i = 0; i < 3; ++i) {
+        rebuildSections(i);
+        updateButtons(i);
+    }
+}
+
+
+// THE FOUR MESSAGE PASSWORDS, which every marked message names one of.
+//
+// Document-wide and exactly four, which is what makes a marking cheap enough to
+// survive a device round trip: the wire carries a three-bit SLOT NUMBER in a
+// byte CanMessageConfig already had, and the four keys ride once in the config
+// header. A password per message needed a table of its own.
+//
+// Passwords are never shown, because they are not kept: what the document holds
+// is the derived key. A slot reads as "set" or "not set", and typing a new one
+// replaces rather than reveals.
+// THE FOUR MESSAGE PASSWORDS, which every marked message names one of.
+//
+// Document-wide and exactly four, which is what makes a marking cheap enough to
+// survive a device round trip: the wire carries a three-bit SLOT NUMBER in a
+// byte CanMessageConfig already had, and the four keys ride once in the config
+// header. A password per message needed a table of its own.
+//
+// TWO COLUMNS AND ONE BUTTON. A slot is either set or it is not, and the one
+// action that makes sense is the one that is offered: Set on an empty slot,
+// Clear on a full one. There is no password field on the page - the password is
+// asked for in a popup at the moment it is needed, the same way the section
+// editor asks, and it is never shown afterwards because only the derived key is
+// kept.
+QWidget *CommunicationsDialog::buildPasswordsTab()
+{
+    auto *page = new QWidget;
+    auto *outer = new QVBoxLayout(page);
+
+    auto *intro = new QLabel(
+        tr("A message marked <b>Read Only</b>, <b>Hidden</b> or <b>Protect Communication</b> "
+           "is guarded by one of these four passwords. They belong to the configuration "
+           "rather than to any one bus, and a marked message names the one that guards "
+           "it.<br><br>Only the derived key is stored, never the password, so a slot can "
+           "be cleared and set again but never read back."),
+        page);
+    intro->setWordWrap(true);
+    intro->setTextFormat(Qt::RichText);
+    outer->addWidget(intro);
+
+    auto *group = new QGroupBox(tr("Message Passwords"), page);
+    auto *grid = new QGridLayout(group);
+    grid->addWidget(new QLabel(tr("Slot"), group), 0, 0);
+    grid->addWidget(new QLabel(tr("State"), group), 0, 1);
+
+    for (int slot = 1; slot <= Configuration::kCommsPasswordSlots; ++slot) {
+        const int r = slot;
+        grid->addWidget(new QLabel(QString::number(slot), group), r, 0);
+
+        m_passwordState[slot - 1] = new QLabel(group);
+        grid->addWidget(m_passwordState[slot - 1], r, 1);
+
+        auto *action = new QPushButton(group);
+        connect(action, &QPushButton::clicked, this, [this, slot] {
+            if (m_config->commsPassword(slot) == kNoAccessKey)
+                onSetPasswordSlot(slot);
+            else
+                onClearPasswordSlot(slot);
+        });
+        grid->addWidget(action, r, 2);
+        m_passwordAction[slot - 1] = action;
+    }
+    grid->setColumnStretch(1, 1);
+    outer->addWidget(group);
+
+    m_passwordUsage = new QLabel(page);
+    m_passwordUsage->setWordWrap(true);
+    m_passwordUsage->setStyleSheet(QStringLiteral("color: gray;"));
+    outer->addWidget(m_passwordUsage);
+    outer->addStretch(1);
+
+    updatePasswordsTab();
+    return page;
+}
+
+// How many messages name each slot, across every bus. Counted from the WORKING
+// copies rather than the document: a marking made in this dialog and not yet
+// committed still counts, or Clear would offer to strand it.
+int CommunicationsDialog::messagesUsingPasswordSlot(int slot) const
+{
+    if (slot < 1)
+        return 0;
+    int n = 0;
+    for (int b = 0; b < 3; ++b)
+        for (const CommsSection &s : m_buses[b].sections)
+            if (s.protection != CommsProtection::None
+                && m_config->commsPasswordSlotFor(s.messageKey) == slot)
+                ++n;
+    return n;
+}
+
+void CommunicationsDialog::updatePasswordsTab()
+{
+    if (!m_passwordUsage)
+        return;
+    int set = 0;
+    for (int slot = 1; slot <= Configuration::kCommsPasswordSlots; ++slot) {
+        const bool have = m_config->commsPassword(slot) != kNoAccessKey;
+        const int used = messagesUsingPasswordSlot(slot);
+        if (have)
+            ++set;
+        m_passwordState[slot - 1]->setText(
+            have ? (used > 0 ? tr("set, guarding %n message(s)", nullptr, used) : tr("set"))
+                 : tr("not set"));
+        // The one action that applies: Set on an empty slot, Clear on a full
+        // one. The button is the state's complement, so it never offers what
+        // cannot be done.
+        m_passwordAction[slot - 1]->setText(have ? tr("Clear") : tr("Set"));
+    }
+    m_passwordUsage->setText(
+        set == 0
+            ? tr("No message passwords are set, so no message can be marked yet.")
+            : tr("%n of 4 in use.", nullptr, set));
+}
+
+// SETTING IS A POPUP, asked at the click - there is no field on the page for a
+// password to sit in half-typed. The checks are the ones the old inline path
+// enforced: the length rule, and no two slots holding one password, because a
+// message names a SLOT and commsPasswordSlotFor() answers the first match, so a
+// duplicate would make the second slot unreachable.
+void CommunicationsDialog::onSetPasswordSlot(int slot)
+{
+    for (;;) {
+        bool ok = false;
+        const QString typed = QInputDialog::getText(
+            this, windowTitle(), tr("Choose password %1:").arg(slot), QLineEdit::Password,
+            QString(), &ok);
+        if (!ok)
+            return;
+        if (const QString why = passwordProblem(typed); !why.isEmpty()) {
+            QMessageBox::warning(this, windowTitle(), why);
+            continue; // re-asked, so a typo does not cost the whole attempt
+        }
+        const AccessKey key = deriveAccessKey(typed);
+        const int already = m_config->commsPasswordSlotFor(key);
+        if (already != 0) {
+            QMessageBox::warning(
+                this, windowTitle(),
+                tr("That is already password %1. Each slot needs a different password: a "
+                   "message names a slot, so two slots holding one password would make "
+                   "the second unreachable.")
+                    .arg(already));
+            continue;
+        }
+        m_config->setCommsPasswordSlot(slot, key);
+        updatePasswordsTab();
+        return;
+    }
+}
+
+// CLEARING PROVES THE CURRENT PASSWORD, and is refused outright while any
+// message names the slot: the password is what authorises releasing those
+// markings, so removing it would strand them - marked, with nothing able to
+// open them, which is the state store v16 exists to stop happening by
+// accident. An unused slot's password is still a secret somebody chose, so
+// removal proves it too.
+void CommunicationsDialog::onClearPasswordSlot(int slot)
+{
+    const int used = messagesUsingPasswordSlot(slot);
+    if (used > 0) {
+        QMessageBox::warning(
+            this, windowTitle(),
+            tr("Password %1 guards %n message(s), so it cannot be cleared. Release "
+               "those markings first - the password is what authorises releasing "
+               "them.",
+               nullptr, used)
+                .arg(slot));
+        return;
+    }
+    bool ok = false;
+    const QString typed = QInputDialog::getText(
+        this, windowTitle(),
+        tr("Clearing password %1 requires the current password:").arg(slot),
+        QLineEdit::Password, QString(), &ok);
+    if (!ok)
+        return;
+    if (deriveAccessKey(typed) != m_config->commsPassword(slot)) {
+        QMessageBox::warning(this, windowTitle(),
+                             tr("That is not password %1. Nothing was cleared.").arg(slot));
+        return;
+    }
+    m_config->setCommsPasswordSlot(slot, kNoAccessKey);
+    updatePasswordsTab();
+}
+
+
+QWidget *CommunicationsDialog::buildBusTab(int busIndex)
+{
+    auto *page = new QWidget;
+    auto *layout = new QVBoxLayout(page);
+    BusTab &tab = m_busTabs[busIndex];
+
+    // Options row
+    auto *optionsGroup = new QGroupBox(tr("Options"));
+    auto *optionsRow = new QHBoxLayout(optionsGroup);
+    optionsRow->addWidget(new QLabel(tr("Mode :")));
+    tab.modeCombo = new QComboBox;
+    tab.modeCombo->addItem(tr("CAN"), true);
+    tab.modeCombo->addItem(tr("Off"), false);
+    // Colour the mode so a disabled bus is obvious at a glance: green = running,
+    // red = off. Applied to the dropdown entries AND to the closed combo, since
+    // otherwise the state is only visible while the list is open.
+    const ModeColors mode = modeColorsFor(palette());
+    tab.modeCombo->setItemData(0, QBrush(mode.canFill), Qt::BackgroundRole);
+    tab.modeCombo->setItemData(0, QBrush(mode.canText), Qt::ForegroundRole);
+    tab.modeCombo->setItemData(1, QBrush(mode.offFill), Qt::BackgroundRole);
+    tab.modeCombo->setItemData(1, QBrush(mode.offText), Qt::ForegroundRole);
+    // Without this the popup drops back to the plain highlight under the cursor,
+    // losing the colour exactly when the user is pointing at the row.
+    tab.modeCombo->setItemDelegate(new ColorItemDelegate(tab.modeCombo));
+    tab.modeCombo->setCurrentIndex(m_buses[busIndex].enabled ? 0 : 1);
+    const auto paintMode = [combo = tab.modeCombo, mode] {
+        const bool on = combo->currentData().toBool();
+        const QColor fill = on ? mode.canFill : mode.offFill;
+        const QColor text = on ? mode.canText : mode.offText;
+        // A background-color rule stops QStyleSheetStyle delegating this combo to
+        // the platform style, so the frame the native style would have drawn has
+        // to be supplied here — otherwise it reads as a bare colour block next to
+        // its unstyled siblings in the same row.
+        // The 3px horizontal padding is not cosmetic: without it the styled combo
+        // measures 42px against its native siblings' 48px and sits visibly narrow
+        // in the row. Vertical padding only steps in 2s, so 1px short is the
+        // closest match available and is invisible on a vertically-centred combo.
+        combo->setStyleSheet(
+            QStringLiteral("QComboBox { background-color: %1; color: %2; "
+                           "border: 1px solid %3; border-radius: 3px; padding: 0px 3px; }")
+                .arg(fill.name(), text.name(),
+                     ColorItemDelegate::shade(fill, ColorItemDelegate::kSelectedShift).name()));
+    };
+    connect(tab.modeCombo, &QComboBox::currentIndexChanged, this,
+            [paintMode](int) { paintMode(); });
+    paintMode();
+    optionsRow->addWidget(tab.modeCombo);
+    optionsRow->addSpacing(16);
+    optionsRow->addWidget(new QLabel(tr("Rate :")));
+    tab.rateCombo = new QComboBox;
+    tab.rateCombo->addItem(tr("1M"), 1000);
+    tab.rateCombo->addItem(tr("800k"), 800);
+    tab.rateCombo->addItem(tr("500k"), 500);
+    tab.rateCombo->addItem(tr("250k"), 250);
+    tab.rateCombo->addItem(tr("200k"), 200);
+    tab.rateCombo->addItem(tr("125k"), 125);
+    tab.rateCombo->addItem(tr("100k"), 100);
+    // Stored as 83, sent as 83,333 Hz: GMLAN's low-speed rate is 1 Mbit / 12,
+    // and 83,000 would be 0.4% off the bus. See ct::busRateHz.
+    tab.rateCombo->addItem(tr("83.3k"), 83);
+    tab.rateCombo->addItem(tr("50k"), 50);
+    tab.rateCombo->setCurrentIndex(qMax(0, tab.rateCombo->findData(m_buses[busIndex].rateKbps)));
+    optionsRow->addWidget(tab.rateCombo);
+    optionsRow->addSpacing(16);
+    optionsRow->addWidget(new QLabel(tr("FD Data :")));
+    tab.fdRateCombo = new QComboBox;
+    tab.fdRateCombo->addItem(tr("Off (classic)"), 0);
+    tab.fdRateCombo->addItem(tr("1M"), 1000);
+    tab.fdRateCombo->addItem(tr("2M"), 2000);
+    // 4M and 5M left this menu before anything shipped with them. A file that
+    // still says one means "the fastest FD this build offers", not "classic" —
+    // falling to index 0 would silently strip FD from every section using it.
+    int fdIdx = tab.fdRateCombo->findData(m_buses[busIndex].dataRateKbps);
+    if (fdIdx < 0 && m_buses[busIndex].dataRateKbps > 0)
+        fdIdx = tab.fdRateCombo->findData(2000);
+    tab.fdRateCombo->setCurrentIndex(qMax(0, fdIdx));
+    // The device runs FD only when the data rate EXCEEDS the base rate — a
+    // data choice at or below it is not a slower FD, it is classic wearing an
+    // FD label. Those entries go dark as the base rate moves, and a selection
+    // stranded by the move slides to 2M, the one rate faster than every base
+    // this menu offers.
+    {
+        QComboBox *rateCombo = tab.rateCombo;
+        QComboBox *fdCombo = tab.fdRateCombo;
+        const auto updateFdChoices = [rateCombo, fdCombo]() {
+            const int base = rateCombo->currentData().toInt();
+            auto *model = qobject_cast<QStandardItemModel *>(fdCombo->model());
+            for (int i = 0; model && i < fdCombo->count(); ++i) {
+                const int fd = fdCombo->itemData(i).toInt();
+                model->item(i)->setEnabled(fd == 0 || fd > base);
+            }
+            const int cur = fdCombo->currentData().toInt();
+            if (cur > 0 && cur <= base)
+                fdCombo->setCurrentIndex(qMax(0, fdCombo->findData(2000)));
+        };
+        connect(tab.rateCombo, &QComboBox::currentIndexChanged, this, updateFdChoices);
+        updateFdChoices();
+    }
+    optionsRow->addWidget(tab.fdRateCombo);
+    optionsRow->addSpacing(16);
+    optionsRow->addWidget(new QLabel(tr("Termination Resistor :")));
+    tab.terminationCombo = new QComboBox;
+    tab.terminationCombo->addItem(tr("Off"), false);
+    tab.terminationCombo->addItem(tr("On"), true);
+    tab.terminationCombo->setCurrentIndex(m_buses[busIndex].termination ? 1 : 0);
+    tab.terminationCombo->setToolTip(tr("Enable this bus's 120Ω termination resistor "
+                                        "(applied on Send Configuration — firmware v9)"));
+    optionsRow->addWidget(tab.terminationCombo);
+    auto *rateNote = new QLabel(tr("(applied on Send Configuration — firmware v2)"));
+    rateNote->setStyleSheet(QStringLiteral("color: gray;"));
+    optionsRow->addWidget(rateNote);
+    optionsRow->addStretch();
+    layout->addWidget(optionsGroup);
+
+    // Sections + buttons + channels
+    auto *middle = new QHBoxLayout;
+
+    auto *sectionsColumn = new QVBoxLayout;
+    auto *sectionsLabel = new QLabel(tr("Sections :  (list order = transmit order)"));
+    sectionsLabel->setToolTip(tr("Transmit messages are pushed to the bus in this order, "
+                                 "top first. Use Move Up / Move Down to reorder."));
+    sectionsColumn->addWidget(sectionsLabel);
+    tab.sectionTree = new QTreeWidget;
+    tab.sectionTree->setHeaderLabels({tr("Section"), tr("Name")});
+    tab.sectionTree->setRootIsDecorated(false);
+    tab.sectionTree->setColumnWidth(0, 90);
+    // Shift-click for a run, ctrl-click to add or drop one. Reordering and
+    // deleting a group of messages is the ordinary case once a DBC import has
+    // dropped thirty of them in at once, and doing it one row at a time is the
+    // kind of tedium that gets a configuration wrong.
+    tab.sectionTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    tab.sectionTree->setSelectionBehavior(QAbstractItemView::SelectRows);
+    connect(tab.sectionTree, &QTreeWidget::currentItemChanged, this, [this, busIndex]() {
+        updateChannelPane(busIndex);
+        updateButtons(busIndex);
+    });
+    // Selection can change without the CURRENT row changing — ctrl-clicking a
+    // second row, or shift-extending downward — and the buttons have to follow
+    // the selection, not the cursor.
+    connect(tab.sectionTree, &QTreeWidget::itemSelectionChanged, this,
+            [this, busIndex]() { updateButtons(busIndex); });
+    connect(tab.sectionTree, &QTreeWidget::itemDoubleClicked, this,
+            [this, busIndex]() { onEditSection(busIndex); });
+    sectionsColumn->addWidget(tab.sectionTree, 1);
+    tab.availableLabel = new QLabel;
+    sectionsColumn->addWidget(tab.availableLabel);
+    middle->addLayout(sectionsColumn, 3);
+
+    auto *buttonColumn = new QVBoxLayout;
+    auto *selectButton = new QPushButton(tr("Select…"));
+    selectButton->setEnabled(false);
+    selectButton->setToolTip(tr("A library of predefined device templates — planned. "
+                                "Load… below already does this from a template file you or "
+                                "a supplier saved."));
+    buttonColumn->addWidget(selectButton);
+    auto *importButton = new QPushButton(tr("Import DBC…"));
+    importButton->setToolTip(tr("Import messages and signals from a .dbc file"));
+    connect(importButton, &QPushButton::clicked, this, [this, busIndex]() { onImportDbc(busIndex); });
+    buttonColumn->addWidget(importButton);
+    tab.newButton = new QPushButton(tr("New…"));
+    connect(tab.newButton, &QPushButton::clicked, this, [this, busIndex]() { onNewSection(busIndex); });
+    buttonColumn->addWidget(tab.newButton);
+    tab.editButton = new QPushButton(tr("Edit…"));
+    connect(tab.editButton, &QPushButton::clicked, this, [this, busIndex]() { onEditSection(busIndex); });
+    buttonColumn->addWidget(tab.editButton);
+    // SAVE / LOAD — communications templates. They sit between Edit and the
+    // reordering pair because that is where they belong by subject: Select,
+    // Import DBC, New, Edit, Save and Load are the six ways a message gets INTO
+    // this list or out of it, and Move/Remove are what you do to it afterwards.
+    tab.saveButton = new QPushButton(tr("Save…"));
+    tab.saveButton->setObjectName(QStringLiteral("saveTemplateButton"));
+    connect(tab.saveButton, &QPushButton::clicked, this,
+            [this, busIndex]() { onSaveTemplate(busIndex); });
+    buttonColumn->addWidget(tab.saveButton);
+    tab.loadButton = new QPushButton(tr("Load…"));
+    tab.loadButton->setObjectName(QStringLiteral("loadTemplateButton"));
+    tab.loadButton->setToolTip(tr("Add the messages from a saved communications template "
+                                  "(*.ct3t) to this bus, creating the channels they need."));
+    connect(tab.loadButton, &QPushButton::clicked, this,
+            [this, busIndex]() { onLoadTemplate(busIndex); });
+    buttonColumn->addWidget(tab.loadButton);
+    // Section order is the transmit order: on each tick the firmware composes
+    // and enqueues its transmit messages in list order (top first), so moving a
+    // message up sends it earlier.
+    const QString orderTip = tr("Messages are transmitted in list order — the top "
+                                "section is pushed to the bus first each cycle.");
+    tab.upButton = new QPushButton(tr("↑ Move Up"));
+    tab.upButton->setToolTip(orderTip);
+    connect(tab.upButton, &QPushButton::clicked, this,
+            [this, busIndex]() { onMoveSection(busIndex, -1); });
+    buttonColumn->addWidget(tab.upButton);
+    tab.downButton = new QPushButton(tr("↓ Move Down"));
+    tab.downButton->setToolTip(orderTip);
+    connect(tab.downButton, &QPushButton::clicked, this,
+            [this, busIndex]() { onMoveSection(busIndex, +1); });
+    buttonColumn->addWidget(tab.downButton);
+    tab.removeButton = new QPushButton(tr("Remove"));
+    connect(tab.removeButton, &QPushButton::clicked, this,
+            [this, busIndex]() { onRemoveSection(busIndex); });
+    buttonColumn->addWidget(tab.removeButton);
+    tab.removeAllButton = new QPushButton(tr("Remove All"));
+    connect(tab.removeAllButton, &QPushButton::clicked, this,
+            [this, busIndex]() { onRemoveAll(busIndex); });
+    buttonColumn->addWidget(tab.removeAllButton);
+    buttonColumn->addStretch();
+    middle->addLayout(buttonColumn, 0);
+
+    auto *channelsColumn = new QVBoxLayout;
+    channelsColumn->addWidget(new QLabel(tr("Channels :")));
+    tab.channelList = new QListWidget;
+    tab.channelList->setSelectionMode(QAbstractItemView::NoSelection);
+    channelsColumn->addWidget(tab.channelList, 1);
+    middle->addLayout(channelsColumn, 2);
+
+    layout->addLayout(middle, 1);
+    return page;
+}
+
+// The document's verdict with rule 3's pending re-conceals over the top. Every
+// display decision in this dialog asks THIS rather than the document directly, so
+// a section cannot come back padlocked in the list and still list its channels in
+// the pane beside it. See m_pendingRevoke for why the grant is still live on the
+// document while this already answers false.
+// The queue key, and it carries the BUS for the same reason the document's grants
+// do: two buses may hold a section of the same name, and a pending re-conceal for
+// one of them must not padlock the other's row.
+static QString pendingKey(int busIndex, const QString &name)
+{
+    return QStringLiteral("%1/%2").arg(busIndex).arg(name.toLower());
+}
+
+bool CommunicationsDialog::sectionRevealed(int busIndex, const CommsSection &section) const
+{
+    if (m_pendingRevoke.contains(pendingKey(busIndex, section.name)))
+        return false;
+    // The bus goes to the document too. This dialog always knows which bus a row
+    // is on, so a grant taken for a same-named section on another bus must not
+    // unlock this row's channel pane.
+    return m_config->isSectionRevealed(section, busIndex);
+}
+
+void CommunicationsDialog::rebuildSections(int busIndex)
+{
+    BusTab &tab = m_busTabs[busIndex];
+    const int previousRow = tab.sectionTree->indexOfTopLevelItem(tab.sectionTree->currentItem());
+    tab.sectionTree->clear();
+    // Asked per SECTION, not once for the document: a section unlocked with its
+    // own password this session is revealed while its neighbours stay shut.
+    for (const CommsSection &s : m_buses[busIndex].sections) {
+        const bool revealed = sectionRevealed(busIndex, s);
+        auto *item = new QTreeWidgetItem(tab.sectionTree);
+        item->setText(0, sectionKind(s, revealed));
+        item->setText(1, sectionSummary(s, revealed));
+    }
+    if (tab.sectionTree->topLevelItemCount() > 0) {
+        const int row = qBound(0, previousRow, tab.sectionTree->topLevelItemCount() - 1);
+        tab.sectionTree->setCurrentItem(tab.sectionTree->topLevelItem(row));
+    }
+
+    // Count what the label CLAIMS to count: sections that consume a slot in
+    // the device's 500-entry message table. The mapper never appends an Off
+    // section (it configures nothing) or a Relay (relays live in their own
+    // 32-rule table), so counting every section read high by exactly those
+    // rows and contradicted the mapper this number is meant to summarise.
+    int totalMessages = 0;
+    for (const auto &bus : m_buses)
+        for (const CommsSection &s : bus.sections)
+            if (s.device != SectionDevice::Off && !s.isRelay())
+                ++totalMessages;
+    tab.availableLabel->setText(tr("%1 of %2 device messages used")
+                                    .arg(totalMessages)
+                                    .arg(MAX_MESSAGES));
+    updateChannelPane(busIndex);
+}
+
+void CommunicationsDialog::updateChannelPane(int busIndex)
+{
+    BusTab &tab = m_busTabs[busIndex];
+    tab.channelList->clear();
+    const CommsSection *selected = selectedSection(busIndex);
+    if (!selected)
+        return;
+    const CommsSection &s = *selected;
+    if (s.isRelay()) {
+        tab.channelList->addItem(tr("(relay — forwards whole frames, no channels)"));
+        return;
+    }
+    // One line and nothing else, which is what MoTeC shows and what the flag is
+    // for. Channel NAMES are not the secret and stay visible everywhere they are
+    // USED — the Channel Editor, math and condition inputs, transmit rows — but
+    // this pane is the one place they would be listed BY MESSAGE, and that
+    // grouping is protocol detail in its own right: it says which signals share
+    // a frame, and in compound mode which multiplexor value each belongs to.
+    // Listing them here would hand back a good part of the frame's shape.
+    //
+    // Read Only lists its channels normally. It withholds nothing — that is the
+    // entire difference between it and Hidden — and blanking this pane for it
+    // would be the v21 behaviour this release exists to undo.
+    if (s.isConcealed(sectionRevealed(busIndex, s))) {
+        tab.channelList->addItem(tr("(Channel information locked)"));
+        return;
+    }
+    // Names are shown with their unit. This pane is display only — the list is
+    // NoSelection, it is cleared and rebuilt from the sections on every change,
+    // and nothing ever reads an item's text back — so the decorated string has
+    // nowhere to leak into. The row's `channelName` remains the identity.
+    const ChannelCatalog &catalog = m_config->catalog();
+    if (s.compound) {
+        for (int i = 0; i < s.identifiers.size(); ++i) {
+            const CompoundIdentifier &ident = s.identifiers[i];
+            if (ident.rows.isEmpty())
+                continue;
+            tab.channelList->addItem(tr("— ID %1 (0x%2) —")
+                                         .arg(i + 1)
+                                         .arg(QString::number(ident.id, 16).toUpper()));
+            for (const CommsChannelRow &r : ident.rows)
+                tab.channelList->addItem(QStringLiteral("    ") + catalog.labelFor(r.channelName));
+        }
+    } else {
+        for (const CommsChannelRow &r : s.rows)
+            tab.channelList->addItem(catalog.labelFor(r.channelName));
+    }
+    if (tab.channelList->count() == 0)
+        tab.channelList->addItem(tr("(no channels)"));
+}
+
+const CommsSection *CommunicationsDialog::selectedSection(int busIndex) const
+{
+    const BusTab &tab = m_busTabs[busIndex];
+    const int row = tab.sectionTree->indexOfTopLevelItem(tab.sectionTree->currentItem());
+    if (row < 0 || row >= m_buses[busIndex].sections.size())
+        return nullptr;
+    return &m_buses[busIndex].sections.at(row);
+}
+
+void CommunicationsDialog::updateButtons(int busIndex)
+{
+    BusTab &tab = m_busTabs[busIndex];
+    const int count = m_buses[busIndex].sections.size();
+    const QList<int> rows = selectedRows(busIndex);
+    const CommsSection *selected = selectedSection(busIndex);
+    const bool haveRow = selected != nullptr;
+    const bool concealed =
+        haveRow && selected->isConcealed(sectionRevealed(busIndex, *selected));
+
+    // Edit stays LIVE for a concealed message now, and that is the change. It
+    // used to be greyed out with a tooltip naming a menu item, which meant the
+    // one control that could plausibly ask for the password was the one control
+    // that refused to do anything. Pressing it now runs the challenge the
+    // section's own tier demands (see unlockConcealedSection) and opens the
+    // editor if it is met — the password prompt belongs on the thing being
+    // unlocked.
+    //
+    // It still needs exactly ONE row: the editor opens a single section, and
+    // there is no sensible section for it to open out of several.
+    const bool single = rows.size() == 1;
+    tab.editButton->setEnabled(single && haveRow);
+    tab.editButton->setToolTip(
+        !single && rows.size() > 1
+            ? tr("Select a single message to edit it.")
+            : (concealed
+                   // Three states, not two. A concealed section with NO Message
+                   // Password cannot be opened by anyone, so the tooltip says
+                   // that instead of promising a prompt that would only be able
+                   // to refuse — and names the things that DO work, since "Edit
+                   // does nothing" with no reason given is the worst of the
+                   // available answers.
+                   //
+                   // "and cannot be given one" is spelled out because the obvious
+                   // guess is wrong in a way that costs time: giving a keyless
+                   // section a first password IS the repair, and it IS free, but
+                   // it happens in the editor — and the editor is the thing this
+                   // tier will not open. That route exists only at Read Only,
+                   // which is not this branch. Say so here rather than let
+                   // someone hunt for it.
+                   ? (selected->messageKey == kNoAccessKey
+                          ? tr("\"%1\" is marked, and it arrived without a Message Password — "
+                               "from a configuration read back off a device, or from a file "
+                               "written before markings carried passwords. No password for it "
+                               "exists, so it cannot be opened, and it cannot be given one "
+                               "either — that is done in the editor, and the editor will not "
+                               "open. It can be removed, and it can be reordered and sent.")
+                                .arg(selected->name)
+                          : selected->protection == CommsProtection::Protected
+                          ? tr("\"%1\" is marked Protect Communication. Opening it asks for this "
+                               "section's own Message Password AND for the Protected Comms "
+                               "password, which is checked against the connected device.")
+                                .arg(selected->name)
+                          : tr("\"%1\" is hidden. Opening it asks for this section's own "
+                               "password.")
+                                .arg(selected->name))
+                   // Read Only, and it gets TWO states for the same reason the
+                   // concealing branch above does. A keyless Read Only section
+                   // opens — it conceals nothing, so there is nothing to unlock —
+                   // but the untick inside it is refused by
+                   // Configuration::maySectionLower, which fails closed when there
+                   // is no password. "Untick Read Only inside to change it" is
+                   // then an instruction that cannot be carried out. Unlike the
+                   // concealing tiers this one HAS a repair, because the editor
+                   // does open, so the tooltip gives it.
+                   : (haveRow && selected->isEditLocked()
+                          ? (selected->messageKey == kNoAccessKey
+                                 ? tr("\"%1\" is Read Only and arrived without a Message "
+                                      "Password, so there is nothing that could authorise "
+                                      "unticking it. Open it, type a Message Password and save; "
+                                      "unticking Read Only then asks for that password on the "
+                                      "next visit.")
+                                       .arg(selected->name)
+                                 : tr("\"%1\" is Read Only: it opens with every field shown and "
+                                      "none of them editable. Untick Read Only inside to change "
+                                      "it.")
+                                       .arg(selected->name))
+                          : QString())));
+    // Remove deliberately stays live AT EVERY TIER, and that is now the spec
+    // rather than this file's own judgement — Read Only, Hidden and Protected
+    // all permit removal, and nothing in the host or the firmware refuses it.
+    // Protecting a message protects its protocol, not its place in the
+    // customer's configuration: someone who cannot read a supplier's message may
+    // still have every reason to delete it, and refusing would leave a locked
+    // message impossible to be rid of short of editing the .ct3 by hand.
+    // Reordering is the same argument, so Move Up / Move Down are untouched too.
+    //
+    // The consequence is stated honestly in the tooltips and the help rather
+    // than papered over: for Read Only, remove-and-retype reproduces the message
+    // without the password, which is exactly why Read Only is described as
+    // accident prevention and never as security. For Hidden and Protected the
+    // same sequence DESTROYS rather than reveals, because the operator cannot
+    // see what to retype — which is the substantive difference between the
+    // tiers.
+    //
+    // All three act on the whole selection. The two Move buttons go dead when
+    // the selection already touches the end it would travel towards, because the
+    // group moves as a unit — see onMoveSection.
+    tab.removeButton->setEnabled(!rows.isEmpty());
+    tab.upButton->setEnabled(!rows.isEmpty() && rows.first() > 0);
+    tab.downButton->setEnabled(!rows.isEmpty() && rows.last() < count - 1);
+    tab.removeAllButton->setEnabled(count > 0);
+
+    // Save takes the SELECTION, not the bus, so it needs one — and saying so in
+    // the tooltip is the whole of the discoverability here, since a button that
+    // writes a different number of messages depending on what is highlighted
+    // has to state which. It stays LIVE for a concealed message rather than
+    // greying out: the refusal has a reason worth reading, and
+    // onSaveTemplate() gives it. Same argument as Edit above.
+    tab.saveButton->setEnabled(!rows.isEmpty());
+    tab.saveButton->setToolTip(
+        rows.isEmpty()
+            ? tr("Select the messages to save as a communications template.")
+            : (rows.size() == 1
+                   ? tr("Save \"%1\" as a communications template (*.ct3t).")
+                         .arg(m_buses[busIndex].sections.at(rows.first()).name)
+                   : tr("Save the %1 selected messages as a communications template (*.ct3t).")
+                         .arg(rows.size())));
+}
+
+BusConfig CommunicationsDialog::currentBusSettings(int busIndex) const
+{
+    const BusTab &tab = m_busTabs[busIndex];
+    BusConfig bus = m_buses[busIndex];
+    bus.enabled = tab.modeCombo->currentData().toBool();
+    bus.rateKbps = tab.rateCombo->currentData().toInt();
+    bus.dataRateKbps = tab.fdRateCombo->currentData().toInt();
+    bus.termination = tab.terminationCombo->currentData().toBool();
+    return bus;
+}
+
+ConfigPatch CommunicationsDialog::liveView() const
+{
+    // By value: the section editor holds the patch for as long as it is open.
+    std::array<BusConfig, 3> buses{m_buses[0], m_buses[1], m_buses[2]};
+    return [buses](Configuration &c) {
+        for (int b = 0; b < 3; ++b)
+            c.bus[b] = buses[b];
+    };
+}
+
+void CommunicationsDialog::onNewSection(int busIndex)
+{
+    CommsSection section;
+    section.device = SectionDevice::ReceiveMessage;
+    SectionEditorDialog dialog(m_config, section, busIndex, liveView(), /*sectionIndex=*/-1,
+                               this, m_prover,
+                               m_busTabs[busIndex].fdRateCombo->currentData().toInt());
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    m_buses[busIndex].sections.append(dialog.section());
+    rebuildSections(busIndex);
+    m_busTabs[busIndex].sectionTree->setCurrentItem(m_busTabs[busIndex].sectionTree->topLevelItem(
+        m_buses[busIndex].sections.size() - 1));
+    updateButtons(busIndex);
+}
+
+// EVERY challenge a CONCEALED section's tier demands, before its editor will
+// open. Which ones apply is Configuration::proofsRequiredFor()'s answer and
+// nothing this function decides for itself:
+//
+//   Hidden      this section's own password, checked here against the document.
+//               No device, by design — Hidden is the tier that never names one.
+//   Protected   that password AND the Protected Comms password PROVED
+//               AGAINST A CONNECTED DEVICE. The round trip is the only thing that
+//               makes Protected stronger than Hidden, so there is no offline
+//               fallback and there must never be one; the section password is the
+//               half added in 2.3.1, when Protected stopped being the one marking
+//               with no per-section secret behind it.
+//
+// The local password is asked FIRST and the device second, deliberately: it costs
+// nothing, so a wrong answer or a change of mind never spends a serial round trip
+// (which blocks the UI) to find that out.
+//
+// Meeting them records a grant on the DOCUMENT rather than a flag on this dialog,
+// because the grant has to outlive both: it is what reveals the section
+// everywhere else in the app for the rest of the session, and it is what
+// Configuration::applyBusSections consults when the untick is finally committed.
+// It is recorded ONCE, after the last proof — a grant stands for the whole of a
+// tier's challenge, so recording it between the two halves would hand out the
+// device half for free.
+bool CommunicationsDialog::unlockConcealedSection(int busIndex, const CommsSection &section)
+{
+    const Configuration::SectionProofs need =
+        Configuration::proofsRequiredFor(section.protection);
+
+    // A CONCEALED SECTION WITH NO PASSWORD CANNOT BE OPENED, and saying so here
+    // is what keeps this dialog's decoration and its behaviour telling the same
+    // story. It used to skip the challenge instead — "nobody set a password, so
+    // asking for one would be theatre" — which produced the row the user
+    // reported: a padlock and the word "hidden" in the list, and an Edit button
+    // that opened the whole message on a double-click with nothing asked for.
+    // Configuration::isSectionRevealed() now conceals such a section, so this
+    // has to refuse it; the two must ask the same question or the disagreement
+    // simply comes back.
+    //
+    // Refused BEFORE the device proof below, deliberately. A keyless Protected
+    // section would otherwise spend a serial round trip (which blocks the UI) to
+    // earn a grant that Configuration::grantSectionAccess declines to record —
+    // proving something true and being told nothing at all had changed.
+    //
+    // This is the ordinary state of a configuration read back off a unit: the
+    // wire carries `reserved[4]` and no key, so every section a Get produces
+    // arrives keyless, as does every section in a file written before markings
+    // carried passwords.
+    if (need.sectionPassword && section.messageKey == kNoAccessKey) {
+        QMessageBox::information(
+            this, windowTitle(),
+            tr("\"%1\" is marked %2, and it arrived without a Message Password — from a "
+               "configuration read back off a device, or from a file written before markings "
+               "carried passwords.\n\n"
+               "No password for it exists anywhere, so there is nothing that could open it and "
+               "nothing to go and look for. It cannot be given one either: a Message Password is "
+               "typed into this message's editor, and that is the window this refusal is "
+               "standing in the way of. (A Read Only message has that way out, because Read "
+               "Only conceals nothing and always opens. This one is not Read Only.)\n\n"
+               "The message can still be REMOVED, and it can be reordered and sent as it is. Its "
+               "channels can be used everywhere else in the configuration.\n\n"
+               "The original configuration file the message was built in still holds its "
+               "password and still opens it.")
+                .arg(section.name,
+                     section.protection == CommsProtection::Protected
+                         ? tr("Protect Communication")
+                         : tr("Hidden")));
+        return false;
+    }
+
+    if (need.sectionPassword) {
+        QString prompt =
+            section.protection == CommsProtection::Protected
+                ? tr("\"%1\" is marked Protect Communication. Enter this section's own password "
+                     "to open it — the device is asked for the Protected Comms password "
+                     "next.")
+                      .arg(section.name)
+                : tr("\"%1\" is hidden. Enter this section's own password to open it.")
+                      .arg(section.name);
+        for (;;) {
+            bool ok = false;
+            const QString typed =
+                QInputDialog::getText(this, windowTitle(), prompt + tr("\n\nMessage Password :"),
+                                      QLineEdit::Password, QString(), &ok);
+            if (!ok)
+                return false;
+            if (!typed.isEmpty() && deriveAccessKey(typed) == section.messageKey)
+                break;
+            // Nothing about how wrong it was: no "close", no length hint.
+            prompt = tr("That password is not correct.");
+        }
+    }
+
+    if (need.deviceProof) {
+        if (!m_prover) {
+            QMessageBox::information(
+                this, windowTitle(),
+                tr("\"%1\" is marked Protect Communication by whoever built this "
+                   "configuration. Opening it needs the Protected Comms password checked "
+                   "by a connected CAN Triple, and this window has no device to ask.\n\n"
+                   "The channels it produces can still be used anywhere else, and the section "
+                   "can still be removed, reordered and sent — none of that needs a device.")
+                    .arg(section.name));
+            return false;
+        }
+        // The prover owns every fact about the hardware and reports its own
+        // failures: nothing connected, the password wrong, or the unit holding
+        // no such password at all.
+        if (!m_prover())
+            return false;
+    }
+
+    // The BUS goes in with it. A grant used to be a bare name, which is a value
+    // the person being kept out picks: add a section on another bus under the
+    // same name, unlock that one with a password of your own, and the real one
+    // opened. `section` also carries the messageKey the challenge above was
+    // answered against, which is what retires the grant if that key is ever
+    // replaced.
+    m_config->grantSectionAccess(busIndex, section);
+    return true;
+}
+
+void CommunicationsDialog::onEditSection(int busIndex)
+{
+    BusTab &tab = m_busTabs[busIndex];
+    const int row = tab.sectionTree->indexOfTopLevelItem(tab.sectionTree->currentItem());
+    if (row < 0 || row >= m_buses[busIndex].sections.size())
+        return;
+    // A concealed message is opened by ASKING, not by refusing and pointing at a
+    // menu. The old refusal named File > Reveal Protected Comms, which is the
+    // document-wide password and is not what a Hidden section is guarded by at
+    // all. The editor still opens with every protocol field disabled once it is
+    // in — revealing buys viewing and the right to untick, not editing.
+    //
+    // A Read Only section falls straight through: it conceals nothing, so there
+    // is nothing to unlock before looking at it.
+    const CommsSection &target = m_buses[busIndex].sections[row];
+    if (target.isConcealed(sectionRevealed(busIndex, target))
+        && !unlockConcealedSection(busIndex, target))
+        return;
+    // By value, before the editor can write over the slot: `target` is a reference
+    // INTO the list and the write-back below replaces what it points at, so
+    // reading a "before" name through it afterwards would silently return the
+    // "after" one.
+    const QString priorName = target.name;
+    SectionEditorDialog dialog(m_config, m_buses[busIndex].sections[row], busIndex, liveView(),
+                               row, this, m_prover,
+                               m_busTabs[busIndex].fdRateCombo->currentData().toInt());
+    const bool accepted = dialog.exec() == QDialog::Accepted;
+    if (accepted) {
+        // The editor is the only place a tier can be MOVED, and it refuses to move
+        // one without running every challenge that tier demands first. Recording
+        // the grant here, on the document, is what lets
+        // Configuration::applyBusSections accept the change when this dialog
+        // finally commits on OK — the dialog proves, the model enforces, and
+        // neither is asked to do the other's job.
+        //
+        // Recorded from the section AS IT STILL STANDS — before the line below
+        // overwrites it — because the grant has to answer for the key
+        // applyBusSections will ask about, which is the PRIOR one. Record it
+        // from dialog.section() instead and a password change would grant
+        // against the new key and authorise itself.
+        if (dialog.protectionUnlocked())
+            m_config->grantSectionAccess(busIndex, m_buses[busIndex].sections[row]);
+        m_buses[busIndex].sections[row] = dialog.section();
+    }
+
+    // RULE 3. The editor has closed — OK or Cancel, it makes no difference — and
+    // if what it leaves behind STILL CONCEALS, this dialog conceals it again right
+    // now. A password given to open a message once is not a standing licence to
+    // leave it open on screen while the box is still ticked; the user's words are
+    // "do not show the channels available in the Main Communications Setup
+    // afterwards".
+    //
+    // Protected is included as well as Hidden. The user wrote "hidden", but
+    // Protected conceals identically — same padlock, same "(Channel information
+    // locked)" pane — and leaving one revealed while the other re-conceals would
+    // be an inconsistency with no reason behind it, on the STRONGER of the two.
+    //
+    // Queued rather than revoked outright, because the grant is also what
+    // authorises the lowering that applyBusSections has not seen yet. Protect
+    // Communication down to Hidden is precisely that case: lowered, still
+    // concealing, and refused at OK if the grant went first. See m_pendingRevoke.
+    //
+    // Both names, so a rename inside the editor cannot leave the old grant
+    // standing: applyBusSections matches by name, and the grant set does too.
+    // Both on THIS bus, which is the only one this editor could have touched.
+    //
+    // Asked through CommsSection::isConcealed() rather than by comparing the
+    // tier here, and that is the point rather than a tidy-up: this queue and
+    // unlockConcealedSection's challenge must be driven by ONE predicate or they
+    // drift, and the drift has a shape — this site queued the re-conceal on the
+    // tier while that one skipped the password whenever the section was keyless,
+    // so a row came back padlocked and reading "(hidden)" with an Edit button
+    // that opened it for free. Both now ask "does this section conceal?".
+    // `revealed=false` is the right argument: the question is whether the
+    // section conceals from a viewer who has proved nothing, since re-concealing
+    // is exactly what turns this viewer back into one.
+    const CommsSection &after = m_buses[busIndex].sections[row];
+    if (after.isConcealed(/*revealed=*/false)) {
+        m_pendingRevoke.insert(pendingKey(busIndex, priorName));
+        m_pendingRevoke.insert(pendingKey(busIndex, after.name));
+    }
+
+    // Repaint either way. Even a cancelled editor may have unlocked the section on
+    // the way in, and that grant is real — the password was given — so the row has
+    // to stop showing a padlock the viewer has already opened, unless the line
+    // above has just shut it again.
+    rebuildSections(busIndex);
+    updateButtons(busIndex);
+}
+
+QList<int> CommunicationsDialog::selectedRows(int busIndex) const
+{
+    const BusTab &tab = m_busTabs[busIndex];
+    QList<int> rows;
+    for (QTreeWidgetItem *item : tab.sectionTree->selectedItems()) {
+        const int r = tab.sectionTree->indexOfTopLevelItem(item);
+        if (r >= 0 && r < m_buses[busIndex].sections.size())
+            rows.append(r);
+    }
+    // selectedItems() is in no documented order — with shift-select it commonly
+    // comes back in click order, so a downward drag and an upward one would
+    // otherwise remove and move different things.
+    std::sort(rows.begin(), rows.end());
+    return rows;
+}
+
+// ---------------------------------------------------------------- templates
+//
+// Save… and Load… move a GROUP OF MESSAGES between configurations: the
+// supplier's ECU, the dash that goes in every car, the lambda controller whose
+// protocol never changes. What travels is exactly what the section editor's two
+// tabs hold — every Parameters field and every channel row — plus the
+// definitions of the channels those rows name, because a row whose channel does
+// not exist in the target document decodes into nothing.
+//
+// The file is binary and encrypted (comms_template.h explains the container and
+// is candid about what that is and is not worth). Nothing in this dialog needs
+// to know how; it hands sections in and gets sections back.
+
+// A section name is the user's to choose and routinely holds characters Windows
+// will not accept in a file name — "Engine/Trans" is a name somebody types, and
+// a colon arrives with half the DBCs in the world. Substituted rather than
+// dropped, so two messages differing only in punctuation do not propose the
+// same file. This only SEEDS the Save dialog; what the user types there wins.
+static QString fileNameFromSection(const QString &name)
+{
+    static const QString forbidden = QStringLiteral("<>:\"/\\|?*");
+    QString out;
+    out.reserve(name.size());
+    for (const QChar c : name)
+        out += (c.unicode() < 0x20 || forbidden.contains(c)) ? QLatin1Char('-') : c;
+    // Windows drops trailing dots and spaces silently, which would turn
+    // "Rev 1." into "Rev 1" and make a second save overwrite the first without
+    // the overwrite prompt ever appearing.
+    out = out.trimmed();
+    while (out.endsWith(QLatin1Char('.')))
+        out.chop(1);
+    return out.trimmed();
+}
+
+void CommunicationsDialog::onSaveTemplate(int busIndex)
+{
+    const QList<int> rows = selectedRows(busIndex);
+    if (rows.isEmpty())
+        return;
+
+    // ANY MESSAGE CAN BE WRITTEN INTO A TEMPLATE, concealed in this session or
+    // not. This refused a concealed message until now, on the reasoning
+    // Configuration::saveToFile still uses: writing a message out is exactly
+    // what a viewer without its password may not do. That was the wrong place
+    // to enforce it, and the enforcement it bought was smaller than it looked.
+    //
+    // A template CARRIES the marking. The tier and the messageKey travel in the
+    // file and come back out of it, so a Hidden message saved here arrives
+    // padlocked in whatever document loads it, needing the same password it
+    // needed before — see comms_template.h. Writing one out therefore hands
+    // nobody anything they could read, including the person doing the writing:
+    // the bytes they cannot see in this session go into a sealed file they
+    // still cannot see into. Nothing is disclosed that the .ct3 already open in
+    // front of them was not already holding.
+    //
+    // Where protection is actually enforced is unchanged and is the answer to
+    // "what stops someone using this to get in": opening a concealed section
+    // for EDITING goes through unlockConcealedSection(), which demands the
+    // Message Password, and additionally the Protected Comms password
+    // proved against a connected device when the tier is Protect Communication.
+    // Save and Load move a locked box around; only those two open it.
+    //
+    // File > Save and Save Secure Config reached the same conclusion for the
+    // same reason immediately afterwards, so there is no longer an asymmetry
+    // between what can leave through a template and what can leave through its
+    // own document.
+    QList<CommsSection> chosen;
+    int marked = 0;
+    for (int r : rows) {
+        const CommsSection &s = m_buses[busIndex].sections.at(r);
+        if (s.protection != CommsProtection::None)
+            ++marked;
+        chosen.append(s);
+    }
+
+    QString error;
+    if (!ensureWritableDirectory(commsTemplatesDirectory(), &error)) {
+        QMessageBox::warning(this, tr("Save Communications Template"), error);
+        return;
+    }
+
+    const QString suggested = rows.size() == 1
+                                  ? fileNameFromSection(chosen.first().name)
+                                  : tr("CAN %1 messages").arg(busIndex + 1);
+    QString path = QFileDialog::getSaveFileName(
+        this, tr("Save Communications Template"),
+        commsTemplatesDirectory() + QLatin1Char('/') + suggested + QLatin1Char('.')
+            + commsTemplateExtension(),
+        commsTemplateFilter());
+    if (path.isEmpty())
+        return;
+    // Qt appends the selected filter's suffix, but only while that filter is
+    // the selected one — pick "All Files" and it does not. A template with
+    // no extension is one Load… will not list.
+    if (QFileInfo(path).suffix().compare(commsTemplateExtension(), Qt::CaseInsensitive) != 0)
+        path += QLatin1Char('.') + commsTemplateExtension();
+
+    CommsTemplate tmpl =
+        buildCommsTemplate(m_config->catalog(), currentBusSettings(busIndex), chosen,
+                           QFileInfo(path).completeBaseName());
+    // v16: THE PASSWORDS GO WITH THE FILE. A marked message names a slot, and a
+    // slot number means nothing away from the configuration that defined it, so
+    // the keys travel in the slots they had here. Loading re-homes them.
+    //
+    // All four are copied, empties included: the template's own reader only
+    // adopts the ones its sections actually name, and keeping the array the same
+    // shape means a slot number reads the same on both sides.
+    for (int slot = 1; slot <= Configuration::kCommsPasswordSlots; ++slot)
+        tmpl.passwords[slot - 1] = m_config->commsPassword(slot);
+    if (!writeCommsTemplate(path, tmpl, &error)) {
+        // With the path, because the commonest cause is where the file was
+        // going rather than what was in it.
+        QMessageBox::warning(this, tr("Save Communications Template"),
+                             tr("%1 could not be written.\n\n%2")
+                                 .arg(QDir::toNativeSeparators(path), error));
+        return;
+    }
+
+    // Says what was written and where, and stops there. The box used to add a
+    // line about the file being encrypted and unreadable in a text editor. That
+    // is true, and it is documented in the help where there is room to state its
+    // limit alongside it — the key travels inside the file, so it defeats a text
+    // search and not a determined reader. A confirmation box has no room for the
+    // qualifier, and a bare security claim with the qualifier missing is the kind
+    // of thing somebody repeats to a customer.
+    QString summary = tr("Saved %1 message(s) and %2 channel definition(s) to:\n\n%3")
+                          .arg(tmpl.sections.size())
+                          .arg(tmpl.channels.size())
+                          .arg(QDir::toNativeSeparators(path));
+    // Said out loud when it applies, because the person handing this file on is
+    // entitled to know it carries locked messages — and because somebody who
+    // saved a selection without noticing a padlock in it should find that out
+    // here rather than from whoever opens the file.
+    if (marked > 0) {
+        summary += tr("\n\n%1 of them keep their marking. Whoever loads this file gets the "
+                      "same padlock and needs the same password to open it.")
+                       .arg(marked);
+    }
+    QMessageBox::information(this, tr("Save Communications Template"), summary);
+}
+
+void CommunicationsDialog::onLoadTemplate(int busIndex)
+{
+    // Best effort, and NOT the writability probe Save uses: loading only reads,
+    // so a folder this account cannot write to is still a perfectly good place
+    // to browse. Refusing here would block a technician from loading the shop's
+    // templates on a machine where only an administrator may add to them.
+    //
+    // Best effort still means reading the answer, which this discarded. Not
+    // because the dialog misbehaves without it: Qt resolves a starting
+    // directory that does not exist to the same fallback it gives an empty
+    // string, measured against 6.7 rather than assumed. The point is that
+    // handing it a path already known to be missing offers a default that is
+    // then silently dropped, where an empty string says the true thing —
+    // there is no folder to start in.
+    QString startDirectory = commsTemplatesDirectory();
+    if (!QDir().mkpath(startDirectory)) {
+        startDirectory.clear();
+    }
+
+    const QString path =
+        QFileDialog::getOpenFileName(this, tr("Load Communications Template"),
+                                     startDirectory, commsTemplateFilter());
+    if (path.isEmpty())
+        return;
+
+    CommsTemplate tmpl;
+    QString error;
+    if (!readCommsTemplate(path, &tmpl, &error)) {
+        QMessageBox::warning(this, tr("Load Communications Template"), error);
+        return;
+    }
+
+    // How many of the device's message slots a list consumes, counted the way
+    // the "N of M device messages used" label counts them: an Off section
+    // configures nothing and a relay lives in its own 32-rule table, so neither
+    // takes one. (Not named `slots` — Qt defines that as an empty macro, and
+    // the lambda would vanish taking its name with it.)
+    const auto slotsUsed = [](const QList<CommsSection> &list) {
+        int n = 0;
+        for (const CommsSection &s : list)
+            if (s.device != SectionDevice::Off && !s.isRelay())
+                ++n;
+        return n;
+    };
+    int used = 0;
+    for (const auto &bus : m_buses)
+        used += slotsUsed(bus.sections);
+    const int adding = slotsUsed(tmpl.sections);
+    // CHECKED BEFORE ANYTHING IS CREATED. The alternative is a document over the
+    // device's limit and a Send that refuses it, with the repair being to work
+    // out which of the thirty messages just added are the surplus.
+    if (used + adding > MAX_MESSAGES) {
+        QMessageBox::warning(this, tr("Load Communications Template"),
+                             tr("This template adds %1 message(s), and this configuration "
+                                "already uses %2 of the device's %3. Remove some messages "
+                                "first.")
+                                 .arg(adding)
+                                 .arg(used)
+                                 .arg(MAX_MESSAGES));
+        return;
+    }
+
+    // THE BUS SETTINGS ARE OFFERED, NOT APPLIED. They belong to the user's
+    // configuration and not to this file — but a template for a 500k device
+    // dropped onto a 1M bus does not work and says nothing about why, so
+    // staying silent is not the neutral choice it looks like.
+    const BusConfig current = currentBusSettings(busIndex);
+    bool applyBus = false;
+    if (tmpl.hasBusSettings
+        && (tmpl.rateKbps != current.rateKbps || tmpl.dataRateKbps != current.dataRateKbps
+            || tmpl.termination != current.termination)) {
+        // Spelled the way the FD Data dropdown spells it, so the question and
+        // the control behind it are talking about the same thing: a box saying
+        // "2000k" next to a menu offering "2M" reads as a third value.
+        const auto fdLabel = [](int kbps) {
+            if (kbps <= 0)
+                return tr("off (classic)");
+            if (kbps == 1000)
+                return tr("1M");
+            if (kbps == 2000)
+                return tr("2M");
+            return tr("%1k").arg(kbps);
+        };
+        applyBus =
+            QMessageBox::question(
+                this, tr("Load Communications Template"),
+                tr("This template was saved from a bus running at %1k, FD data %2, "
+                   "termination %3.\n\nCAN %4 is currently %5k, FD data %6, termination %7."
+                   "\n\nApply the template's bus settings?")
+                    .arg(busRateLabel(tmpl.rateKbps), fdLabel(tmpl.dataRateKbps),
+                         tmpl.termination ? tr("on") : tr("off"))
+                    .arg(busIndex + 1)
+                    .arg(busRateLabel(current.rateKbps), fdLabel(current.dataRateKbps),
+                         current.termination ? tr("on") : tr("off")),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+            == QMessageBox::Yes;
+    }
+
+    // ASKED BEFORE THE MERGE, and the order is the point. mergeCommsTemplate
+    // CREATES CHANNELS in the document's catalogue as it resolves the file, and
+    // those stay even if the sections are later discarded. A refusal found
+    // afterwards would already have changed the document, so "nothing is
+    // applied" would be untrue in exactly the case it is being promised.
+    if (!commsTemplatePasswordsFit(*m_config, tmpl, &error)) {
+        QMessageBox::warning(this, tr("Load Communications Template"), error);
+        return;
+    }
+
+    CommsTemplateMerge merge;
+    if (!mergeCommsTemplate(m_config->catalog(), busIndex, tmpl, &merge, &error)) {
+        QMessageBox::warning(this, tr("Load Communications Template"), error);
+        return;
+    }
+    // The passwords are homed only now the merge has succeeded, so a template
+    // that failed to resolve has not spent a slot on the way past.
+    adoptCommsTemplatePasswords(*m_config, tmpl);
+    updatePasswordsTab();
+
+    // The channels went into the DOCUMENT's catalogue, not into this dialog's
+    // working copies, so the document is dirty whatever happens to the sections
+    // from here — including a Cancel. That is DBC import's behaviour too, and
+    // being consistent about it is worth more than being clever in one of the
+    // two; the help says so where a user will read it.
+    if (merge.channelsCreated > 0)
+        m_config->setDirty();
+
+    if (applyBus) {
+        BusTab &busTab = m_busTabs[busIndex];
+        // Rate first: the FD list enables and disables its entries from the
+        // base rate, so setting FD before the rate that has to clear it would
+        // land on a disabled row.
+        const int rateIdx = busTab.rateCombo->findData(tmpl.rateKbps);
+        if (rateIdx >= 0)
+            busTab.rateCombo->setCurrentIndex(rateIdx);
+        const int fdIdx = busTab.fdRateCombo->findData(tmpl.dataRateKbps);
+        if (fdIdx >= 0)
+            busTab.fdRateCombo->setCurrentIndex(fdIdx);
+        busTab.terminationCombo->setCurrentIndex(tmpl.termination ? 1 : 0);
+    }
+
+    const int firstNew = m_buses[busIndex].sections.size();
+    m_buses[busIndex].sections.append(merge.sections);
+
+    // Every tab, because the "N of M device messages used" label counts all
+    // three buses — the same reason the DBC import rebuilds them all.
+    for (int i = 0; i < 3; ++i) {
+        rebuildSections(i);
+        updateButtons(i);
+    }
+    m_tabs->setCurrentIndex(busIndex);
+    // Select what just arrived, and nothing else. The messages a load added are
+    // the ones the user is about to look at, reorder or think better of, and
+    // leaving the selection wherever it was would make Remove aim at the wrong
+    // rows immediately afterwards.
+    BusTab &tab = m_busTabs[busIndex];
+    tab.sectionTree->clearSelection();
+    if (QTreeWidgetItem *first = tab.sectionTree->topLevelItem(firstNew))
+        tab.sectionTree->setCurrentItem(first);
+    for (int r = firstNew; r < m_buses[busIndex].sections.size(); ++r)
+        if (QTreeWidgetItem *item = tab.sectionTree->topLevelItem(r))
+            item->setSelected(true);
+    updateButtons(busIndex);
+
+    QString summary =
+        tr("Added %1 message(s) to CAN %2.").arg(merge.sections.size()).arg(busIndex + 1);
+    if (merge.channelsCreated > 0 || merge.channelsReused > 0)
+        summary += tr("\n\n%1 channel(s) created, %2 reused from this configuration.")
+                       .arg(merge.channelsCreated)
+                       .arg(merge.channelsReused);
+    if (merge.notes.isEmpty()) {
+        QMessageBox::information(this, tr("Load Communications Template"), summary);
+    } else {
+        // One line per rename, dropped route target or unresolved reference. A
+        // thirty-message template produces a lot of them, so they go in the
+        // scrollable details pane rather than growing the box — the same shape
+        // the DBC import uses for the same reason.
+        QMessageBox box(QMessageBox::Information, tr("Load Communications Template"),
+                        summary + tr("\n\n%1 note(s) — see Show Details.").arg(merge.notes.size()),
+                        QMessageBox::Ok, this);
+        box.setDetailedText(merge.notes.join(QLatin1Char('\n')));
+        box.exec();
+    }
+}
+
+void CommunicationsDialog::onRemoveSection(int busIndex)
+{
+    const QList<int> rows = selectedRows(busIndex);
+    if (rows.isEmpty())
+        return;
+
+    // One row goes without asking, as it always has. Several is a different
+    // amount of lost work — a shift-select can span thirty imported messages —
+    // and it is the one case where a mis-aimed click is expensive, so it is
+    // confirmed the way Remove All is.
+    if (rows.size() > 1) {
+        const auto answer = QMessageBox::question(
+            this, windowTitle(),
+            tr("Remove the %1 selected sections from CAN %2?").arg(rows.size()).arg(busIndex + 1),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes)
+            return;
+    }
+
+    // Descending, so each removal cannot shift the rows still to be removed.
+    for (int i = rows.size() - 1; i >= 0; --i)
+        m_buses[busIndex].sections.removeAt(rows.at(i));
+    rebuildSections(busIndex);
+    updateButtons(busIndex);
+}
+
+void CommunicationsDialog::onMoveSection(int busIndex, int delta)
+{
+    BusTab &tab = m_busTabs[busIndex];
+    const QList<int> rows = selectedRows(busIndex);
+    const int count = m_buses[busIndex].sections.size();
+    if (rows.isEmpty() || delta == 0)
+        return;
+    // The whole selection moves one place, so it is blocked as a unit: an edge
+    // row means the group has nowhere to go. Moving the rest and leaving that
+    // one behind would silently change the selection's internal order, and the
+    // order IS the transmit order.
+    if (delta < 0 && rows.first() == 0)
+        return;
+    if (delta > 0 && rows.last() == count - 1)
+        return;
+
+    // Swap each selected row with its neighbour, walking in the direction of
+    // travel: ascending for a move up, descending for a move down. Adjacent
+    // selected rows then carry each other rather than colliding, so a
+    // contiguous block slides intact and a scattered selection has every one of
+    // its rows step one place. Unselected rows in the gaps get pushed the other
+    // way, which is exactly what moving past them means.
+    if (delta < 0) {
+        for (int r : rows)
+            m_buses[busIndex].sections.swapItemsAt(r - 1, r);
+    } else {
+        for (int i = rows.size() - 1; i >= 0; --i) {
+            const int r = rows.at(i);
+            m_buses[busIndex].sections.swapItemsAt(r, r + 1);
+        }
+    }
+
+    rebuildSections(busIndex);
+    // Follow the rows that moved, so the same messages stay selected and the
+    // button can be pressed again to keep going.
+    tab.sectionTree->setCurrentItem(tab.sectionTree->topLevelItem(rows.first() + delta));
+    for (int r : rows) {
+        if (QTreeWidgetItem *item = tab.sectionTree->topLevelItem(r + delta))
+            item->setSelected(true);
+    }
+    updateButtons(busIndex);
+}
+
+void CommunicationsDialog::onRemoveAll(int busIndex)
+{
+    if (m_buses[busIndex].sections.isEmpty())
+        return;
+    const auto answer = QMessageBox::question(
+        this, windowTitle(),
+        tr("Remove all %1 sections from CAN %2?")
+            .arg(m_buses[busIndex].sections.size())
+            .arg(busIndex + 1),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+    m_buses[busIndex].sections.clear();
+    rebuildSections(busIndex);
+    updateButtons(busIndex);
+}
+
+void CommunicationsDialog::onImportDbc(int busIndex)
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Import DBC"), QString(), tr("DBC files (*.dbc);;All files (*.*)"));
+    if (path.isEmpty())
+        return;
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("Import DBC"),
+                             tr("Could not open %1:\n%2").arg(path, file.errorString()));
+        return;
+    }
+    const QByteArray bytes = file.readAll();
+    // DBC files are usually UTF-8 or Latin-1; decode as UTF-8 and fall back to
+    // Latin-1 if that produced replacement characters (e.g. a Latin-1 ° in a unit).
+    QString text = QString::fromUtf8(bytes);
+    if (text.contains(QChar(QChar::ReplacementCharacter)))
+        text = QString::fromLatin1(bytes);
+
+    QStringList warnings;
+    const DbcFile dbc = parseDbc(text, &warnings);
+    if (dbc.messages.isEmpty()) {
+        QMessageBox::information(this, tr("Import DBC"),
+                                 tr("No CAN messages (BO_) were found in %1.")
+                                     .arg(QFileInfo(path).fileName()));
+        return;
+    }
+
+    ImportDbcDialog dlg(m_config, dbc, QFileInfo(path).fileName(), busIndex, warnings, this);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    const int target = dlg.targetBusIndex();
+    for (const CommsSection &s : dlg.importedSections())
+        m_buses[target].sections.append(s);
+
+    // Rebuild every tab: the "N of M device messages used" count spans all buses.
+    for (int i = 0; i < 3; ++i) {
+        rebuildSections(i);
+        updateButtons(i);
+    }
+    m_tabs->setCurrentIndex(target);
+    if (!m_buses[target].sections.isEmpty())
+        m_busTabs[target].sectionTree->setCurrentItem(
+            m_busTabs[target].sectionTree->topLevelItem(m_buses[target].sections.size() - 1));
+    updateButtons(target);
+}
+
+void CommunicationsDialog::accept()
+{
+    // THE last chokepoint before the document. Every path through this dialog —
+    // New, Edit, Remove, Remove All, Move, DBC import — edits the working copies
+    // and lands here, so this one loop is where the untick rule is finally
+    // enforced, by Configuration::applyBusSections rather than by anything on
+    // screen. A guard on the section editor's checkboxes alone would be a guard
+    // on one of the six.
+    //
+    // A refusal does NOT close the dialog. Everything the user has done is still
+    // in the working copies, so they can undo the one change that was refused
+    // and press OK again; discarding an evening's editing because the last click
+    // was not permitted would be a worse answer than the refusal itself.
+    //
+    // (The Passwords tab needs no sweep here any more: Set and Clear apply at
+    // the click, through their own prompts, so there is nothing typed-but-inert
+    // for OK to pick up.)
+    QString refusal;
+    bool changed = false;
+    for (int i = 0; i < 3; ++i) {
+        m_buses[i].enabled = m_busTabs[i].modeCombo->currentData().toBool();
+        m_buses[i].rateKbps = m_busTabs[i].rateCombo->currentData().toInt();
+        m_buses[i].dataRateKbps = m_busTabs[i].fdRateCombo->currentData().toInt();
+        m_buses[i].termination = m_busTabs[i].terminationCombo->currentData().toBool();
+        if (m_buses[i].toJson() == m_config->bus[i].toJson())
+            continue;
+        // The bus's own settings (mode, rate, FD, termination) are not sections
+        // and applyBusSections does not carry them, so they are assigned around
+        // it. They are copied FIRST but only once the sections are known to be
+        // acceptable, so a refusal leaves the bus wholly untouched rather than
+        // half-applied.
+        if (!m_config->applyBusSections(i, m_buses[i].sections, &refusal)) {
+            m_tabs->setCurrentIndex(i);
+            QMessageBox::warning(this, windowTitle(), refusal);
+            return;
+        }
+        m_config->bus[i].enabled = m_buses[i].enabled;
+        m_config->bus[i].rateKbps = m_buses[i].rateKbps;
+        m_config->bus[i].dataRateKbps = m_buses[i].dataRateKbps;
+        m_config->bus[i].termination = m_buses[i].termination;
+        changed = true;
+    }
+    // applyBusSections has already called setDirty() for every bus it accepted;
+    // this catches a bus whose sections were identical and only its rate moved.
+    if (changed)
+        m_config->setDirty();
+    // AFTER the loop, never before it. Rule 3's revokes drop the grants that
+    // authorise a lowering, and every lowering this dialog is carrying has just
+    // been written above. Moving this one line up is the mistake that makes a
+    // Protect-Communication-down-to-Hidden edit refuse itself at the last step.
+    flushPendingRevokes();
+    QDialog::accept();
+}
+
+void CommunicationsDialog::reject()
+{
+    // Cancel throws the working copies away, so nothing was written and there is
+    // no ordering to respect — but the grants are on the DOCUMENT and outlive this
+    // dialog either way, so rule 3 applies to a cancelled session exactly as it
+    // does to an accepted one.
+    flushPendingRevokes();
+    QDialog::reject();
+}
+
+void CommunicationsDialog::flushPendingRevokes()
+{
+    // Split back into the (bus, name) pendingKey() joined. At the FIRST separator
+    // only: the bus index is one digit, and a section name may contain a slash of
+    // its own — "Engine/Trans" is a name a user can type, and taking the last
+    // separator would revoke a grant for a section called "Trans" on a bus called
+    // "0/Engine".
+    for (const QString &key : m_pendingRevoke) {
+        const int slash = key.indexOf(QLatin1Char('/'));
+        if (slash < 0)
+            continue;
+        m_config->revokeSectionAccess(key.left(slash).toInt(), key.mid(slash + 1));
+    }
+    m_pendingRevoke.clear();
+}
+
+} // namespace ct
