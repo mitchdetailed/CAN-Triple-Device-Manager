@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Getting Started</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Getting Started</h1>
+
+<p>This page takes you from a bare device to live values on screen. The
+program is offline-first: steps 1–3 need no hardware at all, and only
+step&nbsp;4 touches the device.</p>
+
+<h2>1. Connect to the device</h2>
+
+<p>To open the serial link, choose <b>Tools&nbsp;→&nbsp;Connection
+Settings…</b>:</p>
+
+<ul>
+<li><b>Port:</b> lists every serial port with its Windows description. The
+ST-Link virtual COM port is preselected automatically when its description
+contains "STLink". Click <b>Refresh</b> after plugging the cable in.</li>
+<li><b>Baud rate:</b> defaults to <b>7372800 (CAN Triple default — ST-Link
+V3)</b>. The field is editable, and slower standard rates down to 115200 are
+listed, but the device firmware runs its UART at 7,372,800 baud — an ST-Link
+<b>V3</b> is required at that rate.</li>
+<li>Click <b>Connect</b>. The label below the buttons changes to
+"Connected to COM5 @ 7372800", and the main window's status bar shows
+"Connected: COM5 @ 7372800" on the right. The button becomes
+<b>Disconnect</b>.</li>
+<li>Click <b>Test</b> to confirm the device answers: it requests the device
+status and shows uptime, per-bus receive/transmit counters, and how many
+messages, signals, math channels and User Conditions are active.</li>
+</ul>
+
+<p class="note">You do not have to visit this dialog first. Any
+<b>Online</b> command that needs a device — Send, Get, Monitor Channels and
+the rest — opens Connection Settings automatically when no link is open.</p>
+
+<p>If the port refuses to open or the Test fails, see
+<a href="troubleshooting.html">Troubleshooting</a>.</p>
+
+<h2>2. Create a configuration</h2>
+
+<p>Choose <b>File&nbsp;→&nbsp;New</b> (a new, empty document is also what the
+program starts with). Then define what travels on each bus:</p>
+
+<ol>
+<li><b>Connections&nbsp;→&nbsp;Communications…</b> opens the Communications
+Setup dialog, with one tab per bus (CAN&nbsp;1 / CAN&nbsp;2 / CAN&nbsp;3)
+and a Passwords tab for the configuration's four Message Passwords.
+Set each bus's mode and rate, and add <i>sections</i> — the receive and
+transmit messages — with <b>New…</b> or <b>Import DBC…</b>. See
+<a href="communications.html">Communications: Messages &amp; Sections</a>
+and <a href="dbc-import.html">DBC Import</a>.</li>
+<li>Each message carries channel rows that place a channel's bits in the
+frame. Channels are created as you need them — there is no predefined
+catalogue. See <a href="channels.html">Channels</a>.</li>
+<li>Optionally add on-device calculations from the <b>Calculations</b> menu:
+<a href="math-channels.html">Math Channels</a>,
+<a href="conditions.html">User Conditions</a>,
+<a href="constants.html">Constants</a>,
+<a href="tables.html">Lookup Tables</a>,
+<a href="counters.html">Up/Down Counters</a>,
+<a href="timers.html">Timers</a> and
+<a href="integrators.html">Integrators</a>.</li>
+</ol>
+
+<p>The window title shows the document name with an asterisk (<b>*</b>) while
+there are unsaved changes. Save with <b>File&nbsp;→&nbsp;Save</b>; see
+<a href="files.html">Configuration Files (.ct3)</a> for the file formats.</p>
+
+<h2>3. Check the configuration</h2>
+
+<p>Run <b>File&nbsp;→&nbsp;Check Channels</b>. It reports Errors, Warnings
+and Info items; Send Configuration refuses to run while any <b>Error</b>
+exists, so it is worth fixing them before going online. <b>File&nbsp;→&nbsp;
+Config Summary…</b> produces a printable report of the whole configuration.
+See <a href="validation-report.html">Validation &amp; the Config
+Summary</a>.</p>
+
+<h2>4. Send it to the device</h2>
+
+<p>Choose <b>Online&nbsp;→&nbsp;Send Configuration</b> (F5). The confirmation
+lists what will be written — message, channel and calculation counts, and the
+bus settings being applied — and asks for a <b>Configuration Title</b>, which
+is stored on the device. Two options are offered: <b>Lock this configuration
+to this device</b> (only on firmware that reports a chip ID) and <b>Reset
+device after sending</b>.</p>
+
+<p>The transfer is verified by reading the device's tables back, and the
+configuration is saved to flash as part of the send, so it reloads at every
+power-up — there is no separate "save to flash" step. Details, including
+access passwords and the related Get, Verify and Upload commands, are on
+<a href="online.html">Online: Send, Get &amp; Flash</a>.</p>
+
+<h2>5. Watch it run</h2>
+
+<p><b>Online&nbsp;→&nbsp;Monitor Channels…</b> (F3) shows live channel
+values; <b>Online&nbsp;→&nbsp;CAN Viewer…</b> (F4) shows raw bus traffic.
+See <a href="monitor.html">Monitoring Live Values</a>.</p>
+
+<p><b>Online&nbsp;→&nbsp;Device Status…</b> is the quick health check: uptime,
+per-bus counters, active table counts, firmware protocol version, device ID,
+which access passwords are set, and the unit's fleet identity.</p>
+
+<h2>Reading the device back</h2>
+
+<p><b>Online&nbsp;→&nbsp;Get Configuration</b> reads the device's tables into
+the editor, replacing the current document (it warns first when there are
+unsaved changes). <b>Online&nbsp;→&nbsp;Verify Configuration</b> compares the
+device against the document without changing either.</p>
+
+<p class="warn">Send Configuration replaces the device's <i>entire</i>
+configuration. If you meant to keep what the device is running, Get it into
+the editor and save it before sending something else.</p>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

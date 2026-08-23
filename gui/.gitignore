@@ -1,0 +1,22 @@
+# Build trees and packaging output
+build/
+build-*/
+deploy/
+dist/
+*.zip
+
+# Local firmware checkout. On the maintainer's machine this is a directory
+# junction to the sibling firmware working copy; either way it is its own
+# repository and must never be tracked here.
+/firmware
+
+# Python bytecode (helper scripts)
+__pycache__/
+*.py[cod]
+
+# Tool/session state
+.claude/
+CMakeLists.txt.user
+
+# Proprietary-tool exports kept locally as fixtures (MoTeC log etc.)
+reference files/

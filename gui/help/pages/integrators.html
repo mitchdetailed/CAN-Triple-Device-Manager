@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Integrators</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Integrators</h1>
+
+<p>An integrator is a <em>rate accumulator</em>: at its configured rate it adds
+its input to its output channel — <code>out&nbsp;+=&nbsp;input</code>,
+<i>Rate</i> times a second. It is deliberately <em>not</em> a time integral
+(<code>input&nbsp;×&nbsp;dt</code>): the rate scales the result, which is what
+makes it worth configuring. A steady input of 1 at 10&nbsp;Hz moves the output
+by 10 per second; the same input at 1&nbsp;Hz moves it by 1 per second.</p>
+
+<p class="note">To integrate a rate channel into a total — litres per second
+into litres, for example — pre-scale the input with a
+<a href="math-channels.html">math channel</a> first, so that one step adds the
+right slice (input ÷ rate). The editor's summary line shows the resulting
+per-second movement as you type.</p>
+
+<p>To edit integrators, choose <b>Calculations → Integrators…</b>. The dialog
+lists every integrator with columns <b>#</b>, <b>Active</b>, <b>Output</b>,
+<b>Applies</b> (the channel or fixed value it accumulates), <b>Rate</b>,
+<b>Direction</b>, <b>Starts at</b> (with "(preserved)" appended when Preserve
+is on) and <b>Reset</b>. Use <b>Add…</b>, <b>Change…</b> (or double-click a
+row) and <b>Remove</b>. The device supports at most <b>8</b> integrators.
+Changes are written into the configuration only when you close the dialog with
+<b>OK</b>; <b>Cancel</b> discards them.</p>
+
+<h2>To add an integrator</h2>
+<ol>
+<li>Choose <b>Calculations → Integrators…</b> and click <b>Add…</b>. The
+<b>Integrator</b> editor opens.</li>
+<li>Under <b>Output</b>, click <b>Select…</b> next to <b>Output Channel :</b>
+and pick or create the output channel (required).</li>
+<li>Under <b>Accumulate</b>, choose <b>Channel :</b> or <b>Fixed value :</b>,
+set the <b>Rate :</b> and the <b>Direction :</b>, and check the summary line
+below — it spells out how fast the output will move.</li>
+<li>Under <b>Control</b>, set the <b>Starting value :</b> and, if needed, the
+enable and reset channels.</li>
+<li>Tick <b>Active</b> and click <b>OK</b>.</li>
+</ol>
+
+<h2>Integrator settings</h2>
+
+<table>
+<tr><th>Group</th><th>Control</th><th>Meaning</th></tr>
+<tr><td>Output</td><td>Output Channel :</td><td>The generated channel the
+running total is written to.</td></tr>
+<tr><td>Accumulate</td><td>Channel : / Fixed value :</td><td>What is added each
+step — a channel's current value, or a fixed number. The input channel cannot
+be the output channel: the value would double every step instead of
+accumulating, and the editor refuses the combination.</td></tr>
+<tr><td>Accumulate</td><td>Rate :</td><td>How many times a second the input is
+applied, 1–100&nbsp;Hz. The engine evaluates at 100&nbsp;Hz, which is the
+ceiling. A rate that does not divide evenly into the tick still averages
+exactly the configured steps per second — nothing drifts.</td></tr>
+<tr><td>Accumulate</td><td>Direction : (Count up / Count down)</td><td>
+<b>Count down</b> subtracts each step instead of adding — same input, same
+rate. Use it with a <b>Starting value :</b> at the peak and <b>Minimum :</b>
+as the floor to build a decrementor (a countdown of fuel remaining, service
+life, and the like).</td></tr>
+<tr><td>Control</td><td>Starting value :</td><td>The value the device loads at
+power-up (and when a configuration is sent). For a count-down integrator this
+is the peak it counts down from. A restored preserved value overrides
+it.</td></tr>
+<tr><td>Control</td><td>Enable while channel :</td><td>Accumulation runs only
+while this channel is true (value&nbsp;&gt;&nbsp;0). Leave it empty —
+"(always accumulating)" — to run always. The gate pauses accumulation cleanly
+rather than losing steps.</td></tr>
+<tr><td>Control</td><td>Reset on channel :</td><td>On this channel's rising
+edge the output is set to the reset value. Reset applies even while disabled.
+Leave it empty for "(never reset)".</td></tr>
+<tr><td>Control</td><td>When reset, set value to :</td><td>The value loaded on
+a reset edge.</td></tr>
+<tr><td>Control</td><td>Preserve value across power cycles</td><td>Retains the
+running total in flash and restores it at the next power-up instead of the
+starting value — see below.</td></tr>
+<tr><td>Limits</td><td>Minimum : / Maximum :</td><td>The value holds at these
+limits — for a count-down integrator the minimum is the floor it stops at. A
+maximum that does not exceed the minimum turns clamping off entirely, and the
+value can then run away; validation warns about it.</td></tr>
+<tr><td></td><td>Active</td><td>Only active integrators run on the
+device.</td></tr>
+</table>
+
+<p class="warn">An integrator with no <b>Reset on channel :</b> can only be
+cleared by power-cycling the device — and with <b>Preserve value across power
+cycles</b> also ticked, nothing can ever clear the total.
+<a href="validation-report.html">Check Channels</a> warns about both.</p>
+
+<h2>Preserve and flash wear</h2>
+
+<p>Preserved values live in a small flash store that is flushed about once a
+minute and holds at most <b>20</b> entries, shared with preserved
+<a href="counters.html">counters</a>. The two are not equal customers of that
+store: a counter is event-driven and often unchanged for a whole minute, so
+its flush costs nothing, but a running integrator changes on every step and
+writes a record at essentially every 60&nbsp;s flush.</p>
+
+<p class="warn">With N preserved values in use, the store's active page
+(about 254 records) fills in roughly 254/N flushes — expect a flash erase
+about every <b>254/N minutes</b> while an integrator is running. Check
+Channels reports this estimate whenever a preserved integrator is configured.
+Prefer <b>Preserve value across power cycles</b> only on totals that genuinely
+must survive a power cycle.</p>
+
+<p>The store is reset whenever you send a changed configuration, so a
+preserved total never reattaches to a different calculation.</p>
+
+<h2>See also</h2>
+<p><a href="math-channels.html">Math Channels</a> ·
+<a href="counters.html">Up/Down Counters</a> ·
+<a href="timers.html">Timers</a> ·
+<a href="conditions.html">User Conditions</a> ·
+<a href="channels.html">Channels</a> ·
+<a href="monitor.html">Monitoring Live Values</a> ·
+<a href="validation-report.html">Validation &amp; the Config Summary</a></p>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

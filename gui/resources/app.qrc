@@ -1,0 +1,34 @@
+<!--
+  The application icon, embedded so QApplication::setWindowIcon() in
+  src/main.cpp can hand Qt every size at once: title bars, the taskbar button,
+  Alt-Tab and each dialog ask for different pixel sizes, and a QIcon holding
+  the real artwork at each of them beats one bitmap scaled six ways.
+
+  This is the runtime icon only. The one Explorer draws on the .exe comes from
+  the PE resource built by resources/app.rc, and the installer's own icon from
+  the .ico directly — three separate consumers of Icons/icons.
+
+  24 px is here because Windows really does ask for it: the small-icon metric is
+  24 at 150% display scaling, a common laptop setting, and without it Qt
+  downscales the 32 px bitmap on exactly those machines. 512 and 1024 are left
+  out — nothing a running application is asked for lands on them, and they would
+  only pad the binary.
+
+  Aliases are required here rather than decorative — the files sit outside this
+  directory, so without them the resource paths would carry the "../".
+
+  CMakeLists.txt: qt_add_resources(APP_RESOURCES resources/app.qrc) and add
+  ${APP_RESOURCES} to the executable's sources (the Qt 6 .qrc-consuming form of
+  the command).
+-->
+<RCC>
+    <qresource prefix="/icons">
+        <file alias="icon_16.png">../Icons/icons/png/icon_16.png</file>
+        <file alias="icon_24.png">../Icons/icons/png/icon_24.png</file>
+        <file alias="icon_32.png">../Icons/icons/png/icon_32.png</file>
+        <file alias="icon_48.png">../Icons/icons/png/icon_48.png</file>
+        <file alias="icon_64.png">../Icons/icons/png/icon_64.png</file>
+        <file alias="icon_128.png">../Icons/icons/png/icon_128.png</file>
+        <file alias="icon_256.png">../Icons/icons/png/icon_256.png</file>
+    </qresource>
+</RCC>

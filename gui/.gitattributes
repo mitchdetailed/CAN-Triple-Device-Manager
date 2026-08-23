@@ -1,0 +1,17 @@
+# Both CAN Triple repositories (the firmware and the Device Manager GUI)
+# disable ALL end-of-line normalization: every file is committed byte-exact
+# and must check out byte-exact.
+#
+# In the GUI repo the reasons are concrete:
+#   - installer/THIRD-PARTY-NOTICES.txt is deliberately CRLF and pure ASCII,
+#     and is fed verbatim to Inno Setup's InfoAfterFile — the installer shows
+#     and ships the literal bytes.
+#   - COPYING and the licence texts under installer/ are verbatim licence
+#     documents; their bytes are not ours to rewrite.
+#   - installer/CANTripleDeviceManager.iss is encoding-sensitive.
+#
+# A clone that CRLF-normalized on checkout (or LF-normalized on commit) would
+# corrupt all of them, so EOL handling is switched off wholesale rather than
+# guarded per-file, and the firmware repo mirrors the policy so the pair of
+# checkouts always behaves the same way.
+* -text

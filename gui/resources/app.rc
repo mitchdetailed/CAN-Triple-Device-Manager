@@ -1,0 +1,87 @@
+// Windows resource script — the executable's icon and its VS_VERSION_INFO
+// block. Until this file existed the exe carried no PE resources at all, which
+// is why Explorer, Task Manager and Add/Remove Programs showed a blank
+// placeholder and no version at all. Nothing in the program reads any of this;
+// it is what the shell reads about the program.
+//
+// ---------------------------------------------------------------------------
+// Where the version comes from — and what CMakeLists.txt must therefore do
+//
+// Nothing here hardcodes a version. The numbers arrive as -D defines on the
+// windres command line, the same way src/main.cpp is handed CT_APP_VERSION:
+//
+//     target_compile_definitions(CANTripleDeviceManager PRIVATE
+//         CT_VER_MAJOR=${PROJECT_VERSION_MAJOR}
+//         CT_VER_MINOR=${PROJECT_VERSION_MINOR}
+//         CT_VER_PATCH=${PROJECT_VERSION_PATCH})
+//
+// CMake hands a target's compile definitions to the RC compiler as well as to
+// the C++ one, so listing this file among the target's sources — with RC in the
+// project() language list, or windres is never enabled and the .rc is silently
+// ignored — is all the wiring it needs. No configure_file: this file is
+// compiled where it sits, because the icon below is named relative to this
+// .rc's own directory (that is how windres resolves it) and a configured copy
+// in the build tree would not find it.
+//
+// The fallback below mirrors main.cpp's: 0.0.0 is not a plausible release
+// number, so a build that lost the defines is obvious rather than quietly
+// mislabelled.
+
+#include <windows.h>
+
+#ifndef CT_VER_MAJOR
+#  define CT_VER_MAJOR 0
+#endif
+#ifndef CT_VER_MINOR
+#  define CT_VER_MINOR 0
+#endif
+#ifndef CT_VER_PATCH
+#  define CT_VER_PATCH 0
+#endif
+
+// Windows version fields are four-part; the project versions three, so the
+// build field is a constant zero rather than a fourth number to keep in step.
+#define CT_STRINGIFY_(x) #x
+#define CT_STRINGIFY(x)  CT_STRINGIFY_(x)
+#define CT_VERSION_TEXT \
+    CT_STRINGIFY(CT_VER_MAJOR) "." CT_STRINGIFY(CT_VER_MINOR) "." \
+    CT_STRINGIFY(CT_VER_PATCH) ".0"
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+// Numeric 1 deliberately: the shell shows the icon with the lowest resource ID,
+// and this is the only one, but naming it 1 keeps that true if another is ever
+// added. IDI_ICON1 is the conventional spelling of that id in a Qt/MinGW .rc.
+#define IDI_ICON1 1
+IDI_ICON1 ICON "../Icons/icons/app.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    CT_VER_MAJOR,CT_VER_MINOR,CT_VER_PATCH,0
+PRODUCTVERSION CT_VER_MAJOR,CT_VER_MINOR,CT_VER_PATCH,0
+FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+FILEFLAGS      0x0L
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_APP
+FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 0409 = US English, 04B0 = 1200 = Unicode; must match the Translation
+        // pair at the bottom or the shell reads no strings at all.
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Minton Performance"
+            VALUE "FileDescription",  "CAN Triple Device Manager"
+            VALUE "FileVersion",      CT_VERSION_TEXT
+            VALUE "InternalName",     "CANTripleDeviceManager"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 Minton Performance. MIT License."
+            VALUE "OriginalFilename", "CANTripleDeviceManager.exe"
+            VALUE "ProductName",      "CAN Triple Device Manager"
+            VALUE "ProductVersion",   CT_VERSION_TEXT
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

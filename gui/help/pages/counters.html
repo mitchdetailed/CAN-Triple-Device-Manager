@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Up/Down Counters</title>
+<link rel="stylesheet" href="help.css">
+</head>
+<body>
+<h1>Up/Down Counters</h1>
+
+<p>A counter is a calculation that steps a value up or down on the edges of
+boolean input channels. Its output is an ordinary generated
+<a href="channels.html">channel</a>, so it can feed
+<a href="math-channels.html">math channels</a>,
+<a href="conditions.html">User Conditions</a>, transmit messages, or be watched
+live in <a href="monitor.html">Monitor Channels</a>. Counters are evaluated on
+the device at 100&nbsp;Hz.</p>
+
+<p>To edit counters, choose <b>Calculations → Up / Down Counters…</b>. The
+dialog lists every counter with columns <b>#</b>, <b>Active</b>, <b>Output</b>,
+<b>Type</b> and <b>Inputs</b>. Use <b>Add…</b>, <b>Change…</b> (or double-click
+a row) and <b>Remove</b> to manage the list. The device supports at most
+<b>50</b> counters. Changes are written into the configuration only when you
+close the dialog with <b>OK</b>; <b>Cancel</b> discards them.</p>
+
+<h2>To add a counter</h2>
+<ol>
+<li>Choose <b>Calculations → Up / Down Counters…</b> and click <b>Add…</b>.
+The <b>Up / Down Counter Settings</b> editor opens.</li>
+<li>Under <b>Output</b>, click <b>Select…</b> and pick or create the output
+channel. An output channel is required.</li>
+<li>Under <b>Input</b>, choose the <b>Type :</b> — <b>Up / Down</b>,
+<b>Follow Changes</b> or <b>Every x Hz</b> — and select the trigger channels
+(or, for <b>Every x Hz</b>, the rate and direction).</li>
+<li>Set the limits and step under <b>Options</b>, tick <b>Active</b>, and click
+<b>OK</b>.</li>
+</ol>
+
+<h2>Counter settings</h2>
+
+<table>
+<tr><th>Control</th><th>Meaning</th></tr>
+<tr><td>Channel : (Output)</td><td>The generated channel the counter writes.
+The decimal precision of the value fields below follows this channel's decimal
+places.</td></tr>
+<tr><td>Type :</td><td><b>Up / Down</b> counts edges on separate Up and Down
+inputs; <b>Follow Changes</b> counts changes of a single Follow input;
+<b>Every x Hz</b> is driven by the device's own clock and reads no input channel
+at all. The selection enables the matching rows.</td></tr>
+<tr><td>Up :</td><td>Adds <i>Step</i> on each rising edge (Up / Down type).</td></tr>
+<tr><td>Down :</td><td>Subtracts <i>Step</i> on each rising edge (Up / Down type).</td></tr>
+<tr><td>Follow :</td><td>Adds <i>Step</i> on <em>every change</em> of the input
+— rising or falling (Follow Changes type).</td></tr>
+<tr><td>Rate :</td><td>How many steps a second, and whether each one
+<b>Increment</b>s or <b>Decrement</b>s (Every x Hz type). See below.</td></tr>
+<tr><td>Reset :</td><td>On its rising edge the counter is set to <i>Reset
+value</i>. Reset always applies, even while the counter is disabled.</td></tr>
+<tr><td>Enable :</td><td>The counter counts only while this channel is true
+(value&nbsp;&gt;&nbsp;0). Leave it empty to count always.</td></tr>
+<tr><td>The source list</td><td><b>Up</b>, <b>Down</b>, <b>Reset</b> and
+<b>Enable</b> each start with a list choosing what drives them: a
+<b>Channel</b>, or <b>Message received</b> / <b>Message transmitted</b> naming a
+message instead. Picking a message swaps the channel picker for a message
+list.</td></tr>
+<tr><td>Minimum value : / Maximum value :</td><td>The counting range. If the
+maximum does not exceed the minimum, no limiting is applied (validation warns
+about this).</td></tr>
+<tr><td>Reset value :</td><td>The value loaded on a reset edge.</td></tr>
+<tr><td>Step :</td><td>How far each edge moves the value. A step of 0 counts as
+1.</td></tr>
+<tr><td>Roll at limits</td><td>Ticked, the value wraps around within the
+Minimum–Maximum range instead of stopping; clear, it holds at the limit.</td></tr>
+<tr><td>Preserve value</td><td>Keeps the counter's value across power cycles —
+see below.</td></tr>
+<tr><td>Active</td><td>Only active counters run on the device.</td></tr>
+</table>
+
+<p class="note">All counter inputs are boolean channels: true means the
+channel's value is greater than 0. A
+<a href="conditions.html">User Condition</a> output is the usual way to build a
+clean trigger from an analog channel.</p>
+
+<p class="note">The Reset value is always forced into the Minimum–Maximum
+range, even when the limits are disabled for counting (Maximum ≤ Minimum), so
+keep it inside the range you configure.</p>
+
+<h2>Every x Hz — counting on the clock</h2>
+
+<p>A counter set to <b>Every x Hz</b> is driven by the device's own clock
+instead of by a channel. It moves one <i>Step</i> at the chosen rate, in the
+direction you pick, for as long as it is enabled. Choose from
+<b>1, 2, 5, 10, 20, 50</b> or <b>100&nbsp;Hz</b>, and <b>Increment</b> or
+<b>Decrement</b>.</p>
+
+<p>The Up, Down and Follow rows are switched off in this mode — a rate counter
+reads no input channel, and the configuration is sent without those references.
+<b>Reset</b> and <b>Enable</b> still work, and they are most of what makes the
+mode useful:</p>
+
+<p class="note"><b>Switching type keeps what you typed.</b> Changing an Up/Down
+counter to Follow Changes greys the Up and Down rows out but does not erase
+them, so switching back brings your inputs with you. A greyed-out input is
+genuinely dormant: it is not sent to the device, it is not counted as a use of
+that channel by <b>Check&nbsp;Channels</b>, and it cannot hold up a
+<b>Send</b> — even if the message or channel it names has since been deleted.
+Renaming a message in Communications Setup carries every counter input that
+names it along too, and deleting one is reported by <b>File → Check
+Channels</b> against the counter rather than left to fail the Send.
+Only the inputs the current type actually reads are shown in the grid's
+<b>Inputs</b> column, which is the same list that reaches the unit.</p>
+
+<ul>
+<li><b>Enable</b> gates the counting, and the period is <em>frozen</em> while
+the gate is shut rather than continuing to run. Re-enabling therefore costs no
+step and banks none: the counter picks the period up where it left it.</li>
+<li><b>Reset</b> loads the Reset value on its rising edge and restarts the
+period, so the first step after a reset is a full 1/rate away rather than
+whatever remained on the clock. Reset applies even while disabled.</li>
+</ul>
+
+<p>The limits behave as they do in the other modes: the value stops at Minimum
+or Maximum, or wraps if <b>Roll at limits</b> is ticked. A 1&nbsp;Hz counter
+with Step&nbsp;1 rolling between 0 and 60 is a seconds hand; a decrementing
+counter with a Reset channel is a countdown.</p>
+
+<p class="note">The device evaluates at 100&nbsp;Hz, which is why 100&nbsp;Hz is
+the fastest rate offered — one step per evaluation. Every rate in the list
+divides 100 exactly, so each is a whole number of ticks per step and the timing
+is exact rather than averaged.</p>
+
+<p class="note">This is close to what an <a href="integrators.html">integrator</a>
+does, and the difference is worth knowing: an integrator adds the value of a
+<i>channel</i> at a rate, while a rate counter adds a fixed <i>Step</i>. Use a
+counter when you want a clock-driven ramp or countdown, and an integrator when
+you want to accumulate something the bus is telling you.</p>
+
+<h2 id="messages">Counting messages</h2>
+
+<p>Set <b>Up</b> to <b>Message received</b> and pick a message, and the counter
+advances once for every frame of that message that arrives. <b>Message
+transmitted</b> does the same for frames the device sends. Before this you had to
+build a <a href="conditions.html">User Condition</a> on the message and point the
+counter at its output; the counter says it directly now.</p>
+
+<p><b>One frame, one step.</b> The counter is evaluated on the frame itself
+rather than on the device's 100&nbsp;Hz calculation pass, so a burst of frames
+between two passes is counted in full rather than collapsing into one.</p>
+
+<p class="note"><b>Follow Changes has no message option</b>, and that is not an
+omission. Follow tracks the <em>value</em> of a channel, and a frame arriving has
+no value — only a moment.</p>
+
+<p class="note"><b>Enable behaves differently from the others</b> if you point it
+at a message. Up, Down and Reset act on an edge, which a frame gives them
+naturally. Enable is a level: it lets the counter run <em>while</em> it is true,
+and a message is true only on the frame itself — so a message-gated Enable
+permits counting on those instants and no others. That is occasionally what you
+want and rarely what you meant; a <a href="conditions.html">User Condition</a>
+holding a latch is usually the better gate.</p>
+
+<h2>Preserve value</h2>
+
+<p>Ticking <b>Preserve value</b> keeps the counter's value across power
+cycles. The value is written to a small flash store about once a minute, so up
+to a minute of counting can be lost on a sudden power cut, and the store is
+reset whenever you send a changed configuration — preserved values never
+reattach to a different counter.</p>
+
+<p>At most <b>20</b> values can be preserved, and the store is <em>shared</em>
+between counters and <a href="integrators.html">integrators</a>. The label at
+the bottom of the dialog shows a running budget of the counters in this list
+("Preserved across power cycles: N of 20."); the combined counter + integrator
+total is enforced by <a href="validation-report.html">Check Channels</a>, which
+reports an error when the two together exceed 20.</p>
+
+<p class="warn">On a device whose flash has no room for the retained-value
+store, preserved counters still run but start from their reset value at every
+power-up. Without <b>Preserve value</b>, every counter starts from its reset
+value at power-up.</p>
+
+<h2>See also</h2>
+<p><a href="timers.html">Timers</a> ·
+<a href="integrators.html">Integrators</a> ·
+<a href="conditions.html">User Conditions</a> ·
+<a href="channels.html">Channels</a> ·
+<a href="monitor.html">Monitoring Live Values</a> ·
+<a href="validation-report.html">Validation &amp; the Config Summary</a></p>
+
+<p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>
+</body>
+</html>

@@ -1,0 +1,86 @@
+# Build-and-test on every push: proves that a stranger's clone of this
+# repository compiles and passes the host test suites, exactly as
+# README.md > Building from source describes. The application builds against
+# the prebuilt device-core library in firmware/lib (no firmware source is
+# published or needed), so this workflow is also the standing check that the
+# publish pipeline regenerated a tree that actually stands alone.
+#
+# Toolchain notes, hard-won rather than obvious:
+#   - Qt 6.7.2 win64_mingw with the qtserialport add-on; Widgets, Network,
+#     PrintSupport and Help all travel in the default desktop install.
+#   - The compiler is Qt's own MinGW 11.2.0 (tool variant win64_mingw900 --
+#     the "900" is the Qt-installer package name, the toolchain inside is
+#     11.2.0), the same compiler the Qt binaries were built with. The runner
+#     image carries several other gcc builds (Strawberry Perl, MSYS2), which
+#     is why the compiler is pinned by absolute path instead of trusted to
+#     PATH order.
+#   - No CMAKE_BUILD_TYPE on purpose: the bench builds the same way, and an
+#     unset build type leaves assert() live in the suites.
+#   - The suites are plain executables, not CTest entries; the test step runs
+#     every test_*.exe it finds so a new suite is picked up without touching
+#     this file, and refuses to "pass" if it finds none.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt 6.7.2 (MinGW) and its toolchain
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.2'
+          arch: 'win64_mingw'
+          modules: 'qtserialport'
+          tools: 'tools_mingw90,qt.tools.win64_mingw900'
+          cache: true
+
+      - name: Install Ninja
+        run: choco install -y ninja
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $mingw = (Get-ChildItem "$env:IQTA_TOOLS" -Directory -Filter "mingw*" |
+                    Select-Object -First 1).FullName.Replace('\', '/')
+          if (-not $mingw) { throw "MinGW toolchain not found under $env:IQTA_TOOLS" }
+          "MINGW_BIN=$mingw/bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $env:PATH = "$mingw/bin;" + $env:PATH
+          cmake -S gui -B build -G Ninja `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+            -DCMAKE_C_COMPILER="$mingw/bin/gcc.exe" `
+            -DCMAKE_CXX_COMPILER="$mingw/bin/g++.exe"
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:MINGW_BIN;" + $env:PATH
+          cmake --build build
+
+      - name: Run test suites
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:MINGW_BIN;" + $env:PATH
+          $tests = Get-ChildItem build -Filter "test_*.exe" -File
+          if ($tests.Count -eq 0) { throw "no test executables found in build/" }
+          $failures = @()
+          foreach ($t in $tests) {
+            Write-Host "`n=== $($t.Name) ==="
+            & $t.FullName
+            if ($LASTEXITCODE -ne 0) { $failures += "$($t.Name) (exit $LASTEXITCODE)" }
+          }
+          if ($failures.Count) { throw ("FAILED: " + ($failures -join ', ')) }
+          Write-Host "`nall $($tests.Count) suites passed"
