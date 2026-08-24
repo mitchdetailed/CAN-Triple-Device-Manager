@@ -1042,11 +1042,11 @@ void SectionEditorDialog::onTierBoxToggled(CommsProtection level, bool ticked)
 // The password a NEW marking is guarded by, asked at the moment the box is
 // ticked. Returns false if the user backed out, and writes nothing in that case.
 //
-// The typed text goes into the Message Password FIELD rather than straight into
-// m_section.messageKey, which matters: accept() is what derives the key, after
-// it has checked the length rule and rule 1, and it is also what the user can
-// see and change before committing. Deriving here would put a key on the
-// section that the dialog's own validation had never looked at.
+// The typed text is derived and validated HERE, immediately: deriveAccessKey()
+// turns it into a key, commsPasswordSlotFor() checks it names one of the
+// document's four slots, and the result is stashed in m_pendingKey - accept()
+// consumes that, it does not re-derive. There is no Message Password field on
+// the tab any more.
 // THE PASSWORD MUST BE ONE OF THE DOCUMENT'S FOUR, and this is where that is
 // enforced. A message does not carry a password of its own any more: it NAMES
 // one of four, and the wire carries the slot number rather than a key. A typed

@@ -1551,8 +1551,8 @@ constexpr int READ_CHUNK_MATH       = 84;  // 4 + 84*24  = 2020 (24 B with opera
 // 50 -> 36 for the same reason: 4 + 36*56 = 2020 against the device's
 // MAX_RESPONSE_PAYLOAD of 2030, where 37 would be 2076 and be refused.
 constexpr int READ_CHUNK_CONDITIONS = 32;  // 4 + 32*62 = 1988 (33 -> 2050), store v14
-constexpr int READ_CHUNK_COUNTERS   = 50;  // 4 + 50*31  = 1554 (the whole table)
-constexpr int READ_CHUNK_TIMERS     = 50;  // 4 + 50*20  = 1004 (the whole table now
+constexpr int READ_CHUNK_COUNTERS   = 50;  // 4 + 50*32  = 1604 (the whole table)
+constexpr int READ_CHUNK_TIMERS     = 50;  // 4 + 50*32  = 1604 (the whole table now
                                            // that MAX_TIMERS is 50)
 constexpr int READ_CHUNK_CONSTANTS  = 100; // 4 + 100*7  = 704 (the whole table)
 constexpr int READ_CHUNK_RELAYS     = 32;  // 4 + 32*11  = 356 (the whole table)

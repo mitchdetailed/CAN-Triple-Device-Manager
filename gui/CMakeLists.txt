@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.1.0 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.1.1 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -262,6 +262,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/protocol/crc16.h
     src/protocol/device_link.cpp
     src/protocol/device_link.h
+    src/protocol/access_state.cpp
+    src/protocol/access_state.h
     src/protocol/device_session.cpp
     src/protocol/device_session.h
     src/protocol/framer.cpp
@@ -537,6 +539,7 @@ qt_add_executable(test_roundtrip
     # asks the guard whether every read step is classified — the check that has
     # been missed by hand six times now runs in every test pass.
     src/protocol/config_transfer.cpp
+    src/protocol/access_state.cpp
     src/model/access_keys.cpp
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
@@ -577,6 +580,11 @@ target_link_libraries(test_roundtrip PRIVATE Qt6::Core Qt6::SerialPort Qt6::Netw
 if(FIRMWARE_FULL)
 qt_add_executable(test_firmware_link
     test/test_firmware_link.cpp
+    test/fake_device_link.h
+    src/protocol/config_transfer.cpp
+    src/protocol/firmware_update.cpp
+    src/protocol/firmware_image.cpp
+    src/protocol/access_state.cpp
     src/protocol/cobs.cpp
     src/protocol/framer.cpp
     src/protocol/device_session.cpp
@@ -1077,6 +1085,7 @@ target_link_libraries(test_lua PRIVATE ct_lua Qt6::Core Qt6::Network
 # itself.
 qt_add_executable(test_protection
     test/test_protection.cpp
+    src/protocol/access_state.cpp
     src/ui/communications_dialog.cpp
     src/ui/section_editor_dialog.cpp
     src/ui/import_dbc_dialog.cpp

@@ -5,6 +5,10 @@
 // success.
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QEventLoop>
+#include <QFile>
+#include <QTemporaryDir>
+#include <QTimer>
 #include <QList>
 
 #include <cstddef>
@@ -17,6 +21,10 @@
 #include "../src/model/config_lock.h"
 #include "../src/model/configuration.h"
 #include "../src/model/device_mapper.h"
+#include "../src/protocol/config_transfer.h"
+#include "../src/protocol/firmware_image.h"
+#include "../src/protocol/firmware_update.h"
+#include "fake_device_link.h"
 #include "../src/protocol/cobs.h"
 #include "../src/protocol/device_link.h"
 #include "../src/protocol/device_session.h"
@@ -4327,6 +4335,47 @@ static void testMessagePasswordSlotSurvivesTheDevice(const SerialProtoCallbacks 
     }
 }
 
+static void testMessagePasswordRecordRoundTrip(const SerialProtoCallbacks *restore)
+{
+    // The FOUR document-wide Message Passwords, as the header record the wire
+    // carries in CMD_WRITE/READ_MSG_PASSWORDS (0x43/0x44) - distinct from the
+    // per-message password_slot byte the test above pins. This is what keeps a
+    // marked message openable across a Send/Get, so a slot silently dropped or
+    // truncated here is a message nobody can unlock.
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr); // no SEND/GET password, so both gates are open
+    serial_proto_init(restore);
+    flashErase();
+
+    static_assert(sizeof(ct::MessagePasswordRecord) == 16, "4 x u32");
+
+    // Four DISTINCT values, on purpose - including an empty slot and an
+    // all-ones slot - so a swapped, zeroed or truncated slot shows up as a
+    // mismatch instead of hiding behind a shared value.
+    const quint32 keys[4] = { 0x11111111u, 0x00000000u, 0x33333333u, 0xFFFFFFFFu };
+    QByteArray payload;
+    for (quint32 k : keys)
+        for (int shift = 0; shift < 32; shift += 8)
+            payload.append(char((k >> shift) & 0xFF)); // little-endian u32
+    CHECK(payload.size() == 16);
+    CHECK(expectAck(CMD_WRITE_MSG_PASSWORDS, payload));
+
+    const auto packets = exchange(CMD_READ_MSG_PASSWORDS, QByteArray());
+    CHECK(packets.size() == 1 && packets[0].cmd == CMD_READ_MSG_PASSWORDS);
+    if (packets.size() == 1) {
+        CHECK(packets[0].payload.size() == 16);
+        CHECK(packets[0].payload == payload); // every slot survives byte-for-byte
+    }
+
+    // A short record is refused rather than partially applied...
+    CHECK(expectNack(CMD_WRITE_MSG_PASSWORDS, payload.left(15), ct::ERR_INVALID_LEN));
+    // ...and the keys already held still stand after that refusal.
+    const auto again = exchange(CMD_READ_MSG_PASSWORDS, QByteArray());
+    CHECK(again.size() == 1 && again[0].payload == payload);
+}
+
 static void testMessageProtectionIsHostOnly(const SerialProtoCallbacks *restore)
 {
     EngineCallbacks cb{};
@@ -5237,6 +5286,309 @@ static void testFirmwareUpdate()
     }
 
     fw_host_reset();
+}
+
+// ===================== the two classes that talk to a device ===============
+//
+// ConfigTransfer and FirmwareUpdater were, until fake_device_link.h existed,
+// the only substantial code in the GUI with no test at all: their whole surface
+// is DeviceLink, DeviceLink needs a COM port, and so the tests reached around
+// them - this file drove the firmware with its own chunking, and test_roundtrip
+// checked the mapper alone. What went untested was every part that is not the
+// mapping: the step plan, the optional-step tolerance, the read-back verify,
+// and the image chunking.
+//
+// These run the REAL classes against the REAL firmware library. The fake link
+// is a transport, not a stub device: every command goes through serial_proto
+// and the answers are the device's own, so a disagreement between the host's
+// idea of a conversation and the firmware's shows up here rather than on a
+// bench unit.
+
+// Feed one host command to the firmware and translate what came back into the
+// link-level answer DeviceLink would have produced.
+static ct::FakeDeviceLink::Reply firmwareReply(quint8 cmd, const QByteArray &payload)
+{
+    const auto packets = exchange(cmd, payload);
+    for (const ct::Packet &p : packets) {
+        // Streams are unsolicited and answer nothing; the real link routes them
+        // to signals and keeps waiting, so skip them here for the same reason.
+        if (p.cmd == ct::CMD_MONITOR_STREAM || p.cmd == ct::CMD_VALUE_STREAM
+            || p.cmd == ct::CMD_LOG)
+            continue;
+        if (p.cmd == ct::CMD_ACK)
+            return ct::FakeDeviceLink::Reply::ack(p.payload);
+        if (p.cmd == ct::CMD_NACK)
+            return p.payload.isEmpty() ? ct::FakeDeviceLink::Reply::lost()
+                                       : ct::FakeDeviceLink::Reply::nack(quint8(p.payload[0]));
+        // Anything else is a read response echoing the request command.
+        return ct::FakeDeviceLink::Reply::ack(p.payload);
+    }
+    return ct::FakeDeviceLink::Reply::lost();
+}
+
+// Run an event loop until `t` finishes, and report what it said. A transfer
+// deletes itself when done, so the verdict is captured on the way past rather
+// than read off the object afterwards.
+struct TransferOutcome {
+    bool done = false;
+    bool ok = false;
+    QString error;
+    ct::DeviceTables tables;
+    bool gotTables = false;
+};
+
+static void runTransfer(ct::ConfigTransfer *t, TransferOutcome *out)
+{
+    QEventLoop loop;
+    QObject::connect(t, &ct::ConfigTransfer::tablesReady, &loop,
+                     [out](const ct::DeviceTables &tables) {
+                         out->tables = tables;
+                         out->gotTables = true;
+                     });
+    QObject::connect(t, &ct::ConfigTransfer::finished, &loop,
+                     [out, &loop](bool ok, const QString &error) {
+                         out->done = true;
+                         out->ok = ok;
+                         out->error = error;
+                         loop.quit();
+                     });
+    // A transfer that never finishes must fail the test rather than hang it.
+    QTimer::singleShot(20000, &loop, [&loop]() { loop.quit(); });
+    loop.exec();
+}
+
+// A small but real configuration: two buses carrying messages with signals, so
+// the plan has several table writes and the verify pass has something to
+// compare rather than agreeing about emptiness.
+static void fillTransferFixture(ct::Configuration &cfg)
+{
+    cfg.bus[0].enabled = true;
+    cfg.bus[1].enabled = true;
+
+    ct::Channel rpm;
+    rpm.name = QStringLiteral("Engine RPM");
+    rpm.dataType = QStringLiteral("u16");
+    rpm.decimalPlaces = 0;
+    rpm.minValue = 0;
+    rpm.maxValue = 8000;
+    cfg.catalog().addOrUpdateUserChannel(rpm);
+
+    ct::CommsSection rx;
+    rx.name = QStringLiteral("Engine");
+    rx.device = ct::SectionDevice::ReceiveMessage;
+    rx.baseAddress = 0x100;
+    rx.messageLengthBytes = 8;
+    rx.alignment = ct::SectionAlignment::WordSwap; // start bit 0 is the LSB here
+    ct::CommsChannelRow row;
+    row.channelName = rpm.name;
+    row.startBit = 0;
+    row.bitLength = 16;
+    rx.rows.append(row);
+    cfg.bus[0].sections.append(rx);
+
+    ct::CommsSection tx;
+    tx.name = QStringLiteral("Echo");
+    tx.device = ct::SectionDevice::TransmitMessage;
+    tx.baseAddress = 0x200;
+    tx.messageLengthBytes = 8;
+    tx.alignment = ct::SectionAlignment::WordSwap;
+    tx.transmitPeriodMs = 100;
+    tx.rows.append(row);
+    cfg.bus[1].sections.append(tx);
+}
+
+// A SEND, THEN A GET, both through the real classes against the real firmware.
+// This is the conversation the application performs, end to end: clear, write
+// every table, verify by reading it all back, save. The Get then has to return
+// what the Send put there.
+static void testConfigTransferSendAndGetAgainstTheDevice(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr); // no passwords: the gates are open
+    serial_proto_init(restore);
+    flashErase();
+
+    ct::Configuration cfg;
+    fillTransferFixture(cfg);
+    const ct::MappingResult mapped = ct::mapToDevice(cfg);
+    CHECK(mapped.ok());
+    CHECK(!mapped.tables.messages.isEmpty());
+
+    ct::FakeDeviceLink link(firmwareReply);
+    TransferOutcome sent;
+    runTransfer(ct::ConfigTransfer::send(&link, mapped.tables, /*verify=*/true), &sent);
+    CHECK(sent.done);
+    CHECK(sent.ok); // the whole plan ran, verify included
+    if (!sent.ok)
+        std::printf("      send error: %s\n", qPrintable(sent.error));
+    // The plan really did clear first and write the message table - a transfer
+    // that quietly skipped either would still "succeed" against a stub.
+    CHECK(link.sentAny(ct::CMD_CLEAR_CONFIG));
+    CHECK(link.sentAny(ct::CMD_WRITE_MSG_CFG));
+    CHECK(link.sentAny(ct::CMD_READ_MSG_CFG)); // the verify pass read it back
+
+    // And a Get returns what the Send left on the device.
+    ct::FakeDeviceLink getLink(firmwareReply);
+    TransferOutcome got;
+    runTransfer(ct::ConfigTransfer::get(&getLink), &got);
+    CHECK(got.done);
+    CHECK(got.ok);
+    CHECK(got.gotTables);
+    // A Get reads the WHOLE device table, capacity and all - the inactive
+    // entries beyond the configuration are the device's, and mapFromDevice is
+    // what filters them later. So what is asserted here is that the records
+    // this Send wrote came back as they went, and that exactly as many
+    // messages are ACTIVE as were sent.
+    CHECK(got.tables.messages.size() >= mapped.tables.messages.size());
+    int active = 0;
+    for (const ct::CanMessageConfig &m : got.tables.messages)
+        if (m.flags & ct::MSGFLAG_ACTIVE)
+            ++active;
+    CHECK(active == mapped.tables.messages.size());
+    for (int i = 0; i < mapped.tables.messages.size(); ++i) {
+        CHECK(got.tables.messages[i].can_id == mapped.tables.messages[i].can_id);
+        CHECK(got.tables.messages[i].dlc == mapped.tables.messages[i].dlc);
+        CHECK(got.tables.messages[i].flags == mapped.tables.messages[i].flags);
+    }
+    // The signals travelled too, labels included - the field a chunking bug
+    // would shear off the end of a record.
+    CHECK(got.tables.signalConfigs.size() >= mapped.tables.signalConfigs.size());
+    for (int i = 0; i < mapped.tables.signalConfigs.size(); ++i) {
+        CHECK(std::memcmp(got.tables.signalConfigs[i].label,
+                          mapped.tables.signalConfigs[i].label,
+                          sizeof(mapped.tables.signalConfigs[i].label)) == 0);
+        CHECK(got.tables.signalConfigs[i].min_val == mapped.tables.signalConfigs[i].min_val);
+        CHECK(got.tables.signalConfigs[i].max_val == mapped.tables.signalConfigs[i].max_val);
+    }
+}
+
+// A LOAD-BEARING STEP THAT FAILS MUST ABORT THE TRANSFER, not be swallowed.
+// Several steps in the plan are deliberately `optional` so an older device can
+// decline them; the risk that buys is a step becoming optional that should not
+// be, after which a half-written configuration reports success. Pin both sides:
+// the message-table write is fatal, and an optional step's refusal is survived
+// and reported.
+static void testConfigTransferRefusesToSwallowAFatalStep(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+    serial_proto_init(restore);
+    flashErase();
+
+    ct::Configuration cfg;
+    fillTransferFixture(cfg);
+    const ct::MappingResult mapped = ct::mapToDevice(cfg);
+    CHECK(mapped.ok());
+
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        link.nackCommand(ct::CMD_WRITE_MSG_CFG, ct::ERR_FLASH_WRITE);
+        TransferOutcome out;
+        runTransfer(ct::ConfigTransfer::send(&link, mapped.tables, /*verify=*/true), &out);
+        CHECK(out.done);
+        CHECK(!out.ok);            // refused, not reported as a success
+        CHECK(!out.error.isEmpty()); // and it says why
+    }
+    {
+        // A lost reply is as fatal as a NACK on a step that matters: the device
+        // may or may not hold what was sent, and "I never heard" is not "done".
+        ct::FakeDeviceLink link(firmwareReply);
+        link.loseReplyTo(ct::CMD_WRITE_MSG_CFG);
+        TransferOutcome out;
+        runTransfer(ct::ConfigTransfer::send(&link, mapped.tables, /*verify=*/false), &out);
+        CHECK(out.done);
+        CHECK(!out.ok);
+    }
+}
+
+// THE REAL UPLOADER, chunking a real image into the real bootloader state
+// machine. testFirmwareUpdate above proves the DEVICE side using its own
+// sendAllChunks helper - deliberately "the way FirmwareUpdater does" - which
+// leaves the actual FirmwareUpdater untested and free to disagree with it.
+static void testFirmwareUpdaterUploadsAndCancels(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    serial_proto_init(restore);
+    flashErase();
+    // The staging flash the bootloader writes into, same setup testFirmwareUpdate
+    // performs - without it BEGIN answers ERR_FLASH_WRITE and nothing can be
+    // uploaded.
+    fw_host_reset();
+    static const FwUpdateDriver drv = {fw_host_erase, fw_host_program};
+    static const BcbDriver bcbDrv = {fw_host_erase, fw_host_program};
+    bcb_init(&bcbDrv);
+    fw_update_init(&drv);
+
+    // FirmwareImage validates a real .ctf, so the bytes go through a file -
+    // which is also the path the application takes.
+    const QByteArray imageBytes = makeFirmwareImage(8192, 3, 1, 4);
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString imagePath = dir.filePath(QStringLiteral("test.ctf"));
+    {
+        QFile f(imagePath);
+        CHECK(f.open(QIODevice::WriteOnly));
+        f.write(imageBytes);
+    }
+    QString loadError;
+    const auto image = ct::FirmwareImage::load(imagePath, &loadError);
+    CHECK(image.has_value());
+    if (!image)
+        std::printf("      image load: %s\n", qPrintable(loadError));
+    if (!image)
+        return;
+
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        ct::FirmwareUpdater updater(&link);
+        qint64 lastSent = -1;
+        qint64 lastTotal = -1;
+        QObject::connect(&updater, &ct::FirmwareUpdater::progress, &updater,
+                         [&](qint64 sent, qint64 total) {
+                             lastSent = sent;
+                             lastTotal = total;
+                         });
+        QString error;
+        const bool ok = updater.upload(*image, &error);
+        CHECK(ok);
+        if (!ok)
+            std::printf("      upload error: %s\n", qPrintable(error));
+        // BEGIN, at least one DATA, and END - the shape of a real update.
+        CHECK(link.sentAny(ct::CMD_FW_UPDATE_BEGIN));
+        CHECK(link.countOf(ct::CMD_FW_UPDATE_DATA) >= 1);
+        CHECK(link.sentAny(ct::CMD_FW_UPDATE_END));
+        // Every byte was accounted for: the last progress report must reach the
+        // total, which is what an off-by-one on the final short chunk breaks.
+        CHECK(lastTotal == imageBytes.size());
+        CHECK(lastSent == imageBytes.size());
+    }
+
+    {
+        // CANCEL MID-UPLOAD stops the transfer and does not report success.
+        flashErase();
+        fw_host_reset();
+        fw_update_init(&drv);
+        ct::FakeDeviceLink link(firmwareReply);
+        ct::FirmwareUpdater updater(&link);
+        link.beforeEach = [&](quint8 cmd, const QByteArray &) {
+            if (cmd == ct::CMD_FW_UPDATE_DATA)
+                updater.cancel(); // during the first data chunk
+        };
+        QString error;
+        const bool ok = updater.upload(*image, &error);
+        CHECK(!ok);
+        CHECK(!error.isEmpty());
+        // It stopped where it was told to, rather than running the image out.
+        CHECK(link.countOf(ct::CMD_FW_UPDATE_DATA) < (imageBytes.size() / 488) + 1);
+        // And a cancelled upload never claims the image is complete.
+        CHECK(!link.sentAny(ct::CMD_FW_UPDATE_END));
+    }
 }
 
 int main(int argc, char *argv[])
@@ -8067,6 +8419,10 @@ int main(int argc, char *argv[])
     testAckCrcEcho(&protoCb);
     testProtectedCommsSlots(&protoCb);
     testMessagePasswordSlotSurvivesTheDevice(&protoCb);
+    testMessagePasswordRecordRoundTrip(&protoCb);
+    testConfigTransferSendAndGetAgainstTheDevice(&protoCb);
+    testConfigTransferRefusesToSwallowAFatalStep(&protoCb);
+    testFirmwareUpdaterUploadsAndCancels(&protoCb);
     testMessageProtectionIsHostOnly(&protoCb);
     testAccessKeyDurability(&protoCb);
     testDeviceBinding(&protoCb);

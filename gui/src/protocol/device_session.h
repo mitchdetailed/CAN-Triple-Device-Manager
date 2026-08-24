@@ -15,6 +15,7 @@
 #include <QString>
 
 #include "../model/access_keys.h"
+#include "access_state.h"
 #include "device_link.h"
 
 namespace ct {
@@ -30,20 +31,6 @@ struct Identity {
     // Printable form of the 96-bit ID, most significant byte first, for the
     // Device Status dialog and for telling two units apart.
     QString uidText() const;
-};
-
-// v19: which of the three access passwords the device has set. Never carries
-// the keys — the device does not hand those out, which is the point of them.
-struct AccessState {
-    bool set[kAccessFunctionCount] = {false, false, false};
-    bool supported = false; // false on pre-v19 firmware
-    // v17: which of the four Protected Comms slots hold a password (bit i =
-    // slot i+1). 0 on firmware that predates the slots even when the single
-    // password is set, so display code should fall back to isSet().
-    quint8 protSlots = 0;
-
-    bool isSet(AccessFunction fn) const { return set[int(fn)]; }
-    bool any() const { return set[0] || set[1] || set[2]; }
 };
 
 // What the device says it is. The fleet key is absent by design — `keyPresent`

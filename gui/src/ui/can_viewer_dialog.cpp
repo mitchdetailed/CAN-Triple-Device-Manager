@@ -577,6 +577,14 @@ void CanViewerDialog::onInjectClicked(int slot)
         stopInject(slot);
         return;
     }
+    // Drop a re-press that lands while the initial send is still inside its
+    // nested event loop. onInjectTick guards the same way; onInjectClicked did
+    // not, so pressing Start again (or Enter in the Data field) during the
+    // ~1.5 s a stalled requestSync holds would stack a second sync transaction
+    // on the one DeviceLink. Placed AFTER the stop-check so a run can always be
+    // stopped.
+    if (s.inFlight)
+        return;
 
     const int hz = s.rate->currentData().toInt();
     if (hz <= 0) {
