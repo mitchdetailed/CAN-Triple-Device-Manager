@@ -130,6 +130,12 @@ EditChannelDialog::EditChannelDialog(Configuration *config, const Channel &initi
         rangeSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
         rangeSpin->setToolTip(rangeTip);
     }
+    // Named so a test can address them without counting spin boxes in creation
+    // order - the two fields whose refusals (min >= max) exist to keep a range
+    // the device would pin every reading against out of a configuration.
+    m_minSpin->setObjectName(QStringLiteral("rangeMinimum"));
+    m_maxSpin->setObjectName(QStringLiteral("rangeMaximum"));
+    m_nameEdit->setObjectName(QStringLiteral("channelName"));
     
     detailsForm->addRow(tr("Data Type:"), m_dataTypeCombo);
     detailsForm->addRow(tr("Decimal Places:"), m_decimalsSpin);

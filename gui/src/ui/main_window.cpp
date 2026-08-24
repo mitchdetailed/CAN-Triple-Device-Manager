@@ -1411,15 +1411,39 @@ void MainWindow::onSendConfiguration()
             BusyScope busy(this);
             read = device_session::readAccessState(&m_link, &state, &accessError);
         }
-        if (!read) {
+        // The decision is device_session::protectedSendVerdict's, so the order
+        // of these refusals is pinned by a test rather than by this function
+        // being read carefully. The prove round trip runs only once the cheaper
+        // refusals have been ruled out, which is why the verdict is asked twice:
+        // once with proved=false to reach that point, once with the result.
+        using V = device_session::ProtectedSendVerdict;
+        V verdict = device_session::protectedSendVerdict(read, state, m_config.commsKey(),
+                                                         /*proved=*/false, /*wrongKey=*/false);
+        bool wrongKey = false;
+        if (verdict == V::ProofFailed) { // i.e. nothing cheaper refused it
+            bool proved = false;
+            {
+                BusyScope busy(this);
+                proved = device_session::proveAccess(&m_link,
+                                                     AccessFunction::EditProtectedComms,
+                                                     m_config.commsKey(), &accessError,
+                                                     &wrongKey);
+            }
+            verdict = device_session::protectedSendVerdict(read, state, m_config.commsKey(),
+                                                           proved, wrongKey);
+        }
+
+        switch (verdict) {
+        case V::Allowed:
+            break;
+        case V::NoDeviceAnswer:
             QMessageBox::warning(this, title,
                                  tr("This configuration contains messages marked Protect "
                                     "Communication, and this unit could not say which access "
                                     "passwords it has set.%1\n\n%2")
                                      .arg(tail, accessError));
             return;
-        }
-        if (!state.supported || !state.isSet(AccessFunction::EditProtectedComms)) {
+        case V::DeviceHasNoPassword:
             QMessageBox::warning(
                 this, title,
                 tr("This configuration contains messages marked Protect Communication, and "
@@ -1429,8 +1453,7 @@ void MainWindow::onSendConfiguration()
                    "send again.")
                     .arg(tail));
             return;
-        }
-        if (m_config.commsKey() == kNoAccessKey) {
+        case V::DocumentHasNoKey:
             QMessageBox::warning(
                 this, title,
                 tr("This configuration contains messages marked Protect Communication but "
@@ -1440,24 +1463,19 @@ void MainWindow::onSendConfiguration()
                    "Protect Communication markings.")
                     .arg(tail));
             return;
-        }
-        bool wrongKey = false;
-        bool proved = false;
-        {
-            BusyScope busy(this);
-            proved = device_session::proveAccess(&m_link, AccessFunction::EditProtectedComms,
-                                                 m_config.commsKey(), &accessError, &wrongKey);
-        }
-        if (!proved) {
+        case V::Mismatch:
             QMessageBox::warning(
                 this, title,
-                wrongKey
-                    ? tr("This configuration's Protected Comms password does not match this "
-                         "unit's.%1\n\nA configuration containing messages marked Protect "
-                         "Communication goes only to a unit that holds the same password.")
-                          .arg(tail)
-                    : tr("This unit could not confirm the Protected Comms password.%1\n\n%2")
-                          .arg(tail, accessError));
+                tr("This configuration's Protected Comms password does not match this "
+                   "unit's.%1\n\nA configuration containing messages marked Protect "
+                   "Communication goes only to a unit that holds the same password.")
+                    .arg(tail));
+            return;
+        case V::ProofFailed:
+            QMessageBox::warning(
+                this, title,
+                tr("This unit could not confirm the Protected Comms password.%1\n\n%2")
+                    .arg(tail, accessError));
             return;
         }
     }

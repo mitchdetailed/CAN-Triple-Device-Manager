@@ -1697,7 +1697,7 @@ enum {
 
 typedef struct {
     uint16_t signal_idx[DEVCH_COUNT]; /* SIG_MSG_NONE = configuration does not use it */
-} DeviceChannelsConfig;               /* 62 bytes */
+} DeviceChannelsConfig;               /* 72 bytes (DEVCH_COUNT 36 * 2) */
 
 /* One bus's error state, sampled off the FDCAN peripheral by the glue layer and
  * handed to the (HAL-free) engine. Everything here comes from ECR and PSR.

@@ -56,17 +56,24 @@ public:
 
     // Queue a command. Reads (GET_STATUS/READ_*) complete on a packet echoing
     // the request cmd; everything else completes on ACK.
-    void request(quint8 cmd, const QByteArray &payload, ResponseHandler handler,
-                 int timeoutMs = kDefaultTimeoutMs, int retries = kDefaultRetries);
+    //
+    // VIRTUAL, together with requestSync below, and for one reason: these two
+    // are the entire surface ConfigTransfer and FirmwareUpdater use, so
+    // overriding them is what lets a test drive those two against something
+    // other than a serial port - see test/fake_device_link.h, which answers
+    // from the real firmware library instead. Nothing else here is a seam and
+    // nothing else should become one.
+    virtual void request(quint8 cmd, const QByteArray &payload, ResponseHandler handler,
+                         int timeoutMs = kDefaultTimeoutMs, int retries = kDefaultRetries);
 
     // Convenience wrapper running a nested event loop until completion.
     // errCodeOut receives the device's NACK code, or 0 for a link failure —
     // callers that must tell "this firmware doesn't know the command"
     // (ERR_INVALID_CMD) from "wrong password" (ERR_LOCKED) need it, and the
     // error STRING cannot be pattern-matched for that safely.
-    bool requestSync(quint8 cmd, const QByteArray &payload, QByteArray *responsePayload,
-                     QString *error, int timeoutMs = kDefaultTimeoutMs,
-                     int retries = kDefaultRetries, quint8 *errCodeOut = nullptr);
+    virtual bool requestSync(quint8 cmd, const QByteArray &payload, QByteArray *responsePayload,
+                             QString *error, int timeoutMs = kDefaultTimeoutMs,
+                             int retries = kDefaultRetries, quint8 *errCodeOut = nullptr);
 
     int pendingCount() const { return (m_current ? 1 : 0) + m_queue.size(); }
     void cancelAll(); // fails all queued/in-flight requests

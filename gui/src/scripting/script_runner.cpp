@@ -55,15 +55,17 @@ ScriptResult ScriptRunner::run(const QString &source, const QString &chunkName)
         }
     } else {
         result.error = error;
-        if (context.mutated) {
-            // Failed after changing things: put the content back. The reverse
-            // copy restores through the same primitive that took the snapshot,
-            // so the two can only disagree if copyContentTo itself is wrong —
-            // and test_lua checks the round trip.
-            snapshot.copyContentTo(m_config);
-            m_config.setConfigTitle(savedTitle);
-            result.rolledBack = true;
-        }
+        // Restore UNCONDITIONALLY, not only when context.mutated is set. A
+        // binding can change the live Configuration in place before it calls
+        // touch() - l_setBus writes bus.enabled and then raises on a bad
+        // rateKbps, for instance - so a partial change can land with mutated
+        // still false. Restoring identical content when nothing changed is
+        // harmless; the reverse copy goes through the same primitive that took
+        // the snapshot, which test_lua round-trips. context.mutated now gates
+        // only the success-path setDirty above.
+        snapshot.copyContentTo(m_config);
+        m_config.setConfigTitle(savedTitle);
+        result.rolledBack = context.mutated;
     }
 
     result.elapsedMs = elapsed.elapsed();

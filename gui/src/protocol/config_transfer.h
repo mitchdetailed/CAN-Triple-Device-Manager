@@ -108,12 +108,12 @@ public:
     // declined the step for want of a password this session has not proved.
     //
     // Worth distinguishing from every other failure because it is the one the
-    // user can do something about, and because on a Get the likeliest cause is
-    // not the Get password at all: the device refuses a table-read chunk that
-    // CONTAINS PROTECTED MESSAGE RECORDS unless Protected Comms has been
-    // proved (serial_proto.c, the chunkHasProtected check). So a Get can pass
-    // its own password gate and still be refused here, and the caller needs to
-    // know it should offer the comms password rather than repeat "locked".
+    // user can do something about. On a Get it means the Get Configuration
+    // password (ACCESS_FN_GET) has not been proved - nothing more. The device's
+    // old per-message read gate, which refused a chunk carrying protected
+    // records until Protected Comms was proved, was removed in 2.3.0 (see the
+    // read-path note in serial_proto.c); do not re-introduce a Protected Comms
+    // prompt on a locked Get, which would send the user to the wrong password.
     bool failedLocked() const { return m_failedLocked; }
 
 signals:

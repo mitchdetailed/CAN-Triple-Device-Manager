@@ -1236,6 +1236,15 @@ void Configuration::clear()
     m_fleetIdentity = FleetIdentity{};
     m_uploadPolicy = UploadPolicy{};
     m_commsKey = kNoAccessKey;
+    // The four document-wide Message Passwords are key material too, and
+    // loadBody() is the ONLY other writer of this array - so without this a
+    // File > New after opening a protected config would carry that config's
+    // derived keys into the blank document, where a Save would persist them, a
+    // Send would program them onto a device, and a later Get would keep them in
+    // preference to the device's real keys (mapFromDevice fills only empty
+    // slots). See device_mapper.cpp's adoption loop.
+    for (AccessKey &pw : m_commsPasswords)
+        pw = kNoAccessKey;
     m_lockedDeviceUid.clear();
     m_deviceLockKey = kNoAccessKey;
     m_commsRevealed = false;

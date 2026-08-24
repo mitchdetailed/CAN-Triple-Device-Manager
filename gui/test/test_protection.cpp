@@ -47,6 +47,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QFile>
 #include <QInputDialog>
 #include <QJsonArray>
@@ -68,8 +69,10 @@
 #include "../src/model/config_file.h"
 #include "../src/model/configuration.h"
 #include "../src/model/device_mapper.h"
+#include "../src/protocol/access_state.h"
 #include "../src/protocol/wire_structs.h"
 #include "../src/ui/channel_editor_dialog.h"
+#include "../src/ui/edit_channel_dialog.h"
 #include "../src/ui/communications_dialog.h"
 #include "../src/ui/section_editor_dialog.h"
 
@@ -4050,6 +4053,193 @@ void testDeviceChannelsReportAnInternalSource()
     CHECK(sourceOf(QStringLiteral("Orphan Pressure")) == QStringLiteral("unused"));
 }
 
+// THE PROTECT COMMUNICATION SEND GATE, branch by branch and in order.
+//
+// This is the only thing standing between a configuration sealed under one
+// Protected Comms password and a unit that does not hold it - the device
+// enforces nothing about message protection itself. Until the decision was
+// lifted out of MainWindow::onSendConfiguration it could not be tested at all:
+// every branch lived inside a slot needing a window, a device and a user. What
+// is pinned here is the part that would ship a bypass if it broke - WHICH
+// answer comes back for each state, and in what ORDER the states are judged.
+static void testProtectedCommsSendGate()
+{
+    using namespace ct::device_session;
+    using V = ProtectedSendVerdict;
+
+    const AccessKey docKey = deriveAccessKey(QStringLiteral("document-comms-pw"));
+
+    AccessState none;                 // pre-v19 firmware: no access passwords at all
+    AccessState bare;                 // v19+, but no Protected Comms password set
+    bare.supported = true;
+    AccessState armed;                // v19+, Protected Comms set
+    armed.supported = true;
+    armed.set[int(AccessFunction::EditProtectedComms)] = true;
+
+    // The happy path, and the ONLY verdict that lets a send proceed.
+    CHECK(protectedSendVerdict(true, armed, docKey, /*proved=*/true, /*wrongKey=*/false)
+          == V::Allowed);
+
+    // A unit that could not be asked is never reported as disagreeing: "I could
+    // not tell" must not become "it is wrong". Checked FIRST, so it wins even
+    // when the state passed alongside it would have refused for another reason.
+    CHECK(protectedSendVerdict(false, armed, docKey, true, false) == V::NoDeviceAnswer);
+    CHECK(protectedSendVerdict(false, bare, kNoAccessKey, false, true) == V::NoDeviceAnswer);
+
+    // No password on the unit - including firmware too old to have one - is not
+    // the same password.
+    CHECK(protectedSendVerdict(true, bare, docKey, true, false) == V::DeviceHasNoPassword);
+    CHECK(protectedSendVerdict(true, none, docKey, true, false) == V::DeviceHasNoPassword);
+    // And that answer outranks the document's own missing key, so a user is
+    // told about the end they can fix on the bench in front of them.
+    CHECK(protectedSendVerdict(true, bare, kNoAccessKey, false, false)
+          == V::DeviceHasNoPassword);
+
+    // A document with nothing to match with is named as such rather than sent
+    // to a prove that would fail for a second reason.
+    CHECK(protectedSendVerdict(true, armed, kNoAccessKey, false, false)
+          == V::DocumentHasNoKey);
+
+    // The case the rule exists for, kept distinct from a failed round trip:
+    // wrongKey says the unit answered and disagreed.
+    CHECK(protectedSendVerdict(true, armed, docKey, false, /*wrongKey=*/true) == V::Mismatch);
+    CHECK(protectedSendVerdict(true, armed, docKey, false, /*wrongKey=*/false)
+          == V::ProofFailed);
+
+    // Every refusal is a refusal: nothing but Allowed may let a send through.
+    const V refusals[] = { V::NoDeviceAnswer, V::DeviceHasNoPassword, V::DocumentHasNoKey,
+                           V::Mismatch, V::ProofFailed };
+    for (V v : refusals)
+        CHECK(v != V::Allowed);
+
+    // The gate only runs at all for a configuration that carries Protect
+    // Communication messages - hasProtectedComms() is the switch, and an Off
+    // section is not sent, so its marking does not hold up a send.
+    Configuration cfg;
+    cfg.bus[0].enabled = true;
+    CommsSection prot;
+    prot.name = QStringLiteral("Sealed");
+    prot.device = SectionDevice::ReceiveMessage;
+    prot.baseAddress = 0x660;
+    prot.messageLengthBytes = 8;
+    prot.protection = CommsProtection::Protected;
+    prot.messageKey = docKey;
+    cfg.bus[0].sections.append(prot);
+    CHECK(cfg.hasProtectedComms());
+    cfg.bus[0].sections[0].device = SectionDevice::Off;
+    CHECK(!cfg.hasProtectedComms());
+}
+
+// A NEW DOCUMENT KEEPS NONE OF THE LAST ONE'S KEYS, the four Message
+// Passwords included. They were the one secret clear() forgot: every other one
+// was wiped, so File > New after opening a protected configuration carried its
+// derived keys into the blank document - where a Save would persist them, a
+// Send would program them onto a device, and a Get would keep them in
+// preference to the device's own (mapFromDevice fills only empty slots).
+static void testNewDocumentKeepsNoPasswords()
+{
+    Configuration cfg;
+    cfg.setCommsPasswordSlot(1, deriveAccessKey(QStringLiteral("first-document-pw")));
+    cfg.setCommsPasswordSlot(3, deriveAccessKey(QStringLiteral("third-document-pw")));
+    cfg.setCommsPassword(QStringLiteral("protected-comms-pw"));
+    CHECK(cfg.commsPasswordsInUse() == 2);
+
+    cfg.clear(); // File > New, on the same object the window holds
+
+    for (int slot = 1; slot <= Configuration::kCommsPasswordSlots; ++slot)
+        CHECK(cfg.commsPassword(slot) == kNoAccessKey);
+    CHECK(cfg.commsPasswordsInUse() == 0);
+    // So a marking made in the new document takes slot 1, rather than finding
+    // it occupied by a password the user was never shown and cannot produce.
+    CHECK(cfg.firstFreeCommsPasswordSlot() == 1);
+    // And the document-wide Protected Comms key goes with them, as it always did.
+    CHECK(cfg.commsKey() == kNoAccessKey);
+}
+
+// THE EDIT CHANNEL DIALOG'S OWN REFUSALS.
+//
+// A channel's Range Minimum/Maximum became editable in 1.1.0, and the device
+// clamps every reading to whatever they say - applying the minimum first and
+// the maximum second, with no inverted-pair guard, so min >= max pins every
+// reading to the maximum. validateConfiguration catches that at Send and is
+// tested; this is the front line that stops it being typed in the first place,
+// and it had nothing.
+static void testEditChannelDialogRefusals()
+{
+    Configuration cfg;
+
+    // A helper that fills the dialog, presses OK, and says whether it closed.
+    // The pilot answers the refusal box OK raises - without it the click never
+    // returns and the run hangs instead of failing.
+    const auto attempt = [&](const QString &name, double lo, double hi,
+                             const Channel &initial, bool isNew) {
+        ModalPilot pilot;
+        EditChannelDialog dlg(&cfg, initial, isNew, nullptr);
+        auto *nameEdit = dlg.findChild<QLineEdit *>(QStringLiteral("channelName"));
+        auto *minSpin = dlg.findChild<QDoubleSpinBox *>(QStringLiteral("rangeMinimum"));
+        auto *maxSpin = dlg.findChild<QDoubleSpinBox *>(QStringLiteral("rangeMaximum"));
+        CHECK(nameEdit && minSpin && maxSpin);
+        if (!nameEdit || !minSpin || !maxSpin)
+            return false;
+        nameEdit->setText(name);
+        minSpin->setValue(lo);
+        maxSpin->setValue(hi);
+        auto *box = dlg.findChild<QDialogButtonBox *>();
+        CHECK(box);
+        if (!box)
+            return false;
+        QAbstractButton *ok = box->button(QDialogButtonBox::Ok);
+        CHECK(ok);
+        if (!ok)
+            return false;
+        ok->click();
+        // A dialog that refused is still open; one that accepted is not.
+        return !dlg.isVisible() && dlg.result() == QDialog::Accepted;
+    };
+
+    Channel base;
+    base.name = QStringLiteral("Coolant Temp");
+    base.dataType = QStringLiteral("s16");
+    base.decimalPlaces = 1;
+    base.minValue = -40;
+    base.maxValue = 215;
+
+    // An ordinary narrowed range is accepted - the feature works.
+    CHECK(attempt(QStringLiteral("Coolant Temp"), -40.0, 150.0, base, true));
+
+    // INVERTED is refused: the device would pin every reading to the maximum.
+    CHECK(!attempt(QStringLiteral("Coolant Temp"), 150.0, -40.0, base, true));
+    // EQUAL is refused too - a range of one value is the same defect with a
+    // narrower gap, and the check is >= for that reason.
+    CHECK(!attempt(QStringLiteral("Coolant Temp"), 100.0, 100.0, base, true));
+
+    // And the name rules the same OK press enforces.
+    CHECK(!attempt(QString(), -40.0, 150.0, base, true)); // empty
+    // An over-long name never reaches the refusal: the field caps typing at
+    // MAX_CHANNEL_NAME_BYTES, so 200 characters arrive as the limit and are
+    // accepted. That is the better guard of the two - validate()'s length check
+    // is the backstop for a multi-byte name whose CHARACTER count fits while
+    // its UTF-8 byte count does not.
+    {
+        ModalPilot pilot;
+        EditChannelDialog dlg(&cfg, base, true, nullptr);
+        auto *nameEdit = dlg.findChild<QLineEdit *>(QStringLiteral("channelName"));
+        CHECK(nameEdit);
+        if (nameEdit) {
+            nameEdit->setText(QString(200, QLatin1Char('x')));
+            CHECK(nameEdit->text().size() == MAX_CHANNEL_NAME_BYTES);
+        }
+    }
+
+    // A duplicate of a channel the document already has is refused as well.
+    Channel existing;
+    existing.name = QStringLiteral("Taken");
+    existing.dataType = QStringLiteral("u8");
+    existing.userDefined = true;
+    cfg.catalog().addOrUpdateUserChannel(existing);
+    CHECK(!attempt(QStringLiteral("Taken"), 0.0, 100.0, base, true));
+}
+
 int main(int argc, char **argv)
 {
     // Offscreen: half of this file drives real widgets, and a test binary that
@@ -4062,6 +4252,9 @@ int main(int argc, char **argv)
     testMigrationFromSchema13();
     testNoReRatchetOnSchema14();
     testHasProtectedComms();
+    testProtectedCommsSendGate();
+    testNewDocumentKeepsNoPasswords();
+    testEditChannelDialogRefusals();
     testApplyBusSectionsGuard();
     testKeySwapIsAsPrivilegedAsAnUntick();
     testDuplicateNamesCannotAnswerForEachOther();

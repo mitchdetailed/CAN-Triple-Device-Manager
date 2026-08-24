@@ -357,8 +357,14 @@ bool readCommsTemplate(const QString &path, CommsTemplate *out, QString *error)
         tmpl.sections.append(CommsSection::fromJson(v.toObject(), tmpl.configSchema));
     {
         const QJsonArray pw = body.value(kKeyPasswords).toArray();
+        // Into `tmpl`, not `out` - the function ends with `*out = tmpl`, so
+        // writing the parsed keys into `out->passwords` here was overwritten a
+        // few lines later by tmpl's default (empty) array. Re-homing on load
+        // reads section keys rather than this array, so the old bug lost
+        // nothing; keeping the two consistent stops it lying to a future
+        // consumer and keeps the save/load round trip symmetric.
         for (int i = 0; i < kTemplatePasswordSlots; ++i)
-            out->passwords[i] = i < pw.size() ? AccessKey(quint32(pw.at(i).toDouble()))
+            tmpl.passwords[i] = i < pw.size() ? AccessKey(quint32(pw.at(i).toDouble()))
                                               : kNoAccessKey;
     }
     for (const QJsonValue &v : body.value(kKeyChannels).toArray())

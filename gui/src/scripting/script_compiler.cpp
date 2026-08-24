@@ -1176,6 +1176,15 @@ private:
 
     int loadConstant(float v)
     {
+        // A literal past FLT_MAX narrows to +/-Inf on the cast in parsePrimary,
+        // which the device verifier then rejects as non-finite - reported to
+        // the user as an "internal compiler error" it is not. Catch it here,
+        // the single chokepoint every constant flows through, and say what is
+        // actually wrong.
+        if (!std::isfinite(v))
+            fail(QStringLiteral("a numeric constant is outside the range a 32-bit "
+                                "float can represent (scripts run in float32 on "
+                                "the device)"));
         const int dst = allocTemp();
         emitInstr(SCRIPT_OP_LOADK, uint8_t(dst), 0, 0, floatBits(v));
         return dst;
