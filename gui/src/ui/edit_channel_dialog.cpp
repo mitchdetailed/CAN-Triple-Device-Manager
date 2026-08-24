@@ -110,11 +110,25 @@ EditChannelDialog::EditChannelDialog(Configuration *config, const Channel &initi
     m_unitsCombo = new QComboBox(detailsGroup);
     m_minSpin = new TrimmedDoubleSpinBox(detailsGroup);
     m_maxSpin = new TrimmedDoubleSpinBox(detailsGroup);
-    for (QDoubleSpinBox *derived : {m_resolutionSpin, m_minSpin, m_maxSpin}) {
-        derived->setRange(-5e9, 5e9);
-        derived->setReadOnly(true);
-        derived->setButtonSymbols(QAbstractSpinBox::NoButtons);
-        derived->setFocusPolicy(Qt::NoFocus);
+    m_resolutionSpin->setRange(-5e9, 5e9);
+    m_resolutionSpin->setReadOnly(true);
+    m_resolutionSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    m_resolutionSpin->setFocusPolicy(Qt::NoFocus);
+    // The RANGE is the user's to declare. It defaults to what the type spans
+    // and re-derives when the type or the decimals change, but a channel's
+    // plausibility range is its own fact - 0..8000 on an RPM channel - and the
+    // device clamps every reading to it, so the two fields are editable. The
+    // limits are float32's, because that is what CanSignalConfig carries; the
+    // J1939 wide signals a DBC brings in live far outside the old +/-5e9.
+    const QString rangeTip =
+        tr("Defaults to what the data type spans at the chosen precision, and "
+           "re-derives when either changes. Edit it to declare what this "
+           "channel should read - the device clamps every reading to this "
+           "range.");
+    for (QDoubleSpinBox *rangeSpin : {m_minSpin, m_maxSpin}) {
+        rangeSpin->setRange(-3.402823e38, 3.402823e38);
+        rangeSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        rangeSpin->setToolTip(rangeTip);
     }
     
     detailsForm->addRow(tr("Data Type:"), m_dataTypeCombo);
@@ -191,6 +205,14 @@ EditChannelDialog::EditChannelDialog(Configuration *config, const Channel &initi
     m_dataTypeCombo->setCurrentIndex(qMax(0, m_dataTypeCombo->findText(initial.dataType)));
     m_decimalsSpin->setValue(initial.decimalPlaces);
     onDataTypeChanged(); // apply the decimals cap, then derive res/range
+    // AFTER the derivation, the stored range goes back in: the fields hold the
+    // channel's own declared range, and the type span is only where a range
+    // STARTS. Skipped for an inverted or empty pair - the derived span is a
+    // better offer than a range the device would pin every reading against.
+    if (!m_isNew && initial.minValue < initial.maxValue) {
+        m_minSpin->setValue(initial.minValue);
+        m_maxSpin->setValue(initial.maxValue);
+    }
 
     if (m_isNew) {
         const QString defaultName =
@@ -285,6 +307,14 @@ bool EditChannelDialog::validate()
                              tr("Choose a data type for the channel."));
         return false;
     }
+    // The device applies the min clamp first and the max clamp second, with no
+    // inverted-pair guard, so min >= max pins every reading to the maximum.
+    if (m_minSpin->value() >= m_maxSpin->value()) {
+        QMessageBox::warning(this, tr("Edit Custom Channel"),
+                             tr("Range Minimum must be below Range Maximum — the device "
+                                "clamps every reading to this range."));
+        return false;
+    }
 
     const bool sameAsOriginal =
         !m_isNew && name.compare(m_originalName, Qt::CaseInsensitive) == 0;
@@ -309,22 +339,12 @@ Channel EditChannelDialog::channel() const
     c.dataType = m_dataTypeCombo->currentText();
     c.baseResolution = m_resolutionSpin->value();
     c.decimalPlaces = m_decimalsSpin->value();
+    // At their word: the fields are populated from the channel's stored range
+    // and only re-derived by a type or decimals change, so what they show is
+    // what the user chose to leave there. The old preserve-the-wider-range
+    // guard existed because they used to show the derived span instead.
     c.minValue = m_minSpin->value();
     c.maxValue = m_maxSpin->value();
-    // The Range fields show what the TYPE spans, but a channel may legitimately
-    // carry a WIDER range than that — a float channel's ±1e9 is a display
-    // convention, not a storage limit, and a J1939 distance signal really does
-    // reach 2.1e10. That range is the device's clamp, so overwriting it here
-    // would throw the signal's top end away just because the user opened the
-    // dialog to fix a typo. Keep the wider range unless the user actually
-    // changed the type or precision, which is a deliberate re-derivation.
-    if (!m_isNew && c.dataType == m_initial.dataType
-        && c.decimalPlaces == m_initial.decimalPlaces
-        && m_initial.minValue < m_initial.maxValue
-        && (m_initial.minValue < c.minValue || m_initial.maxValue > c.maxValue)) {
-        c.minValue = m_initial.minValue;
-        c.maxValue = m_initial.maxValue;
-    }
     c.category = QStringLiteral("User Channels");
     c.userDefined = true;
     return c;

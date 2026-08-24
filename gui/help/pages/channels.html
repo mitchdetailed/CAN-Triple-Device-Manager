@@ -306,9 +306,12 @@ Places</sup>.</td></tr>
 Voltage, …), which decides the units on offer.</td></tr>
 <tr><td><b>Display Units:</b></td><td>The unit shown wherever the channel
 appears.</td></tr>
-<tr><td><b>Range Minimum:</b> / <b>Range Maximum:</b></td><td>Derived, read-only:
-what the chosen type spans at the chosen precision. This range is also the
-<b>device's clamp</b> — every reading is limited to it.</td></tr>
+<tr><td><b>Range Minimum:</b> / <b>Range Maximum:</b></td><td>The channel's
+declared range, and the <b>device's clamp</b> — every reading is limited to it.
+It starts as what the chosen type spans at the chosen precision, and is
+re-derived whenever the type or the decimals change; edit it to declare what
+the channel should plausibly read — 0…8000 on an RPM channel — narrower or
+wider than the type span alike. Minimum must stay below Maximum.</td></tr>
 </table>
 
 <h2>Storage types</h2>

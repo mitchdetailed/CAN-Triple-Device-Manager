@@ -93,6 +93,18 @@ stage_one("can-triple-${FW_VERSION}.ctf"
     "${FIRMWARE_DIR}/can-triple-${FW_VERSION}.ctf"
     "${DEPLOY_DIR}/Firmware/can-triple-${FW_VERSION}.ctf")
 
+# A stale image beside the current one is worse than clutter: the
+# initial-programming tool takes the HIGHEST header version it finds beside
+# itself, and the version-one renumber made every older image "higher" than the
+# firmware this release actually pairs with. Every staging pass therefore
+# removes what it did not stage, so deploy/Firmware holds exactly one .ctf.
+file(GLOB _stale_ctf "${DEPLOY_DIR}/Firmware/can-triple-*.ctf")
+list(REMOVE_ITEM _stale_ctf "${DEPLOY_DIR}/Firmware/can-triple-${FW_VERSION}.ctf")
+if(_stale_ctf)
+    file(REMOVE ${_stale_ctf})
+    message(STATUS "deploy: removed stale firmware image(s): ${_stale_ctf}")
+endif()
+
 # The bootloader image the initial-programming tool writes to a blank part.
 stage_one("bootloader.bin"
     "${FIRMWARE_DIR}/bootloader/.pio/build/bootloader/firmware.bin"

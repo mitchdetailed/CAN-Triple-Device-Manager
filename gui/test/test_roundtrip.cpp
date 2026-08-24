@@ -1936,6 +1936,65 @@ SIG_VALTYPE_ 1600 BoostF : 1;
             CHECK(65535.0f * ss.factor + ss.offset <= ss.max_val);
         }
 
+        // The range became the USER'S to declare (the editor's two fields are
+        // editable now), so a narrowed plausibility range - tighter than the
+        // type span - must reach the device exactly as typed, not re-derived
+        // back to what the type can carry.
+        {
+            DbcSignal rpmSig;
+            rpmSig.bitLength = 16;
+            rpmSig.isSigned = false;
+            rpmSig.factor = 1.0;
+            Channel rpm = channelFromDbcSignal(rpmSig, QStringLiteral("Engine RPM"));
+            rpm.minValue = 0.0;    // the user's declared range,
+            rpm.maxValue = 8000.0; // far inside u16's 0..65535
+            Configuration ncfg;
+            ncfg.bus[0].enabled = true;
+            ncfg.catalog().addOrUpdateUserChannel(rpm);
+            CommsSection nrx;
+            nrx.name = QStringLiteral("RPM Rx");
+            nrx.device = SectionDevice::ReceiveMessage;
+            nrx.alignment = SectionAlignment::WordSwap; // the DBC row is Intel-coded
+            nrx.baseAddress = 0x201;
+            nrx.messageLengthBytes = 8;
+            nrx.rows.append(rowFromDbcSignal(rpmSig, rpm.name));
+            ncfg.bus[0].sections.append(nrx);
+            const MappingResult nmr = mapToDevice(ncfg);
+            CHECK(nmr.ok());
+            const int nIdx = nmr.channelToSignal.value(rpm.name.toLower(), -1);
+            CHECK(nIdx >= 0);
+            if (nIdx >= 0) {
+                const CanSignalConfig &ns = nmr.tables.signalConfigs[nIdx];
+                CHECK(qAbs(ns.min_val) < 1e-6f);
+                CHECK(qAbs(ns.max_val - 8000.0f) < 1e-3f);
+            }
+
+            // And an INVERTED range on a used channel is an Error before it
+            // reaches hardware: the firmware applies the min clamp first and
+            // the max clamp second, so min >= max pins every reading to max.
+            rpm.minValue = 8000.0;
+            rpm.maxValue = 0.0;
+            ncfg.catalog().addOrUpdateUserChannel(rpm);
+            bool rangeFlagged = false;
+            for (const ValidationIssue &v : validateConfiguration(ncfg))
+                if (v.severity == ValidationIssue::Error
+                    && v.message.contains(QStringLiteral("pin every reading")))
+                    rangeFlagged = true;
+            CHECK(rangeFlagged);
+
+            // An unused channel with the same inverted pair clamps nothing and
+            // is not an Error - it reaches no signal row.
+            Configuration ucfg;
+            ucfg.bus[0].enabled = true;
+            ucfg.catalog().addOrUpdateUserChannel(rpm);
+            bool unusedFlagged = false;
+            for (const ValidationIssue &v : validateConfiguration(ucfg))
+                if (v.severity == ValidationIssue::Error
+                    && v.message.contains(QStringLiteral("pin every reading")))
+                    unusedFlagged = true;
+            CHECK(!unusedFlagged);
+        }
+
         // Get-from-device must size the reconstructed channel the same way, or
         // a Get would overwrite the catalogue with a bit-width guess that
         // contradicts the range it is paired with (and re-introduce the clamp
