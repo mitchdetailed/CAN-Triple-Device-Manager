@@ -1101,10 +1101,25 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
     // Channels defined in the catalogue but not generated, used, or referenced
     // by anything (typically left behind after removing a message). Info only —
     // they cost nothing on the device; Check Channels offers a cleanup.
-    for (const QString &name : analyzeChannelUsage(config).unused)
+    const ChannelUsage channelUsage = analyzeChannelUsage(config);
+    for (const QString &name : channelUsage.unused)
         add(ValidationIssue::Info, QStringLiteral("Channels"),
             QStringLiteral("channel '%1' is defined but not used by anything "
                            "(unused — removable)").arg(name));
+
+    // A channel's declared range is the device's clamp, applied min first and
+    // max second with no inverted-pair guard — min >= max pins every reading
+    // to the maximum. The editor refuses to create the state, so this catches
+    // what a file or a template can still carry. Unused channels are exempt:
+    // they reach no signal row, so the pair clamps nothing.
+    for (const Channel &c : config.catalog().userChannels())
+        if (c.maxValue <= c.minValue
+            && !channelUsage.unused.contains(c.name, Qt::CaseInsensitive))
+            add(ValidationIssue::Error, QStringLiteral("Channels"),
+                QStringLiteral("channel '%1' has Range Minimum (%2) not below Range "
+                               "Maximum (%3) — the device would pin every reading to "
+                               "the maximum")
+                    .arg(c.name).arg(c.minValue).arg(c.maxValue));
 
     // Capacity summary (via the mapper, which also surfaces anything it can't express)
     const MappingResult mapped = mapToDevice(config);

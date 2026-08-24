@@ -408,6 +408,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; depending on which directory it is in the symptom ranges from a missing image
 ; format to "could not find or load the Qt platform plugin windows", with
 ; nothing on screen to suggest a leftover file is the cause. Cheaper to wipe.
+; Stale firmware images from earlier installs. [Files] lays down the one
+; .ctf this release pairs with but deletes nothing, and the initial-programming
+; tool takes the HIGHEST header version it finds beside itself -- so an image
+; left behind by an upgrade (in particular one from before the version-one
+; renumber, whose header outranks every current release) would be chosen over
+; the firmware this installer actually carries.
+Type: files; Name: "{app}\Firmware\can-triple-*.ctf"
+
 Type: filesandordirs; Name: "{app}\generic"
 Type: filesandordirs; Name: "{app}\iconengines"
 Type: filesandordirs; Name: "{app}\imageformats"
