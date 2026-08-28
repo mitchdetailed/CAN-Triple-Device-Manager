@@ -1,9 +1,8 @@
 # CAN Triple Device Manager — Design
 
 A Qt 6 (C++/Widgets) desktop application for configuring the CAN Triple gateway
-(STM32G473CBT6, 3× CAN) over the ST-Link virtual COM port. Layout and
-navigation deliberately mirror **MoTeC C125 Dash Manager** (verified against
-the real application, v6.51, on this machine).
+(STM32G473CBT6, 3× CAN) over the ST-Link virtual COM port, with a classic
+dash-manager layout and navigation.
 
 ## 1. Serial link (as implemented by the firmware in `../src`)
 
@@ -485,8 +484,8 @@ rather than its extension, so a `.ct3s` can never be parsed as JSON.
   door, no copy held anywhere. A lost password is a lost configuration, and the
   save dialog says so before the fact.
 
-This mirrors MoTeC's "Hide setup information" / "Require access password for use"
-pair on a locked comms template, for the same reasons.
+This is the classic "Hide setup information" / "Require access password for use"
+pairing on a locked comms template, for the same reasons.
 
 **File layout** — all multi-byte integers LITTLE-ENDIAN.
 
@@ -877,7 +876,7 @@ that password either, which is the trade its author made.
 
 - **File**: New, Open…, Save, Save As…, **Save Secure Config…** (the binary
   `.ct3s`), Check Channels (live validation report with unused-channel cleanup),
-  Config Summary… (MoTeC-style Channel Summary Report via
+  Config Summary… (Channel Summary Report via
   `src/model/config_report.*` — usage analysis incl. incomplete/unused channels,
   print / PDF / text export), Reveal / Conceal Protected Communications,
   recent files, Exit. Document = one config file: `*.ct3` indented JSON by
@@ -1238,7 +1237,7 @@ that password either, which is the trade its author made.
   Configuration, Monitor Channels **F3** (live grid from value stream),
   CAN Viewer (raw frame monitor + inject-frame form; buffers up to 10M frames
   and exports them as a Vector ASCII `.asc` log via "Save to File…" — classic
-  frames as the MoTeC-style line, CAN FD frames as Vector `CANFD` lines carrying
+  frames as standard lines, CAN FD frames as Vector `CANFD` lines carrying
   real BRS and ESI), Load Device Config from Flash, Clear Device Config, Device
   Status, **Upload Configuration…**, **Set Access Passwords…** and **Fleet
   Identity…**. All three need a connection: the uploader has a device to check
@@ -1261,7 +1260,7 @@ that password either, which is the trade its author made.
 - **Tools → Connection Settings…** — COM port list (ST-Link VCP highlighted),
   baud (default 7,372,800), Connect/Disconnect.
 
-## 3. Channel & scaling model (MoTeC semantics, mapped to firmware)
+## 3. Channel & scaling model (mapped to firmware)
 
 **Signal record.** `CanSignalConfig` is **64 bytes** and `MAX_SIGNALS` is
 **1000**. The history is worth knowing, because the record has been both ways:

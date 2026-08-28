@@ -1,8 +1,8 @@
 # CAN Triple Device Manager
 
 A Windows desktop configurator for the [CAN Triple](https://github.com/mitchdetailed/CAN_Triple)
-gateway (STM32G473CBT6, 3× CAN), styled after **MoTeC C125 Dash Manager** —
-same layout and navigation for communications, messages, and channels.
+gateway (STM32G473CBT6, 3× CAN), with a classic dash-manager layout and
+navigation for communications, messages, and channels.
 
 Talks to the device over the ST-Link virtual COM port (USART1, PB6/PB7,
 7,372,800 baud — ST-Link **V3** required for that rate). Built and released
@@ -62,7 +62,7 @@ rules, 8 integrators, and
   Counters**, **Constants**, and **Tables** grid editors, each mapping onto the
   matching firmware table. A constant is a custom channel carrying a fixed value
   the firmware writes every evaluation pass. **Tables** are
-  MoTeC-style lookups — 8× 2x16 (one axis, up to 16 sites) and 8× **8x8**
+  lookup tables — 8× 2x16 (one axis, up to 16 sites) and 8× **8x8**
   (X + Y axes, up to 8 sites each, 64 cells) — with each axis Interpolated or
   Discrete (centered); the looked-up value drives a generated output channel.
 - **Online** — Send Configuration (F5, chunked + read-back verified, applies
@@ -73,7 +73,7 @@ rules, 8 integrators, and
   Passwords…** and **Fleet Identity…**. Get also reads the buses' modes, rates
   and termination back off the device via `CMD_READ_CAN_SETUP`, so the document
   reflects what the buses are actually running, not an assumption.
-- **Online → Set Access Passwords…** — MoTeC-style function passwords held
+- **Online → Set Access Passwords…** — function passwords held
   **in the device**: Send a Configuration, Get a Configuration, and **Protected
   Comms with four slots** (any slot opens, so one unit can accept sealed
   configurations from several suppliers; only Slot 1 also updates the open
@@ -139,7 +139,7 @@ rules, 8 integrators, and
   and when); the firmware validates almost nothing, so the GUI enforces the
   rules (see `FIRMWARE-NOTES.md`). Also lists **unused channels** (orphans left
   after removing messages) and offers **Remove Unused Channels** cleanup.
-- **File → Config Summary…** — MoTeC-style Channel Summary Report: summary
+- **File → Config Summary…** — Channel Summary Report: summary
   info, comments, bus setup, used channels, channels by function (per-message
   Generates/From and Uses/For tables with the DBC extraction detail, compound
   Id[n] groups, calculations), incomplete channels, unused channels — with
@@ -201,7 +201,7 @@ Firmware: `pio run` (and `pio run -t upload`) inside `firmware/` — see
 
 ## Documents
 
-- `DESIGN.md` — UI inventory, protocol spec, MoTeC→firmware mapping rules.
+- `DESIGN.md` — UI inventory, protocol spec, UI→firmware mapping rules.
 - `FIRMWARE-NOTES.md` — firmware findings the GUI works around (flash sizing,
   unimplemented commands, Motorola extraction, UART burst limits…), with
   suggested fixes.

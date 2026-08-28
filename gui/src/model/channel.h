@@ -1,4 +1,4 @@
-// A channel in the MoTeC sense: a named quantity with fixed base resolution,
+// A channel: a named quantity with fixed base resolution,
 // units, and range. Scaling on comms rows converts raw CAN values into
 // base-resolution counts; the channel defines what those counts mean.
 #pragma once

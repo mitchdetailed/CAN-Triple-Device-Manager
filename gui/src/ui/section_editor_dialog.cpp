@@ -761,7 +761,7 @@ void SectionEditorDialog::updateTxModeControls()
         m_txModeCombo->setVisible(show);
 }
 
-// Presents the address in the MoTeC width for the ID format:
+// Presents the address in the conventional width for the ID format:
 // standard -> 0x%03X, extended -> 0x%08X.
 void SectionEditorDialog::reformatAddress()
 {
@@ -798,7 +798,7 @@ void SectionEditorDialog::onAddressEdited()
         m_addressDecLabel->setText(tr("= %1 decimal").arg(value));
 }
 
-// Same MoTeC width convention as the address: standard -> 0x%03X, extended ->
+// Same width convention as the address: standard -> 0x%03X, extended ->
 // 0x%08X. Used for the relay's match mask.
 void SectionEditorDialog::reformatBitmask()
 {
@@ -2092,7 +2092,7 @@ void SectionEditorDialog::onMessageTypeToggled()
     m_section.rows.clear();
     m_section.identifiers.clear();
     if (wantCompound) {
-        // Pre-create empty identifier slots like MoTeC's numbered table.
+        // Pre-create empty identifier slots for the numbered table.
         for (int i = 0; i < 16; ++i)
             m_section.identifiers.append(CompoundIdentifier{});
     }

@@ -324,7 +324,7 @@ MathDialog::MathDialog(Configuration *config, QWidget *parent)
     m_tree->setColumnWidth(5, 130);
     topLayout->addWidget(m_tree, 1);
 
-    // MoTeC-style vertical button stack on the right
+    // Vertical button stack on the right
     auto *buttonColumn = new QVBoxLayout;
     m_addButton = new QPushButton(tr("Add…"), this);
     m_changeButton = new QPushButton(tr("Change…"), this);

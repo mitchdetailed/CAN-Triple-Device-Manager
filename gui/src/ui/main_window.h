@@ -1,4 +1,4 @@
-// Main window — menu shell mirroring MoTeC Dash Manager: File, Connections,
+// Main window — menu shell: File, Connections,
 // Calculations, Online, Tools, Help. Offline-first document workflow with
 // explicit Send/Get Configuration.
 #pragma once

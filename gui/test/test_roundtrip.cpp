@@ -1080,7 +1080,7 @@ static MonitorStreamPayload makeFrame(quint32 ms, quint8 bus, quint8 dir, quint3
 
 static void testAscLog()
 {
-    // Header matches the MoTeC reference layout, in the C locale.
+    // Header matches the reference layout, in the C locale.
     const QDateTime when(QDate(2025, 7, 8), QTime(7, 39, 10));
     const QString header = ascHeader(when);
     CHECK(header == QStringLiteral(

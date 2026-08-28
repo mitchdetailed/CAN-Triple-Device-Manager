@@ -1,6 +1,6 @@
 # Validation &amp; the Config Summary
 
-The firmware validates almost nothing, so the application is the safety layer. Two File-menu commands report on the open document: **Check Channels** runs the validation rules and lists every finding with a severity, and **Config Summary…** produces a printable MoTeC-style Channel Summary Report of everything the configuration defines.
+The firmware validates almost nothing, so the application is the safety layer. Two File-menu commands report on the open document: **Check Channels** runs the validation rules and lists every finding with a severity, and **Config Summary…** produces a printable Channel Summary Report of everything the configuration defines.
 
 ## Check Channels
 
@@ -53,7 +53,7 @@ A message marked **Hidden** or **Protect Communication** withholds its detail fr
 
 ## Config Summary…
 
-To produce a report of the whole configuration, choose File → Config Summary…. The window shows a column-aligned Channel Summary Report in the style of the MoTeC tools, with these sections:
+To produce a report of the whole configuration, choose File → Config Summary…. The window shows a column-aligned Channel Summary Report with these sections:
 - **Summary Information** — file name, title, date, application version, and whether the document has unsaved changes.
 - **Configuration Comments** — the document's comment text.
 - **CAN Bus Setup** — per-bus mode, bit rate, FD data rate and termination.

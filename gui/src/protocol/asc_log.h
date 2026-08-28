@@ -1,6 +1,6 @@
 // Vector ASCII (.asc) CAN-log formatting, shared by the CAN Viewer's
-// "Save to File" export and its host tests. Matches the MoTeC CAN Inspector
-// layout so the files open in the same tools.
+// "Save to File" export and its host tests. Matches the conventional Vector
+// layout so the files open in common CAN tools.
 #pragma once
 
 #include <QString>
@@ -13,7 +13,7 @@ namespace ct {
 
 // The six-line .asc header block (each line terminated by '\n'), time-stamped
 // `when`. Day/month names are forced to the C locale so the output is stable
-// and matches MoTeC regardless of the host's regional settings.
+// and stays identical regardless of the host's regional settings.
 QString ascHeader(const QDateTime &when);
 
 // One .asc data line (no trailing newline) for a monitor-stream frame. The

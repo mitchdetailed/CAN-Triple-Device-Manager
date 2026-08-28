@@ -1,5 +1,5 @@
-// "Set Access Passwords" — Online > Set Access Passwords…, laid out like the
-// same screen in MoTeC Dash Manager: a list of protected functions, a Set…
+// "Set Access Passwords" — Online > Set Access Passwords…:
+// a list of protected functions, a Set…
 // button, and a tick against the ones that have a password.
 //
 //     ┌ Function Passwords ────────────────────────────────┐

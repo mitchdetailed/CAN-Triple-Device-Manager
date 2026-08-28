@@ -1,5 +1,5 @@
 // "Timers" (Calculations menu) — grid editor for Configuration::timerRows,
-// mapping 1:1 onto the firmware timer table. Mirrors MoTeC's Timers dialog.
+// mapping 1:1 onto the firmware timer table.
 #pragma once
 
 #include <QDialog>
