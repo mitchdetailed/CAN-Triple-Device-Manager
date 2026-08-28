@@ -41,7 +41,7 @@ namespace ct {
 namespace {
 
 // The Section column: normally the direction, a padlock for a message the
-// viewer may not read. MoTeC's own list does exactly this, and the substitution
+// viewer may not read. The substitution
 // is deliberate — the row's job for a concealed message is to say "locked",
 // which is also why opening it asks for a password. The direction is not itself
 // the secret (the Config Summary report still names it, see
@@ -662,7 +662,7 @@ void CommunicationsDialog::updateChannelPane(int busIndex)
         tab.channelList->addItem(tr("(relay — forwards whole frames, no channels)"));
         return;
     }
-    // One line and nothing else, which is what MoTeC shows and what the flag is
+    // One line and nothing else, which is what the flag is
     // for. Channel NAMES are not the secret and stay visible everywhere they are
     // USED — the Channel Editor, math and condition inputs, transmit rows — but
     // this pane is the one place they would be listed BY MESSAGE, and that

@@ -48,8 +48,8 @@
 //       password is a lost configuration, and the save dialog says so before
 //       the fact.
 //
-// This mirrors MoTeC's "Hide setup information" / "Require access password for
-// use" pair on a locked comms template, for the same reasons.
+// This is the classic "Hide setup information" / "Require access password for
+// use" pairing on a locked comms template, for the same reasons.
 //
 // ---------------------------------------------------------------------------
 // File layout — all multi-byte integers LITTLE-ENDIAN

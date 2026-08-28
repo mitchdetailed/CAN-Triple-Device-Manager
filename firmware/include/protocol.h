@@ -41,7 +41,7 @@
  * documented on MathConfig below.
  *
  * v19 replaces the single configuration password with THREE per-function access
- * keys, mirroring MoTeC's "Online > Set Access Passwords": one for sending a
+ * keys, exposed in the GUI as "Online > Set Access Passwords": one for sending a
  * configuration, one for getting one back, one for revealing and editing
  * protected communications. Each is a 4-byte key the host folds out of a typed
  * password (PBKDF2, fixed application salt) and proves by challenge-response;
@@ -147,7 +147,7 @@
  * alongside the config it names. (v7 also moved the config tables into a
  * flash-resident image so they no longer occupy RAM — that is internal to the
  * firmware and does not change the wire format.)
- * v6 adds a Constants table (0x14/0x15): a MoTeC-style calculation that writes
+ * v6 adds a Constants table (0x14/0x15): a calculation that writes
  * a fixed value to a generated channel every evaluation pass. Each entry names
  * a destination signal slot and the constant float; the engine applies them
  * before math so downstream calculations see them.
@@ -161,7 +161,7 @@
  * message has not been received within that timeout (0 = feature off).
  * v3 unifies receive and transmit into ONE message table (direction is a flag
  * on each message; transmit messages carry a period), and adds up/down
- * counters (0x10/0x11) and timers (0x12/0x13) as MoTeC-style calculations.
+ * counters (0x10/0x11) and timers (0x12/0x13) as calculations.
  * v2 added CONTROL_CAN / STREAM_VALUES and framed all device output (telemetry
  * + logs); those are unchanged.
  *

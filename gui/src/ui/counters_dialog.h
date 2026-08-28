@@ -1,6 +1,5 @@
 // "Up / Down Counters" (Calculations menu) — grid editor for
 // Configuration::counterRows, mapping 1:1 onto the firmware counter table.
-// Mirrors MoTeC's Up/Down Counters dialog.
 #pragma once
 
 #include <QDialog>

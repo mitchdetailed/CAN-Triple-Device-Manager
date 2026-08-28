@@ -1,4 +1,4 @@
-// Channel usage analysis and the MoTeC-style "Channel Summary Report"
+// Channel usage analysis and the "Channel Summary Report"
 // (File > Config Summary). Pure model code — the dialog only renders what
 // this produces, so the report content is unit-tested.
 #pragma once

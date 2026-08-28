@@ -1,4 +1,4 @@
-// Implementation of the MoTeC-style "Edit Custom Channel" dialog.
+// Implementation of the "Edit Custom Channel" dialog.
 #include "edit_channel_dialog.h"
 
 #include <QComboBox>

@@ -30,7 +30,7 @@
 namespace {
 
 // Dev helper (--screenshots <dir>): renders the main dialogs with sample data
-// and saves PNGs, for checking layout against the MoTeC reference.
+// and saves PNGs, for checking layout against the reference screenshots.
 void saveScreenshots(const QString &dir)
 {
     QDir().mkpath(dir);

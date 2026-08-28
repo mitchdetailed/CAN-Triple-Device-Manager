@@ -1,4 +1,4 @@
-// File > Config Summary — the MoTeC-style Channel Summary Report viewer,
+// File > Config Summary — the Channel Summary Report viewer,
 // with Print / Save PDF / Save Text export.
 #pragma once
 

@@ -1,4 +1,4 @@
-// Document model for communications sections (MoTeC-style messages) and the
+// Document model for communications sections (messages) and the
 // channel rows inside them. JSON (de)serialization lives in configuration.cpp.
 #pragma once
 

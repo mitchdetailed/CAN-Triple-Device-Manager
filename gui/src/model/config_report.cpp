@@ -281,7 +281,7 @@ QString conditionOpName(int op)
 // ------------------------------------------------------------- rendering
 
 // Report accumulated as lines with a style tag, rendered to plain text (dashed
-// heading rules, like the MoTeC report) or HTML (bold/underline headings in a
+// heading rules) or HTML (bold/underline headings in a
 // courier <pre> block).
 class ReportBuilder {
 public:

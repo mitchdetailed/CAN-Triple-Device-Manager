@@ -1,5 +1,5 @@
 // Calculations > Timers — grid editor for Configuration::timerRows.
-// Mirrors MoTeC's Timers dialog (Start/Stop tab + Settings tab).
+// Two tabs: Start/Stop and Settings.
 #include "timers_dialog.h"
 
 #include <QButtonGroup>

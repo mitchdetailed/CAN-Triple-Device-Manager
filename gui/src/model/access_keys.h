@@ -1,5 +1,5 @@
 // Access passwords — the three function locks behind "Online > Set Access
-// Passwords", modelled on the same screen in MoTeC Dash Manager.
+// Passwords".
 //
 //   Send a Configuration   — the device refuses a Send without it.
 //   Get a Configuration    — the device refuses a Get without it.

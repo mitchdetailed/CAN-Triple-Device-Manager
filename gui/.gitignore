@@ -18,5 +18,5 @@ __pycache__/
 .claude/
 CMakeLists.txt.user
 
-# Proprietary-tool exports kept locally as fixtures (MoTeC log etc.)
+# Proprietary-tool exports kept locally as fixtures
 reference files/

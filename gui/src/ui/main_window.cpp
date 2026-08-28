@@ -727,9 +727,8 @@ bool MainWindow::onSaveSecureConfig()
 
     // A document with no Protected Comms password can set one right here.
     //
-    // MoTeC's Save Communications Setup dialog does exactly this rather than
-    // sending you elsewhere, and it is right to. The two places a password can
-    // be set are not interchangeable: Online → Set Access Passwords writes a key
+    // Offering it here rather than sending you elsewhere is deliberate. The two
+    // places a password can be set are not interchangeable: Online → Set Access Passwords writes a key
     // into HARDWARE and therefore needs a device on the bench, while this writes
     // a verifier into the DOCUMENT and needs nothing. Requiring the former
     // before the latter would make "build a protected configuration at my desk"
