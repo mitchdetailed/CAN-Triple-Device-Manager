@@ -3527,18 +3527,29 @@ static void testTransmitCrc8()
     bad.crcElements.append({CommsSection::CrcElement::Data, 1});
     bad.crcElements.append({CommsSection::CrcElement::Data, 12});
     lint.bus[0].sections.append(bad);
-    int overlapWarn = 0, selfReadWarn = 0, pastEndWarn = 0;
+    // A CHANNEL IN THE STAMPED BYTE IS AN ERROR, not a warning, and that is a
+    // deliberate change of contract. It used to be a Warning on the grounds
+    // that "the section still maps" — which judged it by whether the mapper
+    // survived rather than by what leaves the device. It maps, and then
+    // transmits a channel the stamp has already overwritten, so the frame does
+    // not carry what the configuration says it carries. See frame_layout.h.
+    //
+    // The other two stay Warnings: reading the CRC's own byte as a Data element
+    // feeds the pre-stamp value (odd, occasionally intended) and an element
+    // past the frame feeds 0. Neither corrupts a channel.
+    int overlapError = 0, selfReadWarn = 0, pastEndWarn = 0;
     for (const ValidationIssue &vi : validateConfiguration(lint)) {
+        if (vi.severity == ValidationIssue::Error
+            && vi.message.contains(QStringLiteral("the CRC8 is stamped into")))
+            ++overlapError;
         if (vi.severity != ValidationIssue::Warning)
             continue;
-        if (vi.message.contains(QStringLiteral("where the CRC is stamped")))
-            ++overlapWarn;
         if (vi.message.contains(QStringLiteral("the CRC's own byte")))
             ++selfReadWarn;
         if (vi.message.contains(QStringLiteral("past the 8-byte message")))
             ++pastEndWarn;
     }
-    CHECK(overlapWarn == 1);
+    CHECK(overlapError == 1);
     CHECK(selfReadWarn == 1);
     CHECK(pastEndWarn == 1);
 

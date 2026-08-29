@@ -26,6 +26,7 @@
 #include <QVariant>
 
 #include "../model/channel_catalog.h"
+#include "../model/frame_layout.h"
 #include "../protocol/wire_structs.h" // CRC8_MAX_ELEMENTS, asserted == kCrcElementSlots
 #include "add_channel_dialog.h"
 #include "channel_field.h"
@@ -195,6 +196,10 @@ SectionEditorDialog::SectionEditorDialog(Configuration *config, const CommsSecti
     , m_tier(section.protection)
     , m_openedTier(section.protection)
 {
+    // Before any of it is drawn: the frame map colours signals by their index
+    // in the row list, so the map and the list have to be reading the same
+    // order from the first paint.
+    sortSectionRows();
     setWindowTitle(tr("CAN Communications Setup — CAN %1").arg(busIndex + 1));
     // Taller than the old 560x520: the Channels tab now carries the frame
     // layout map under both panes, and a squashed map is a useless one.
@@ -692,7 +697,18 @@ void SectionEditorDialog::applyDeviceKindEnablement(bool editable)
         m_txModeCombo->setEnabled(editable);
     if (m_tabs && m_tabs->count() > 1) {
         m_tabs->setTabText(1, transmit ? tr("Transmitted Channels") : tr("Received Channels"));
-        m_tabs->setTabEnabled(1, !relay); // relays carry no channels
+        // Neither a relay nor an OFF message carries channels the device acts
+        // on: a relay is a whole-frame gateway rule, and an Off message is not
+        // laid out at all — findLayoutClashes and mapToDevice both skip it. So
+        // the tab that lists them has nothing to offer either way.
+        //
+        // Grayed rather than hidden, unlike the CRC8 tab beside it, and the
+        // difference is not cosmetic: the CRC8 recipe belongs to one message
+        // type and does not exist for the others, while these rows DO still
+        // exist — switching a configured receive message to Off and back must
+        // return them. syncParametersFromUi clears a section's rows for a relay
+        // and ONLY for a relay, for exactly that reason.
+        m_tabs->setTabEnabled(1, !relay && device != SectionDevice::Off);
     }
     // The CRC8 tab exists for exactly one message type, and for the others it
     // is GONE, not grayed — a disabled tab advertises a feature the message
@@ -2014,7 +2030,26 @@ void SectionEditorDialog::refreshBitTable()
                             ? -1
                             : (m_crcByteCombo ? m_crcByteCombo->currentData().toInt()
                                               : m_section.crcByteLocation);
-    m_bitTable->setCrcByte(crcByte);
+
+    // A compound identifier's SELECTOR is reserved for exactly the same reason
+    // and was not being shown at all. Built through ct::reservedBits() so the
+    // bits the map shades and the bits accept() refuses a channel on are the
+    // same set by construction, computed once in frame_layout.cpp.
+    //
+    // Against a PROBE rather than m_section: the device kind and the CRC byte
+    // are read from live widgets (the section is only synced on add-row / OK),
+    // while the identifier's offset and mask are already live in m_section
+    // because CompoundIdentifierDialog::apply() writes straight into it.
+    //
+    // Only the CURRENT identifier's selector, matching the map's one-variant-at-
+    // a-time view above: another identifier's selector is stamped into another
+    // frame, and shading it here would claim bits this variant leaves free.
+    CommsSection probe = m_section;
+    probe.device = device;
+    if (crcByte >= 0)
+        probe.crcByteLocation = crcByte;
+    const int reservedIdent = m_section.compound ? currentIdentRole() : -1;
+    m_bitTable->setReservedBits(reservedBits(probe, reservedIdent));
     m_bitTable->setFrame(frameRows, alignment, byteCount, length);
 
     // A compound section's identifiers are mutually exclusive frame variants —
@@ -2038,6 +2073,12 @@ void SectionEditorDialog::refreshBitTable()
     // of the marking is to be understood before a channel lands there.
     if (crcByte >= 0)
         title += tr("  ·  CRC8 stamped into Byte %1").arg(crcByte);
+    // The same argument as the CRC legend: a tooltip explains a cell after the
+    // user wonders about it, and the one job of marking the selector is to be
+    // understood before a channel lands on it.
+    if (reservedIdent >= 0 && !identifierBitPositions(m_section.identifiers.at(reservedIdent))
+                                   .isEmpty())
+        title += tr("  ·  ID %1 selector reserved").arg(reservedIdent + 1);
     m_bitGroup->setTitle(title);
     updateBitSelection();
 }
@@ -2121,6 +2162,41 @@ QList<CommsChannelRow> *SectionEditorDialog::activeRowList()
     return nullptr;
 }
 
+// Where the row with this key sits once the list is sorted, or -1.
+//
+// Identity by the SORT KEY rather than by the whole row: the key is what
+// decides the position, and two rows the comparator calls equal are
+// interchangeable for the one thing this is for — keeping the row that was just
+// added or edited selected after it has moved.
+static int indexOfSortedRow(const QList<CommsChannelRow> &rows, const CommsChannelRow &row)
+{
+    for (int i = 0; i < rows.size(); ++i)
+        if (!commsRowPrecedes(rows[i], row) && !commsRowPrecedes(row, rows[i]))
+            return i;
+    return -1;
+}
+
+// Every row list this section owns put into frame order, not just the one on
+// screen. A compound section's other identifiers are not visible from here, and
+// leaving them alone would save a message whose variants were sorted or not
+// according to which ones the user happened to click on.
+//
+// CALLED WHERE THE ROWS CHANGE — the constructor and the three row handlers —
+// and deliberately NOT from rebuildChannelList(), which would have been the
+// tidier-looking place. rebuildChannelList() also runs from the channelRenamed
+// handler, and that fires WHILE the row editor is open: a rename made through
+// its channel picker walks m_section, and a name is the third sort key. Sorting
+// there would move rows out from under the index onChangeRow is holding across
+// the modal, and the edit would land on whichever row had slid into that place
+// — overwriting a channel the user never opened. So the order is settled
+// after each edit, never during one.
+void SectionEditorDialog::sortSectionRows()
+{
+    sortCommsRows(m_section.rows);
+    for (CompoundIdentifier &ident : m_section.identifiers)
+        sortCommsRows(ident.rows);
+}
+
 void SectionEditorDialog::rebuildChannelList()
 {
     // Each row is tinted with the colour its bits carry in the frame map below,
@@ -2193,6 +2269,10 @@ void SectionEditorDialog::onEditIdentifier()
     dialog.apply(&m_section.identifiers[role]);
     rebuildIdentifierTable();
     m_identifierTree->setCurrentItem(m_identifierTree->topLevelItem(role));
+    // The selector moved, so the reserved bits did. Without this the map keeps
+    // shading where the identifier USED to be, which is worse than not shading
+    // at all: the user routes around a phantom and into the real one.
+    refreshBitTable();
 }
 
 void SectionEditorDialog::onClearIdentifier()
@@ -2205,6 +2285,7 @@ void SectionEditorDialog::onClearIdentifier()
     // Keep the cleared slot selected so a follow-up Change… edits it, not slot 1.
     m_identifierTree->setCurrentItem(m_identifierTree->topLevelItem(role));
     rebuildChannelList();
+    refreshBitTable(); // a cleared slot reserves nothing
 }
 
 // Communications Setup's view of the buses with this dialog's in-progress
@@ -2236,9 +2317,14 @@ void SectionEditorDialog::onAddRow()
     // the bool made every locked row claim "Read Only". Both call sites took the
     // default until 2.3.0, which was safe only for as long as this editor
     // refused to open at all for a marked section.
+    // The bits this variant already gives away. currentIdentRole() for a
+    // compound section, so a row being added under identifier 2 is refused on
+    // identifier 2's selector and not on some other variant's.
     AddChannelDialog dialog(m_config, CommsChannelRow{}, m_section.alignment,
                             m_section.messageLengthBytes, m_section.isTransmit(), liveView(),
-                            this, m_section.protection);
+                            this, m_section.protection,
+                            reservedBits(m_section,
+                                         m_section.compound ? currentIdentRole() : -1));
     if (dialog.exec() != QDialog::Accepted)
         return;
     // Re-fetched, never the pointer from before exec(): a rename committed
@@ -2249,9 +2335,12 @@ void SectionEditorDialog::onAddRow()
     rows = activeRowList();
     if (!rows)
         return;
-    rows->append(dialog.row());
+    const CommsChannelRow added = dialog.row();
+    rows->append(added);
+    sortSectionRows();    // so the new row is not necessarily last
     rebuildChannelList();
-    m_channelList->setCurrentRow(m_channelList->count() - 1);
+    if (const QList<CommsChannelRow> *sorted = activeRowList())
+        m_channelList->setCurrentRow(indexOfSortedRow(*sorted, added));
 }
 
 void SectionEditorDialog::onChangeRow()
@@ -2265,16 +2354,25 @@ void SectionEditorDialog::onChangeRow()
     // shows the row, writes nothing, and says which marking stopped it.
     AddChannelDialog dialog(m_config, rows->at(row), m_section.alignment,
                             m_section.messageLengthBytes, m_section.isTransmit(), liveView(),
-                            this, m_section.protection);
+                            this, m_section.protection,
+                            reservedBits(m_section,
+                                         m_section.compound ? currentIdentRole() : -1));
     if (dialog.exec() != QDialog::Accepted)
         return;
     // Re-fetched — see onAddRow for the detach this dodges.
     rows = activeRowList();
     if (!rows || row >= rows->size())
         return;
-    (*rows)[row] = dialog.row();
+    const CommsChannelRow edited = dialog.row();
+    (*rows)[row] = edited;
+    sortSectionRows();
     rebuildChannelList();
-    m_channelList->setCurrentRow(row);
+    // NOT `row` again: changing a Start Bit or a Bit Length moves the row, and
+    // re-selecting the old index would leave the highlight on whichever channel
+    // slid into that place — with the frame map following the highlight, the
+    // shading would then be pointing at the wrong signal.
+    if (const QList<CommsChannelRow> *sorted = activeRowList())
+        m_channelList->setCurrentRow(indexOfSortedRow(*sorted, edited));
 }
 
 void SectionEditorDialog::onRemoveRow()
@@ -2489,6 +2587,39 @@ void SectionEditorDialog::accept()
                                  .arg(QString::number(m_section.baseAddress, 16).toUpper(),
                                       m_section.extended ? tr("extended (29-bit)")
                                                          : tr("standard (11-bit)")));
+        return;
+    }
+    // BIT COLLISIONS, last, on the section as it will actually be written.
+    //
+    // Last because it needs syncParametersFromUi() to have run — the checks
+    // above read widgets, but this one reads the finished layout, and a rule
+    // about where channels sit has to judge the channels the user is really
+    // saving.
+    //
+    // Which collisions refuse is frame_layout.h's decision, not this dialog's:
+    // channel-vs-channel on a RECEIVE message is a warning and closes normally,
+    // because two receive rows reading the same bits is legitimate. Everything
+    // else — any overlap on a transmit message, any channel under a compound
+    // identifier's selector, any channel in the CRC8's byte — is written by the
+    // device over the top of the channel, so the frame would not carry what
+    // this configuration says it carries.
+    QStringList blocking;
+    for (const LayoutClash &clash : findLayoutClashes(m_section))
+        if (clash.blocking)
+            blocking << clash.message();
+    if (!blocking.isEmpty()) {
+        // The Channels tab, because that is where the offending rows are and
+        // where the frame map shows the collision in colour. The first refusal
+        // in this dialog to switch there.
+        m_tabs->setCurrentIndex(1);
+        QMessageBox::warning(
+            this, windowTitle(),
+            tr("This message cannot be saved as it stands:\n\n%1\n\n"
+               "Each of these is written into the frame AFTER the channels, so the channel "
+               "does not merely share those bits — it is replaced by them. Move the "
+               "channel, or change what is written over it. The Frame Layout map shades "
+               "every bit that is already spoken for.")
+                .arg(blocking.join(QStringLiteral("\n"))));
         return;
     }
     QDialog::accept();

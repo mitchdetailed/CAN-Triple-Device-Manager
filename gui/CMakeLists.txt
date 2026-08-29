@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.1.1 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.1.5 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -315,6 +315,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/model/config_report.h
     src/model/configuration.cpp
     src/model/configuration.h
+    src/model/frame_layout.cpp
+    src/model/frame_layout.h
     src/model/dbc_import.cpp
     src/model/dbc_import.h
     src/model/device_mapper.cpp
@@ -544,6 +546,7 @@ qt_add_executable(test_roundtrip
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -593,6 +596,7 @@ qt_add_executable(test_firmware_link
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -683,6 +687,7 @@ qt_add_executable(scriptc
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -707,6 +712,7 @@ qt_add_executable(test_script_compiler
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -737,6 +743,7 @@ qt_add_executable(test_script_sim
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -767,6 +774,7 @@ qt_add_executable(test_script_editor
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -810,6 +818,7 @@ qt_add_executable(test_help_access
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -844,6 +853,7 @@ qt_add_executable(test_channel_labels
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -867,6 +877,7 @@ qt_add_executable(ct3check
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -920,6 +931,7 @@ qt_add_executable(test_comms_multiselect
     src/model/comms_template.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -931,6 +943,147 @@ qt_add_executable(test_comms_multiselect
 target_include_directories(test_comms_multiselect PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_comms_multiselect PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
     ct_device_core) # device_mapper.cpp — see test_roundtrip
+
+# What a message type is allowed to expose, on both sides of the same idea:
+# an affordance offered where it cannot mean anything is worse than none,
+# because the user reaches for it, gets a result, and the device ignores it.
+#
+# OFF has no channels - mapToDevice skips the section and findLayoutClashes
+# returns nothing for it - so the Received Channels tab is grayed exactly as a
+# relay's is. Grayed and not gone, and the rows KEPT: turning a configured
+# message off and back on must return it intact, which is what separates this
+# from the relay case where the rows really are dropped. Both halves are pinned,
+# because merging the two branches would look like a tidy-up.
+#
+# A TRANSMIT ROW cannot invent a channel: what a message puts on the wire has to
+# be produced on the device first, so a channel named at that picker has nothing
+# writing it and the message would carry its default forever. New... is removed
+# there and NOWHERE else, and the suite states all four of the pickers that keep
+# it so a later tightening cannot spread unnoticed.
+qt_add_executable(test_message_type_gating
+    test/test_message_type_gating.cpp
+    src/ui/section_editor_dialog.cpp
+    src/ui/select_channel_dialog.cpp
+    src/ui/edit_channel_dialog.cpp
+    src/ui/add_channel_dialog.cpp
+    src/ui/bit_layout_table.cpp
+    src/ui/numeric_grid.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_message_type_gating PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_message_type_gating PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
+    ct_device_core) # device_mapper.cpp - see test_roundtrip
+
+# What the Add Comms Channel preview says a field can hold.
+#
+# Two things decide it and only two: the DBC Type chosen in the dialog and the
+# Bit Length beside it. The CHANNEL's own data type must not come into it - a
+# signed channel packed into an unsigned 6-bit field carries 0..63, and saying
+# -32..31 there describes a field that does not exist. Arithmetic nobody checks
+# by hand: the number is read, believed, and used to pick a scaling factor.
+qt_add_executable(test_add_channel_preview
+    test/test_add_channel_preview.cpp
+    src/ui/add_channel_dialog.cpp
+    src/ui/select_channel_dialog.cpp
+    src/ui/edit_channel_dialog.cpp
+    src/ui/numeric_grid.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_add_channel_preview PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_add_channel_preview PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
+    ct_device_core) # device_mapper.cpp - see test_roundtrip
+
+# Saving as JSON: the deliberate exception to the sealed .ct3.
+#
+# Two properties in tension, and both are pinned. The bytes must really be
+# LEGIBLE - that is the entire reason to choose the format, so this suite looks
+# for the plaintext and requires it PRESENT, the exact inverse of what
+# test_comms_template asserts about .ct3t. And it must never happen by
+# ACCIDENT: a new document, a Save on a .ct3 and a Save on a .ct3s all stay
+# sealed, because a format that leaks into files nobody chose it for is the
+# failure this option was weighed against before it was built.
+#
+# Headless: no widgets.
+qt_add_executable(test_json_format
+    test/test_json_format.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_json_format PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_json_format PRIVATE Qt6::Core Qt6::Network Qt6::Widgets
+    ct_device_core) # device_mapper.cpp - see test_roundtrip
+
+# Bit collisions in a CAN frame, and which of them refuse.
+#
+# The rule this pins was computed in four places before frame_layout.h existed
+# and one of them disagreed: the channel-vs-identifier check treated a row as a
+# contiguous run of absolute bit positions, which holds under WordSwap and not
+# under Normal - the default. It therefore refused correct layouts and passed
+# broken ones, and it is the rule this release makes BLOCKING. A refusal
+# computed the wrong way is worse than no refusal, so the geometry is pinned
+# here against the device's own bit walk, with the worked example that fails
+# under the old rule kept as the regression guard.
+#
+# Headless: no widgets, so no Qt GUI needed.
+qt_add_executable(test_frame_layout
+    test/test_frame_layout.cpp
+    src/ui/section_editor_dialog.cpp
+    src/ui/add_channel_dialog.cpp
+    src/ui/select_channel_dialog.cpp
+    src/ui/edit_channel_dialog.cpp
+    src/ui/bit_layout_table.cpp
+    src/ui/numeric_grid.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_frame_layout PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_frame_layout PRIVATE Qt6::Core Qt6::Network Qt6::Widgets
+    ct_device_core) # device_mapper.cpp - see test_roundtrip
 
 # Communications templates: the .ct3t container, the channel merge, and the
 # Save… / Load… buttons driven through the real Communications Setup dialog.
@@ -961,6 +1114,7 @@ qt_add_executable(test_comms_template
     src/model/comms_template.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -1002,6 +1156,7 @@ qt_add_executable(test_script_examples
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -1030,6 +1185,7 @@ qt_add_executable(test_tables
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -1054,6 +1210,7 @@ qt_add_executable(test_lua
     src/model/channel_catalog.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
@@ -1100,6 +1257,7 @@ qt_add_executable(test_protection
     src/model/comms_template.cpp
     src/model/config_lock.cpp
     src/model/config_report.cpp
+    src/model/frame_layout.cpp
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp

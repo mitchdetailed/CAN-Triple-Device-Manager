@@ -1,11 +1,13 @@
-// Document model for communications sections (messages) and the
-// channel rows inside them. JSON (de)serialization lives in configuration.cpp.
+// Document model for communications sections (messages) and the channel rows
+// inside them. JSON (de)serialization lives in configuration.cpp.
 #pragma once
 
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
 #include <QString>
+
+#include <algorithm>
 
 #include "access_keys.h" // AccessKey / kNoAccessKey for the per-section password
 
@@ -78,6 +80,38 @@ struct CommsChannelRow {
     QJsonObject toJson() const;
     static CommsChannelRow fromJson(const QJsonObject &o);
 };
+
+// FRAME ORDER: Start Bit, then Bit Length, then name.
+//
+// The order a section's rows are kept in — kept, not merely displayed in. The
+// section editor's channel list is indexed straight into the row list (the
+// selected row IS row N of the section, and the row's index is also its colour
+// in the frame map), so a list sorted differently from the rows underneath
+// would need every one of those sites to translate, and any that forgot would
+// edit or delete the wrong channel. One order throughout instead.
+//
+// The tie-breaks are not decoration. Two rows may share a start bit — a receive
+// message can legitimately decode the same bits twice, and only a transmit
+// message is refused the overlap — so without them the order among the tied
+// rows would be whatever the file happened to hold, and the same message could
+// read differently in the list and the pane. Narrower field first, then the
+// name, case-insensitively, which leaves nothing undecided that a user can see.
+inline bool commsRowPrecedes(const CommsChannelRow &a, const CommsChannelRow &b)
+{
+    if (a.startBit != b.startBit)
+        return a.startBit < b.startBit;
+    if (a.bitLength != b.bitLength)
+        return a.bitLength < b.bitLength;
+    return a.channelName.compare(b.channelName, Qt::CaseInsensitive) < 0;
+}
+
+// stable_sort, so two rows the comparator calls equal — same bits, same width,
+// names differing only in case — keep the order they arrived in instead of
+// swapping about between refreshes.
+inline void sortCommsRows(QList<CommsChannelRow> &rows)
+{
+    std::stable_sort(rows.begin(), rows.end(), commsRowPrecedes);
+}
 
 // One compound sub-message: rows apply when (data[offset..] & idMask) == id.
 struct CompoundIdentifier {

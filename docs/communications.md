@@ -211,8 +211,6 @@ What you can still do with such a message, at *every* level: **remove** it, whic
 
 ### What these levels actually are
 
-### What these levels actually are
-
 > **Warning:** **All three are conventions of this application.** Nothing on the device enforces any of them. A CAN Triple hands its full message table to anything that speaks its protocol and accepts a write over any record, so any other serial tool reads a marked message in full and overwrites it freely. A plain `.ct3` is scrambled rather than legible, which stops a text editor reading a marking straight out of it — but the key to a .ct3 travels inside the .ct3, and opening one in this program gives back every marked message in full. The marking that survives being handed to somebody else is **File &gt; Save Secure Config…** (`.ct3s`). If a protocol must stay secret from a determined reader, do not ship it to them.
 
 > **Warning:** **Read Only is accident prevention, not security.** The viewer sees every field of the message and may remove it, so removing it and retyping what they read reproduces the message without the password. Treat it as a guard rail against an accidental edit and nothing more.
@@ -227,6 +225,8 @@ Protect Communication adds exactly one thing on top of Hidden: the [send gate](#
 
 New… and Edit… open **CAN Communications Setup — CAN *n***, which has three tabs: **Parameters**; **Received Channels** or **Transmitted Channels** depending on the message type; and **CRC8**, which applies to exactly one message type and is enabled only while the type is [Transmit CRC8](#crc8).
 
+The channels tab is **grayed out while the Message Type is Off or Message Relay**. Neither carries channels: an Off message is not built into a frame at all, and a relay forwards whole frames without looking inside them. It is grayed rather than hidden, and for **Off** the rows are **kept** — switch a configured message off and back on and its channels are all still there. A relay is the exception: its rows are dropped when you press OK, because a relay has no frame of its own to put them in.
+
 ### Parameters tab
 
 <table>
@@ -238,7 +238,9 @@ from the base address.</td></tr>
 <b>Transmit Message</b>, <b>Transmit CRC8</b> (a transmit message that stamps a
 checksum into its frames — see <a href="#crc8">below</a>) or
 <b>Message Relay</b>. The type decides which of the remaining controls
-apply.</td></tr>
+apply. <b>Off</b> keeps the message and everything defined in it but sends and
+decodes nothing, so its channels tab is grayed — the rows are still there and
+come back the moment you set a type again.</td></tr>
 <tr><td><b>Alignment :</b></td><td><b>Normal (big-endian)</b> (Motorola) or
 <b>Word Swap (little-endian)</b> (Intel). One byte order for the whole
 message.</td></tr>
@@ -334,6 +336,8 @@ The **Message Type** box selects **Single** or **Compound** (multiplexed). Switc
 
 **Single** messages carry one flat list of channel rows. **Add…**, **Change…** and **Remove** manage rows; each row shows its channel name, start bit, width, type and scaling, and is tinted with the colour its bits carry in the frame map. Adding or changing a row opens the Comms Channel dialog — see [Channels](channels.md) for its fields.
 
+**The list is always in frame order:** Start Bit, then Bit Length, then name. So it reads the way the frame map below it is drawn, and a channel is where its bits are rather than where it happened to be added. Two rows may share a start bit — a receive message can decode the same bits twice — and then the narrower field comes first, then the name. Changing a row's Start Bit moves it in the list, and the selection moves with it, so the frame map keeps shading the channel you were looking at. The order is saved with the message, and the **Channels** pane in Communications Setup shows the same one.
+
 **Compound** messages carry channels only inside *identifiers* — there is no shared always-present set; a signal present in every variant is defined in each identifier. The **Identifiers :** table lists 16 numbered slots with **Offset**, **ID** and **ID Mask** columns; **Change…** opens the **Compound Message Identifier** dialog (Offset / Identifier / Identifier Mask) and **Clear** empties a slot. A received frame decodes an identifier's channels only while the frame's selector window at that byte offset matches (selector &amp; mask) == (ID &amp; mask). The channel list and frame map show one identifier at a time — variants may legitimately reuse the same bits.
 
 **An identifier with no channels is still transmitted.** Give a slot an Offset, ID and ID Mask and leave it empty, and the device sends that variant each period carrying its selector over an all-zero payload — which is the whole message for a request or a ping frame, where the ID byte IS the content. Both cadences honour it: Batch sends it alongside the others, and Sequential gives it its turn in the rotation. Only slots you have actually set count; an untouched slot sends nothing.
@@ -341,8 +345,36 @@ The **Message Type** box selects **Single** or **Compound** (multiplexed). Switc
 ### The frame layout map
 
 The **Frame Layout** grid at the bottom draws the frame one byte per row, bits 7…0 left to right. The number in each cell is the global bit index — the value a channel's Start Bit field takes. Each channel's bits are filled with the same colour as its row in the list; clicking a coloured cell selects the channel that owns it, and the caption states the selected channel's exact extent.
-- **Red cells** mean two signals claim the same bit — a real overlap that needs fixing.
+- **Red cells** mean the bit is claimed twice — either by two signals, or by a signal and something the device writes over it. Either way the frame will not carry what the list says it carries.
+- **Slate cells** are **reserved**: spoken for before any channel is placed, by a compound identifier's selector or by a Transmit CRC8's stamped byte. Neither a channel nor a fault — place your channels elsewhere. Put one there anyway and the cell turns red.
 - **Dimmed bytes** lie beyond the message's own length: for a receive message the map draws the whole frame the bus can carry (8 bytes classic, 64 CAN FD) and greys the bytes past this message's length, where nothing is extracted.
+
+<a id="overlaps"></a>
+
+### Overlaps: what is warned about and what is refused
+
+Two things can want the same bits, and they are not equally serious.
+
+**Two channels overlapping each other** is only a problem on a message the device *sends*. On a **receive** message it is legitimate — the same byte decoded twice at different scalings, or a raw copy kept beside a cooked one — because reading a bit does not consume it. So a receive overlap is reported and allowed. On a **transmit** message the same overlap is two values packed into one place: whichever is packed last wins, and the other never leaves the device. That is refused.
+
+**A channel under something the device writes itself** is always refused, on receive and transmit alike. There are two such things:
+- a **compound identifier's selector** — the bits that say which sub-message this frame is. They are written after the channels on the way out and read over them on the way in, so a channel there carries the identifier value rather than its own;
+- a **Transmit CRC8's stamped byte** — the checksum is stamped last, over whatever the channel put there.
+
+In both cases the channel is not sharing those bits, it is *replaced* by them, which is why neither is something you can choose to accept.
+
+<table>
+<tr><th>Message</th><th>What collides</th><th>Result</th></tr>
+<tr><td>Receive</td><td>two channels</td><td>Warned, allowed</td></tr>
+<tr><td>Receive</td><td>channel under an identifier selector</td><td><b>Refused</b></td></tr>
+<tr><td>Transmit</td><td>two channels</td><td><b>Refused</b></td></tr>
+<tr><td>Transmit</td><td>channel under an identifier selector</td><td><b>Refused</b></td></tr>
+<tr><td>Transmit CRC8</td><td>channel in the stamped byte</td><td><b>Refused</b></td></tr>
+</table>
+
+You meet a refusal twice, on purpose. **Add…** and **Change…** will not let a channel be *placed* on reserved bits at all — OK there stays greyed out and the reason is written under the fields — so the usual case never becomes a mistake you have to undo. Pressing **OK** on the message itself checks the whole layout again and names anything left, because a channel can also become trapped by something moving *underneath* it: change an identifier's offset or the CRC's byte location and the reserved bits move onto channels that were placed perfectly well.
+
+> **Note:** A compound message is checked one identifier at a time, never across them. Two identifiers using the same bits is the whole point of multiplexing — they are alternative frames, never on the wire together — so that is not an overlap and is not reported. Only the identifier you are looking at reserves anything against its own channels.
 
 Bit numbering: bits count 0–7 right-to-left within a byte (bit 0 is the LSB), bytes count left-to-right from 0, so bit *S* sits at byte *S*/8, bit *S*%8. The Start Bit is always the signal's **least** significant bit; a Word Swap (little-endian) field continues into higher-numbered bytes, a Normal (big-endian) field into lower-numbered bytes. For example, a 16-bit Word Swap field at start bit 0 reads bytes 0 (LSB) and 1 (MSB); a 16-bit Normal field across bytes 2 (MSB) and 3 (LSB) has start bit 24.
 
@@ -415,7 +447,9 @@ Recipes you may recognise:
 
 ### The CRC byte in the frame map
 
-The Transmitted Channels tab's frame layout map shades the CRC byte slate — deliberately neither a channel colour nor the clash red, because the byte is neither a channel nor a fault: it is spoken for, place your channels elsewhere. The caption carries the same fact in words ("· CRC8 stamped into Byte *N*"), and the shading follows the Byte Location combo live. A channel whose bits land in that byte keeps its own colour — the fill is how you tell which channel is in the way — and its tooltip warns that the checksum is stamped over it.
+The Transmitted Channels tab's frame layout map shades the CRC byte slate — deliberately neither a channel colour nor the clash red, because the byte is neither a channel nor a fault: it is spoken for, place your channels elsewhere. The caption carries the same fact in words ("· CRC8 stamped into Byte *N*"), and the shading follows the Byte Location combo live.
+
+A channel whose bits land in that byte turns **red**, like any other double-claimed bit, and **OK is refused** until it is moved — see [Overlaps](#overlaps). This used to be a warning that let the message be saved, on the grounds that it still mapped to the device. It does map, and then transmits a channel the stamp has already overwritten, so the frame does not carry what the configuration says it carries.
 
 ### Capacity and validation
 

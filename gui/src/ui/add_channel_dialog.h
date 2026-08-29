@@ -46,10 +46,18 @@ public:
     // beyond naming what it is looking at. Both section-editor call sites pass
     // m_section.protection; the default is None for the offline and test
     // callers that construct a row outside any section.
+    // `reservedBits` are the frame positions this row may NOT occupy, as
+    // ct::reservedBits() gives them: a compound identifier's selector and a
+    // Transmit CRC8's stamped byte. Both are written by the DEVICE after the
+    // channels, so a row placed there is not merely sharing bits, it is
+    // replaced by them — which is why this dialog refuses the placement outright
+    // rather than letting it be made and then caught at OK. Empty for a caller
+    // with nothing reserved.
     AddChannelDialog(Configuration *config, const CommsChannelRow &initial,
                      SectionAlignment alignment, int messageLengthBytes, bool transmit,
                      const ConfigPatch &livePatch = {}, QWidget *parent = nullptr,
-                     CommsProtection sectionProtection = CommsProtection::None);
+                     CommsProtection sectionProtection = CommsProtection::None,
+                     const QHash<int, QString> &reservedBits = {});
 
     CommsChannelRow row() const;
 
@@ -61,6 +69,7 @@ private:
     Configuration *m_config;
     SectionAlignment m_alignment;
     int m_messageLength;
+    QHash<int, QString> m_reservedBits; // bit -> what already claims it
     bool m_transmit;
     CommsProtection m_protection; // the enclosing section's tier, for the title
     bool m_readOnly; // the section is edit-locked: show every field, write none

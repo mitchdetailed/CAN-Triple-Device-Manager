@@ -438,7 +438,7 @@ configuration store) and <b>Get Configuration brings them home</b>, re-guarding
 every marked message with the password it names — see
 <a href="online.html">Online: Send, Get &amp; Flash</a>.</p>
 
-<h3>What these levels actually are</h3><h3>What these levels actually are</h3>
+<h3>What these levels actually are</h3>
 
 <p class="warn"><b>All three are conventions of this application.</b> Nothing on
 the device enforces any of them. A CAN Triple hands its full message table to
@@ -487,6 +487,14 @@ three tabs: <b>Parameters</b>; <b>Received Channels</b> or
 which applies to exactly one message type and is enabled only while the type is
 <a href="#crc8">Transmit CRC8</a>.</p>
 
+<p>The channels tab is <b>grayed out while the Message Type is Off or Message
+Relay</b>. Neither carries channels: an Off message is not built into a frame at
+all, and a relay forwards whole frames without looking inside them. It is grayed
+rather than hidden, and for <b>Off</b> the rows are <b>kept</b> — switch a
+configured message off and back on and its channels are all still there. A relay
+is the exception: its rows are dropped when you press OK, because a relay has no
+frame of its own to put them in.</p>
+
 <h3>Parameters tab</h3>
 
 <table>
@@ -498,7 +506,9 @@ from the base address.</td></tr>
 <b>Transmit Message</b>, <b>Transmit CRC8</b> (a transmit message that stamps a
 checksum into its frames — see <a href="#crc8">below</a>) or
 <b>Message Relay</b>. The type decides which of the remaining controls
-apply.</td></tr>
+apply. <b>Off</b> keeps the message and everything defined in it but sends and
+decodes nothing, so its channels tab is grayed — the rows are still there and
+come back the moment you set a type again.</td></tr>
 <tr><td><b>Alignment :</b></td><td><b>Normal (big-endian)</b> (Motorola) or
 <b>Word Swap (little-endian)</b> (Intel). One byte order for the whole
 message.</td></tr>
@@ -672,6 +682,15 @@ start bit, width, type and scaling, and is tinted with the colour its bits carry
 in the frame map. Adding or changing a row opens the Comms Channel dialog — see
 <a href="channels.html">Channels</a> for its fields.</p>
 
+<p><b>The list is always in frame order:</b> Start Bit, then Bit Length, then
+name. So it reads the way the frame map below it is drawn, and a channel is
+where its bits are rather than where it happened to be added. Two rows may share
+a start bit — a receive message can decode the same bits twice — and then the
+narrower field comes first, then the name. Changing a row's Start Bit moves it
+in the list, and the selection moves with it, so the frame map keeps shading the
+channel you were looking at. The order is saved with the message, and the
+<b>Channels</b> pane in Communications Setup shows the same one.</p>
+
 <p><b>Compound</b> messages carry channels only inside <i>identifiers</i> — there
 is no shared always-present set; a signal present in every variant is defined in
 each identifier. The <b>Identifiers :</b> table lists 16 numbered slots with
@@ -699,13 +718,69 @@ same colour as its row in the list; clicking a coloured cell selects the channel
 that owns it, and the caption states the selected channel's exact extent.</p>
 
 <ul>
-<li><b>Red cells</b> mean two signals claim the same bit — a real overlap that
-needs fixing.</li>
+<li><b>Red cells</b> mean the bit is claimed twice — either by two signals, or
+by a signal and something the device writes over it. Either way the frame will
+not carry what the list says it carries.</li>
+<li><b>Slate cells</b> are <b>reserved</b>: spoken for before any channel is
+placed, by a compound identifier's selector or by a Transmit CRC8's stamped
+byte. Neither a channel nor a fault — place your channels elsewhere. Put one
+there anyway and the cell turns red.</li>
 <li><b>Dimmed bytes</b> lie beyond the message's own length: for a receive
 message the map draws the whole frame the bus can carry (8 bytes classic, 64
 CAN FD) and greys the bytes past this message's length, where nothing is
 extracted.</li>
 </ul>
+
+<h3 id="overlaps">Overlaps: what is warned about and what is refused</h3>
+
+<p>Two things can want the same bits, and they are not equally serious.</p>
+
+<p><b>Two channels overlapping each other</b> is only a problem on a message the
+device <em>sends</em>. On a <b>receive</b> message it is legitimate — the same
+byte decoded twice at different scalings, or a raw copy kept beside a cooked
+one — because reading a bit does not consume it. So a receive overlap is
+reported and allowed. On a <b>transmit</b> message the same overlap is two
+values packed into one place: whichever is packed last wins, and the other never
+leaves the device. That is refused.</p>
+
+<p><b>A channel under something the device writes itself</b> is always refused,
+on receive and transmit alike. There are two such things:</p>
+
+<ul>
+<li>a <b>compound identifier's selector</b> — the bits that say which
+sub-message this frame is. They are written after the channels on the way out
+and read over them on the way in, so a channel there carries the identifier
+value rather than its own;</li>
+<li>a <b>Transmit CRC8's stamped byte</b> — the checksum is stamped last, over
+whatever the channel put there.</li>
+</ul>
+
+<p>In both cases the channel is not sharing those bits, it is <em>replaced</em>
+by them, which is why neither is something you can choose to accept.</p>
+
+<table>
+<tr><th>Message</th><th>What collides</th><th>Result</th></tr>
+<tr><td>Receive</td><td>two channels</td><td>Warned, allowed</td></tr>
+<tr><td>Receive</td><td>channel under an identifier selector</td><td><b>Refused</b></td></tr>
+<tr><td>Transmit</td><td>two channels</td><td><b>Refused</b></td></tr>
+<tr><td>Transmit</td><td>channel under an identifier selector</td><td><b>Refused</b></td></tr>
+<tr><td>Transmit CRC8</td><td>channel in the stamped byte</td><td><b>Refused</b></td></tr>
+</table>
+
+<p>You meet a refusal twice, on purpose. <b>Add…</b> and <b>Change…</b> will not
+let a channel be <em>placed</em> on reserved bits at all — OK there stays greyed
+out and the reason is written under the fields — so the usual case never becomes
+a mistake you have to undo. Pressing <b>OK</b> on the message itself checks the
+whole layout again and names anything left, because a channel can also become
+trapped by something moving <em>underneath</em> it: change an identifier's offset
+or the CRC's byte location and the reserved bits move onto channels that were
+placed perfectly well.</p>
+
+<p class="note">A compound message is checked one identifier at a time, never
+across them. Two identifiers using the same bits is the whole point of
+multiplexing — they are alternative frames, never on the wire together — so that
+is not an overlap and is not reported. Only the identifier you are looking at
+reserves anything against its own channels.</p>
 
 <p>Bit numbering: bits count 0–7 right-to-left within a byte (bit 0 is the LSB),
 bytes count left-to-right from 0, so bit <i>S</i> sits at byte <i>S</i>/8, bit
@@ -799,10 +874,14 @@ fed to the CRC as-is.</td></tr>
 deliberately neither a channel colour nor the clash red, because the byte is
 neither a channel nor a fault: it is spoken for, place your channels elsewhere.
 The caption carries the same fact in words ("· CRC8 stamped into Byte
-<i>N</i>"), and the shading follows the Byte Location combo live. A channel
-whose bits land in that byte keeps its own colour — the fill is how you tell
-which channel is in the way — and its tooltip warns that the checksum is
-stamped over it.</p>
+<i>N</i>"), and the shading follows the Byte Location combo live.</p>
+
+<p>A channel whose bits land in that byte turns <b>red</b>, like any other
+double-claimed bit, and <b>OK is refused</b> until it is moved — see
+<a href="#overlaps">Overlaps</a>. This used to be a warning that let the message
+be saved, on the grounds that it still mapped to the device. It does map, and
+then transmits a channel the stamp has already overwritten, so the frame does
+not carry what the configuration says it carries.</p>
 
 <h3>Capacity and validation</h3>
 

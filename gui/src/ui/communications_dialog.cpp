@@ -41,7 +41,7 @@ namespace ct {
 namespace {
 
 // The Section column: normally the direction, a padlock for a message the
-// viewer may not read. The substitution
+// viewer may not read. That substitution
 // is deliberate — the row's job for a concealed message is to say "locked",
 // which is also why opening it asks for a password. The direction is not itself
 // the secret (the Config Summary report still names it, see
@@ -662,8 +662,8 @@ void CommunicationsDialog::updateChannelPane(int busIndex)
         tab.channelList->addItem(tr("(relay — forwards whole frames, no channels)"));
         return;
     }
-    // One line and nothing else, which is what the flag is
-    // for. Channel NAMES are not the secret and stay visible everywhere they are
+    // One line and nothing else, which is what the flag is for. Channel NAMES
+    // are not the secret and stay visible everywhere they are
     // USED — the Channel Editor, math and condition inputs, transmit rows — but
     // this pane is the one place they would be listed BY MESSAGE, and that
     // grouping is protocol detail in its own right: it says which signals share
@@ -682,6 +682,37 @@ void CommunicationsDialog::updateChannelPane(int busIndex)
     // and nothing ever reads an item's text back — so the decorated string has
     // nowhere to leak into. The row's `channelName` remains the identity.
     const ChannelCatalog &catalog = m_config->catalog();
+
+    // BY START BIT, not by the order the rows happen to sit in. This pane
+    // answers "what is in this message, and where" — and row order answers
+    // neither: it is the order channels were added, which after a DBC import is
+    // the order the .dbc file listed them and after hand-editing is the order
+    // somebody clicked Add. Reading the frame off the list meant holding the
+    // start bits in your head and re-sorting them there.
+    //
+    // Sorted on the START BIT FIELD, the number shown in the editor and typed
+    // into the row, rather than on where the field's lowest bit physically
+    // lands. Those differ under Normal (Motorola) alignment, where a field
+    // walks backwards through the bytes — but the user is matching this list
+    // against a Start Bit column, and a list ordered by a number they cannot
+    // see would look shuffled.
+    //
+    // commsRowPrecedes, the SAME comparator the section editor keeps its rows
+    // in, so the two views of one message cannot disagree — including on the
+    // tie-breaks, which is where they would have diverged: a start-bit-only sort
+    // leaves rows sharing a start bit in file order, and the editor puts them in
+    // frame order. (They can share one: a receive message may legitimately
+    // decode the same bits twice, and only a transmit message is refused it.)
+    //
+    // Display only, and only here: this pane copies the rows and the SECTION is
+    // untouched. The editor is where the order is written back. This pane is
+    // NoSelection and nothing reads an item's text back, which is what makes
+    // reordering it free.
+    const auto inFrameOrder = [](QList<CommsChannelRow> rows) {
+        sortCommsRows(rows);
+        return rows;
+    };
+
     if (s.compound) {
         for (int i = 0; i < s.identifiers.size(); ++i) {
             const CompoundIdentifier &ident = s.identifiers[i];
@@ -690,11 +721,14 @@ void CommunicationsDialog::updateChannelPane(int busIndex)
             tab.channelList->addItem(tr("— ID %1 (0x%2) —")
                                          .arg(i + 1)
                                          .arg(QString::number(ident.id, 16).toUpper()));
-            for (const CommsChannelRow &r : ident.rows)
+            // Within each identifier, never across them: the identifiers are
+            // alternative frames and their headers are the structure of this
+            // list, so a channel must stay under the ID it belongs to.
+            for (const CommsChannelRow &r : inFrameOrder(ident.rows))
                 tab.channelList->addItem(QStringLiteral("    ") + catalog.labelFor(r.channelName));
         }
     } else {
-        for (const CommsChannelRow &r : s.rows)
+        for (const CommsChannelRow &r : inFrameOrder(s.rows))
             tab.channelList->addItem(catalog.labelFor(r.channelName));
     }
     if (tab.channelList->count() == 0)
@@ -854,7 +888,23 @@ ConfigPatch CommunicationsDialog::liveView() const
 void CommunicationsDialog::onNewSection(int busIndex)
 {
     CommsSection section;
-    section.device = SectionDevice::ReceiveMessage;
+    // A NEW message starts OFF, so its Message Type is a choice the user makes
+    // rather than one they inherit. Receive was the old default and it is the
+    // commonest answer, which is exactly what made it the wrong one to assume:
+    // a message left at the default is indistinguishable in the list from one
+    // deliberately set to Receive, and an unfinished message that configures a
+    // real CAN ID is worse than one that configures nothing.
+    //
+    // Off is also the only value that costs nothing to be wrong about. The
+    // mapper skips an Off section entirely, so it takes no slot in the device's
+    // message table and the "N of M device messages used" count ignores it —
+    // an abandoned New… leaves no trace on the hardware.
+    //
+    // CommsSection's own default is still ReceiveMessage and is deliberately
+    // left alone: that one answers "what is a section that never said", which is
+    // the question a .ct3 written before the field existed asks, and it must
+    // keep answering it the way those files expect.
+    section.device = SectionDevice::Off;
     SectionEditorDialog dialog(m_config, section, busIndex, liveView(), /*sectionIndex=*/-1,
                                this, m_prover,
                                m_busTabs[busIndex].fdRateCombo->currentData().toInt());

@@ -61,8 +61,8 @@ rules, 8 integrators, and
 - **Calculations** — Math Channels, Conditions, **Timers**, **Up / Down
   Counters**, **Constants**, and **Tables** grid editors, each mapping onto the
   matching firmware table. A constant is a custom channel carrying a fixed value
-  the firmware writes every evaluation pass. **Tables** are
-  lookup tables — 8× 2x16 (one axis, up to 16 sites) and 8× **8x8**
+  the firmware writes every evaluation pass. **Tables** are value lookups —
+  8× 2x16 (one axis, up to 16 sites) and 8× **8x8**
   (X + Y axes, up to 8 sites each, 64 cells) — with each axis Interpolated or
   Discrete (centered); the looked-up value drives a generated output channel.
 - **Online** — Send Configuration (F5, chunked + read-back verified, applies

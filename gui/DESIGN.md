@@ -920,9 +920,10 @@ that password either, which is the trade its author made.
   Rate: 1M/500k/250k/125k — display-only note that current firmware hardcodes
   bus bring-up); `Sections:` list (columns Section | Name) with button column
   **Select… / Import DBC… / New… / Edit… / Remove / ↓↑ / Remove All**; right
-  pane `Channels:` listing channels of the selected section; "N available"
-  count under the list; OK/Cancel.
-- **CAN Communications Setup** (section editor; from New…/Edit…) — two tabs:
+  pane `Channels:` listing channels of the selected section in FRAME ORDER
+  (`commsRowPrecedes`, comms_types.h: Start Bit, then Bit Length, then name);
+  "N available" count under the list; OK/Cancel.
+- **CAN Communications Setup** (section editor; from New…/Edit…):
   - *Parameters*: Device (Off / Receive Message / Transmit Message),
     Alignment (Normal = big-endian, the default / Word Swap =
     little-endian), Receive Timeout ms + "Default value on timeout", Diagnostic
@@ -964,11 +965,52 @@ that password either, which is the trade its author made.
     one outcome the author certainly did not ask for. Leaving the two fields
     filled in on a *Cyclic* section is only an **Info**: the mapper ignores
     them, but they are still on screen reading as though they did something.
-  - *Received (or Transmitted) Channels*: Message Type (Single/Compound);
+  - *Received (or Transmitted) Channels* — **grayed out while the Message
+    Type is Off or Message Relay**, because neither is laid out into a frame:
+    `mapToDevice` skips an Off section and `findLayoutClashes` returns nothing
+    for it, and a relay forwards whole frames without reading them. Grayed and
+    not hidden, unlike the CRC8 tab beside it, and the difference is the rows:
+    the CRC8 recipe does not exist for another message type, while these rows
+    do and are **kept**, so switching a configured message off and back on
+    returns it intact. A relay is the one type whose rows are really dropped
+    (`syncParametersFromUi`), because it has no frame of its own to hold them
+    and they would otherwise surface in the channel usage report as phantoms.
+    Contents: Message Type (Single/Compound);
     Single → checkbox list of channel rows + **Add… / Change… / Remove**;
     Compound → `Identifiers` table (Number | Offset | ID | ID Mask,
     Change…/Clear) and per-identifier channel list titled "Channels (ID n)".
     Switching Single→Compound warns it clears the channel list (Yes/No).
+
+    **FRAME ORDER, and it is the STORED order.** `sortSectionRows()` puts every
+    row list the section owns through `commsRowPrecedes` (Start Bit, then Bit
+    Length, then name, case-insensitively). Not a view over a differently-ordered
+    model: the list index IS the row's index in the section, and is also the
+    row's colour in the frame map and the row `Change…` / `Remove` act on, so a
+    display order of its own would need every one of those sites to translate,
+    and any that forgot would edit the wrong channel.
+
+    Every list, not just the identifier on screen — otherwise a compound section
+    would be saved with its variants ordered according to which ones the user
+    happened to click on.
+
+    **Called where the rows change** — the constructor and the three row
+    handlers — and deliberately NOT from `rebuildChannelList()`, which looks
+    like the tidier home for it. That function also runs from the
+    `channelRenamed` handler, and that fires WHILE the row editor is open: its
+    channel picker commits a rename to the document immediately, and a name is
+    the third sort key. Sorting there would move rows out from under the index
+    `onChangeRow` holds across the modal, and the edit would land on whichever
+    row had slid into that slot, silently overwriting a channel the user never
+    opened. The order is settled after each edit, never during one.
+
+    `onAddRow` and `onChangeRow` re-find their row by sort key
+    (`indexOfSortedRow`) rather than re-selecting an index, because the sort they
+    just ran can have moved it: editing a Start Bit moves the row, and the frame
+    map follows the highlight.
+
+    The consequence to know about: opening a section stored in some other order
+    and pressing OK rewrites that order, so the document is modified by a visit
+    that changed nothing else. Once per section.
   - *Frame Layout* (`src/ui/bit_layout_table.*`), across the full width under
     both panes — a DBC-style bit map of the message: a row per byte, eight
     columns for the bits inside it, 7 (most significant) on the left to 0 on
@@ -1063,9 +1105,10 @@ that password either, which is the trade its author made.
   real conflict is two things *writing* one channel, because the device has one
   slot per channel.
   - **Output** (a receive comms row, a math / condition / counter / timer /
-    integrator / table output) — the site *writes* the channel: **New… /
-    Edit…** are offered, and "(allocated)" marks channels a comms row already
-    uses. A channel something else already writes is listed in the warning
+    integrator / table output) — the site *writes* the channel, and this is
+    **the creating side**: **New… / Edit…** are offered, because a channel
+    defined at a site that writes it is filled the moment that site is saved.
+    "(allocated)" marks channels a comms row already uses. A channel something else already writes is listed in the warning
     colour with the source named ("— already written by CAN 1 · Receive
     0x640"), and choosing it asks for confirmation: two writers overwrite each
     other and whichever runs last wins (Check Channels reports this as a
@@ -1076,9 +1119,19 @@ that password either, which is the trade its author made.
   - **Input** (a transmit comms row, math / condition inputs, counter and timer
     triggers, an integrator input, a table axis) — the site *reads* the
     channel. **The entire catalogue is listed, unfiltered**, however many other
-    sites already read the same channel. **New…** is offered here too, so a
-    configuration can be built out of order (name the channel at the transmit
-    row, add the receive row that fills it afterwards). A channel nothing
+    sites already read the same channel. **There is no New… on this side**:
+    what a site reads has to be produced somewhere first — a receive message
+    row, a calculation, a constant — and a channel invented at a picker that
+    only reads has nothing writing it, so a transmit row would send its default
+    value for ever and a math input would read that same default. The button is
+    not built at all rather than built and disabled, for the reason the CRC8 tab
+    is hidden rather than grayed. Nothing becomes unbuildable: **Tools —
+    Channel Editor** creates a channel from anywhere and every Output picker
+    still does, so building out of order means defining the channel at the thing
+    that *generates* it and then reading it here — which is the order the
+    device runs in anyway. `test_message_type_gating` drives `pickInput()`
+    itself, so a new read site inherits the rule by calling it. A channel
+    nothing
     writes yet is annotated "— no generator yet, reads its default value" in
     the *neutral* dim colour, not the warning colour, and is fully pickable;
     the note under the list says the same thing and adds that reading it

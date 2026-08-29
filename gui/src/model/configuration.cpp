@@ -1215,10 +1215,10 @@ void Configuration::clear()
 {
     // A new document is a new document: no access passwords, no fleet identity,
     // an upload policy back at its strict default, and no key material or
-    // session grant left over from the one that was open before. m_secureFile
+    // session grant left over from the one that was open before. The FORMAT
     // goes with them — an untitled document has no format yet, and inheriting
-    // "this is a .ct3s" from the previous file would make the first Save write a
-    // container nobody asked for.
+    // the previous file's would make the first Save write a sealed container, or
+    // a page of legible JSON, that nobody asked for.
     //
     // This half is what clearContent() deliberately does NOT do, and the reason
     // the two are separate: a Get rebuilds the CONTENT from the device and must
@@ -1249,7 +1249,7 @@ void Configuration::clear()
     m_deviceLockKey = kNoAccessKey;
     m_commsRevealed = false;
     m_sectionGrants.clear();
-    m_secureFile = false;
+    m_format = FileFormat::Sealed;
     m_secureOptions = SecureSaveOptions{};
     clearContent();
 }
@@ -2062,7 +2062,13 @@ bool Configuration::loadFromFile(const QString &path, QString *error, const QStr
 
     loadBody(body, fileVersion);
 
-    m_secureFile = secure;
+    // The format the file ACTUALLY had, so Save rewrites it as it was found.
+    // `secure` alone could not say this once there were three shapes: a
+    // format-1 .ct3 and a format-2 .ct3 are both "not secure" and must not be
+    // saved the same way as each other, because one of them is legible and the
+    // other is not.
+    m_format = secure ? FileFormat::Secure
+                      : (isBinaryConfigFile(path) ? FileFormat::Sealed : FileFormat::Json);
     m_secureOptions = secureOptions;
 
     // The key and the grant are two different things, and this is the one place
@@ -2495,11 +2501,78 @@ bool Configuration::saveToFile(const QString &path, QString *error)
     // a file OneDrive happens to have open, and that is a far commoner event
     // than a full disk.
     m_filePath = path;
-    // What is on disk is now legible JSON, so that is what this document is.
-    // Choosing between the two formats — and in particular not downgrading a
-    // .ct3s to a .ct3 by accident — is the caller's job; isSecureFile() is the
-    // question it asks to do it.
-    m_secureFile = false;
+    // What is on disk is a SEALED .ct3. This line used to say "legible JSON",
+    // which was true of format 1 and survived the change to format 2 as a
+    // comment describing the opposite of what the function does.
+    //
+    // Choosing between the three formats is the caller's job — and in
+    // particular not downgrading a .ct3s to a .ct3, nor either of them to JSON,
+    // by accident. fileFormat() is the question it asks to do it.
+    m_format = FileFormat::Sealed;
+    setDirty(false);
+    return true;
+}
+
+bool Configuration::saveJsonToFile(const QString &path, QString *error)
+{
+    // The same root a sealed .ct3 carries, written out in the clear. Reading it
+    // back needs no new code at all: loadFromFile routes on what the file starts
+    // with, and a file starting with '{' takes the format-1 path that every .ct3
+    // written before the container went in still takes.
+    //
+    // No refusal for concealed messages, and that is worth being explicit about
+    // rather than leaving as an omission. Format 1 had one: it would not write a
+    // document holding a message this session could not read, because the JSON
+    // spelled the message out. The same reasoning applies word for word here —
+    // this really does emit the protocol in the clear — but the conclusion does
+    // not, because the two situations differ in who is choosing. Back then JSON
+    // was what Save did, so the guard stopped an accident. Here JSON is a format
+    // the user went and picked from a list whose default is sealed, having been
+    // told in the file dialog what it is. Refusing at that point would be
+    // refusing the request, not preventing a mistake; the honest thing is to
+    // write what was asked for and to have said plainly, in the header and the
+    // help, what it costs.
+    QJsonObject root;
+    root["fileType"] = QStringLiteral("CANTripleConfig");
+    root["fileVersion"] = kConfigSchemaVersion;
+    root["writtenBy"] = QStringLiteral(CT_APP_VERSION);
+    const QJsonObject body = buildBody();
+    for (auto it = body.constBegin(); it != body.constEnd(); ++it)
+        root.insert(it.key(), it.value());
+
+    // INDENTED, unlike the sealed writer's compact body. The entire point of
+    // this format is that a person or another program reads it, and one line of
+    // JSON several hundred kilobytes long is legible only in the sense that a
+    // hex dump is.
+    const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Indented);
+
+    // The write must be PROVEN to have reached disk before this reports success,
+    // and the guard is the one the format-1 writer carried: QFile buffers, and
+    // QFile::error() straight after write() returns NoError for anything the OS
+    // has merely queued — so on a full disk the save would appear to succeed, the
+    // dirty flag would clear, and the user would be left with a truncated file
+    // and no warning, not even a prompt at exit. flush() forces the failure to
+    // happen HERE, where it can be returned and the document kept in memory.
+    //
+    // Deliberately NOT QSaveFile: its write-beside-and-rename cannot replace a
+    // file another process holds open, which on Windows routinely includes one
+    // being synced by OneDrive or open in an editor — and an editor having the
+    // file open is considerably more likely for THIS format than for any other
+    // here. config_file.cpp makes the same trade for the same reason.
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) {
+        if (error)
+            *error = f.errorString();
+        return false;
+    }
+    if (f.write(json) != json.size() || !f.flush()) {
+        if (error)
+            *error = f.errorString();
+        return false;
+    }
+
+    m_filePath = path;
+    m_format = FileFormat::Json;
     setDirty(false);
     return true;
 }
@@ -2529,7 +2602,7 @@ bool Configuration::saveSecureToFile(const QString &path, const SecureSaveOption
         return false;
 
     m_filePath = path;
-    m_secureFile = true;
+    m_format = FileFormat::Secure;
     m_secureOptions = options;
     setDirty(false);
     return true;

@@ -64,7 +64,21 @@ const char *kRecentFilesKey = "recentFiles";
 // Open and Save As offer both formats, because the magic decides which reader
 // runs and a user who typed ".ct3s" into Save As should still find their file
 // in the Open dialog afterwards.
-const char *kFileFilter = "CAN Triple Configurations (*.ct3 *.ct3s);;All Files (*)";
+const char *kFileFilter =
+    "CAN Triple Configurations (*.ct3 *.ct3s *.json);;All Files (*)";
+
+// SAVE AS offers the three formats separately, because they are three different
+// answers to "who can read this file" and a combined filter would hide that.
+// Order is the default first: Qt preselects filter one, so the sealed .ct3 is
+// what you get by pressing Save without touching the dropdown.
+//
+// JSON is last and says what it is in the entry itself. Somebody choosing it
+// from a list should not have to already know that it is the legible one — that
+// IS the choice being made.
+const char *kSaveAsFilter =
+    "CAN Triple Configuration (*.ct3);;"
+    "CAN Triple Secure Configuration (*.ct3s);;"
+    "JSON — readable, not encrypted (*.json)";
 // Save Secure Config only ever writes the binary container, so it lists only
 // that — offering *.ct3 there would suggest the format followed the extension,
 // which it does not.
@@ -666,16 +680,21 @@ bool MainWindow::onSave()
 
     QString error;
     bool ok = false;
-    if (m_config.isSecureFile()) {
-        // Save follows the format the file already has. Rewriting a .ct3s as
-        // plain JSON because Save is the quick path would be the worst possible
-        // default: the file would keep its name and its place on disk, this app
-        // would still show its protected messages as concealed, and every CAN ID
-        // in it would be one text editor away — with nothing on screen to say
-        // that the protection had just been removed.
+    // SAVE FOLLOWS THE FORMAT THE FILE ALREADY HAS, all three of them. Changing
+    // it here would be the worst possible default in either direction: the file
+    // keeps its name and its place on disk, so nothing on screen would say that
+    // a sealed configuration had just been rewritten legible, or that a legible
+    // one the user was diffing in version control had just turned opaque.
+    switch (m_config.fileFormat()) {
+    case Configuration::FileFormat::Secure:
         ok = m_config.saveSecureToFile(m_config.filePath(), m_config.secureOptions(), &error);
-    } else {
+        break;
+    case Configuration::FileFormat::Json:
+        ok = m_config.saveJsonToFile(m_config.filePath(), &error);
+        break;
+    case Configuration::FileFormat::Sealed:
         ok = m_config.saveToFile(m_config.filePath(), &error);
+        break;
     }
     if (!ok) {
         QMessageBox::warning(this, tr("Save Configuration"), error);
@@ -687,18 +706,56 @@ bool MainWindow::onSave()
 
 bool MainWindow::onSaveAs()
 {
-    QString path = QFileDialog::getSaveFileName(
-        this, tr("Save Configuration"),
-        startIn(m_config.filePath()), tr(kFileFilter));
+    // The filter the user actually picked comes back here, and it — not the
+    // typed extension — is what decides the format. A name typed without a
+    // suffix has to become something, and the dropdown is the only place the
+    // user said which.
+    QString selected;
+    QString path = QFileDialog::getSaveFileName(this, tr("Save Configuration"),
+                                                startIn(m_config.filePath()),
+                                                tr(kSaveAsFilter), &selected);
     if (path.isEmpty())
         return false;
-    if (QFileInfo(path).suffix().isEmpty())
-        path += QStringLiteral(".ct3");
+
+    // An extension typed by hand OUTRANKS the dropdown, because typing
+    // "setup.json" is a clearer statement of intent than leaving a combo box
+    // where it happened to be. Only these three are honoured; any other suffix
+    // (or none) takes the dropdown's format and keeps the name.
+    const QString typed = QFileInfo(path).suffix().toLower();
+    Configuration::FileFormat format = Configuration::FileFormat::Sealed;
+    if (typed == QLatin1String("json")
+        || (typed.isEmpty() && selected.contains(QLatin1String(".json")))) {
+        format = Configuration::FileFormat::Json;
+    } else if (typed == QLatin1String("ct3s")
+               || (typed.isEmpty() && selected.contains(QLatin1String(".ct3s")))) {
+        format = Configuration::FileFormat::Secure;
+    }
+    if (typed.isEmpty()) {
+        path += format == Configuration::FileFormat::Json    ? QStringLiteral(".json")
+                : format == Configuration::FileFormat::Secure ? QStringLiteral(".ct3s")
+                                                              : QStringLiteral(".ct3");
+    }
+
     QString error;
-    // Deliberately the plain writer, whatever the document came from: Save As is
-    // how you deliberately produce a legible .ct3, and Save Secure Config is its
-    // counterpart. Save is the one that must not choose for you.
-    if (!m_config.saveToFile(path, &error)) {
+    bool ok = false;
+    switch (format) {
+    case Configuration::FileFormat::Json:
+        // Chosen, never inherited. The one thing that would be wrong is for a
+        // configuration to become legible without anybody asking.
+        ok = m_config.saveJsonToFile(path, &error);
+        break;
+    case Configuration::FileFormat::Secure:
+        // Save As reaches the secure writer with the options the document
+        // already has, which for a document that was never secure is the
+        // default: sealed, no password. Save Secure Config… is the route that
+        // ASKS about a password, and it stays the way to add one.
+        ok = m_config.saveSecureToFile(path, m_config.secureOptions(), &error);
+        break;
+    case Configuration::FileFormat::Sealed:
+        ok = m_config.saveToFile(path, &error);
+        break;
+    }
+    if (!ok) {
         QMessageBox::warning(this, tr("Save Configuration"), error);
         return false;
     }
@@ -728,11 +785,12 @@ bool MainWindow::onSaveSecureConfig()
     // A document with no Protected Comms password can set one right here.
     //
     // Offering it here rather than sending you elsewhere is deliberate. The two
-    // places a password can be set are not interchangeable: Online → Set Access Passwords writes a key
-    // into HARDWARE and therefore needs a device on the bench, while this writes
-    // a verifier into the DOCUMENT and needs nothing. Requiring the former
-    // before the latter would make "build a protected configuration at my desk"
-    // impossible, which is the case this whole file format exists for.
+    // places a password can be set are not interchangeable: Online → Set Access
+    // Passwords writes a key into HARDWARE and therefore needs a device on the
+    // bench, while this writes a verifier into the DOCUMENT and needs nothing.
+    // Requiring the former before the latter would make "build a protected
+    // configuration at my desk" impossible, which is the case this whole file
+    // format exists for.
     //
     // A document that already carries a password skips these fields and is asked
     // for the existing one further down — changing it is Set Access Passwords'

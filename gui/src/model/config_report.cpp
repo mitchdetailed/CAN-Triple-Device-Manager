@@ -281,8 +281,7 @@ QString conditionOpName(int op)
 // ------------------------------------------------------------- rendering
 
 // Report accumulated as lines with a style tag, rendered to plain text (dashed
-// heading rules) or HTML (bold/underline headings in a
-// courier <pre> block).
+// heading rules) or HTML (bold/underline headings in a courier <pre> block).
 class ReportBuilder {
 public:
     void heading(const QString &text) { m_lines.append({text, Heading}); }

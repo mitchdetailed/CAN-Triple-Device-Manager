@@ -119,16 +119,16 @@ void BitLayoutTable::setSelectedRow(int index)
     applyColours();
 }
 
-void BitLayoutTable::setCrcByte(int byteIndex)
+void BitLayoutTable::setReservedBits(const QHash<int, QString> &reserved)
 {
-    // Clamped against the 64-byte ceiling rather than m_byteCount: the CRC byte
-    // usually arrives BEFORE setFrame() on a refresh (the caller sets both from
-    // the same widgets), and clamping against the old frame would throw away a
-    // location the very next call is about to make room for.
-    const int wanted = (byteIndex >= 0 && byteIndex < 64) ? byteIndex : -1;
-    if (wanted == m_crcByte)
+    // NOT clamped against m_byteCount. Reserved bits usually arrive BEFORE
+    // setFrame() on a refresh (the caller sets both from the same widgets), and
+    // dropping the ones outside the OLD frame would throw away positions the
+    // very next call is about to make room for. A bit past the current frame
+    // simply has no cell to paint and is ignored by the loop below.
+    if (reserved == m_reserved)
         return;
-    m_crcByte = wanted;
+    m_reserved = reserved;
     applyColours();
 }
 
@@ -174,13 +174,14 @@ void BitLayoutTable::applyColours()
     // Two signals claiming one bit — the same red the rest of the app uses for
     // a real conflict, and the thing this map exists to make obvious.
     const QColor clashFill = dark ? QColor(0x7E, 0x2C, 0x2F) : QColor(0xFF, 0xCD, 0xD2);
-    // The Transmit CRC8 checksum byte. A neutral slate, deliberately outside the
-    // twelve signal hues AND not the clash red: it is neither a channel nor a
-    // fault, it is "spoken for — place your channels elsewhere". Stronger than
-    // outsideFill, which recedes; this byte must assert itself, because the one
-    // job of marking it is to be seen before a channel is dropped on it.
-    const QColor crcFill = dark ? QColor(0x3A, 0x40, 0x4A) : QColor(0xDC, 0xE0, 0xE8);
-    const QColor crcText = dark ? QColor(0x9A, 0xA2, 0xAE) : QColor(0x6E, 0x76, 0x84);
+    // Bits spoken for by the CRC8 stamp or a compound identifier's selector. A
+    // neutral slate, deliberately outside the twelve signal hues AND not the
+    // clash red: it is neither a channel nor a fault, it is "spoken for — place
+    // your channels elsewhere". Stronger than outsideFill, which recedes; these
+    // must assert themselves, because the one job of marking them is to be seen
+    // before a channel is dropped on them.
+    const QColor reservedFill = dark ? QColor(0x3A, 0x40, 0x4A) : QColor(0xDC, 0xE0, 0xE8);
+    const QColor reservedText = dark ? QColor(0x9A, 0xA2, 0xAE) : QColor(0x6E, 0x76, 0x84);
 
     QFont plain = font();
     QFont bold = font();
@@ -188,13 +189,14 @@ void BitLayoutTable::applyColours()
 
     for (int b = 0; b < rowCount(); ++b) {
         const bool outside = b >= m_usableBytes;
-        const bool crcByte = b == m_crcByte;
         for (int c = 0; c < 8; ++c) {
             QTableWidgetItem *cell = item(b, c);
             if (!cell)
                 continue;
             const int bit = bitAt(b, c);
             const QList<int> owners = m_owners.value(bit);
+            // Empty unless something that is not a channel has claimed this bit.
+            const QString reservedWhy = m_reserved.value(bit);
 
             QColor fill;
             QColor text;
@@ -205,10 +207,10 @@ void BitLayoutTable::applyColours()
                 // location past the message length is a mistake the editor's OK
                 // refuses, and drawing it as mere dead space would hide the very
                 // thing the refusal is about to name.
-                if (crcByte) {
-                    fill = crcFill;
-                    text = crcText;
-                    tip = tr("bit %1 — CRC8: reserved for the stamped checksum byte").arg(bit);
+                if (!reservedWhy.isEmpty()) {
+                    fill = reservedFill;
+                    text = reservedText;
+                    tip = tr("bit %1 — reserved: %2").arg(bit).arg(reservedWhy);
                     if (outside)
                         tip += tr("  ⚠ outside the %1-byte message").arg(m_usableBytes);
                 } else {
@@ -229,7 +231,12 @@ void BitLayoutTable::applyColours()
                 if (owners.contains(m_selected)) {
                     fill = signalColour(m_selected, palette(), true);
                     picked = true;
-                } else if (owners.size() > 1) {
+                } else if (owners.size() > 1 || !reservedWhy.isEmpty()) {
+                    // The clash red covers BOTH kinds now, and a channel on a
+                    // reserved bit earns it for the same reason two channels on
+                    // one bit do: it is a refusal, not a remark. Drawn in the
+                    // channel's own quiet hue it read as a perfectly ordinary
+                    // placement right up until OK said no.
                     fill = clashFill;
                 } else {
                     fill = signalColour(owners.first(), palette());
@@ -242,13 +249,13 @@ void BitLayoutTable::applyColours()
                           : tr("bit %1 — %2").arg(bit).arg(names.first());
                 if (outside)
                     tip += tr("  ⚠ outside the %1-byte message").arg(m_usableBytes);
-                // A channel sitting on the CRC byte keeps its own colour — the
+                // A channel sitting on a reserved bit keeps its own colour — the
                 // fill is how the user identifies WHICH channel is in the way —
-                // and the tooltip carries the checksum's claim. The model's
-                // validation is what refuses the overlap; this is the map's job
-                // of making the finding unsurprising.
-                if (crcByte)
-                    tip += tr("  ⚠ the CRC8 checksum is stamped over this byte");
+                // and the tooltip carries the other claimant's. frame_layout.h
+                // is what refuses the overlap; this is the map's job of making
+                // the refusal unsurprising when it comes.
+                if (!reservedWhy.isEmpty())
+                    tip += tr("  ⚠ %1").arg(reservedWhy);
             }
             cell->setBackground(fill);
             cell->setForeground(text);
@@ -293,15 +300,33 @@ QString BitLayoutTable::selectionSummary() const
     // whether its placement is right. Checked against the actual bit positions
     // rather than the lo..hi byte span: a Motorola field's span can cross a byte
     // none of its bits actually land in.
-    if (m_crcByte >= 0) {
-        for (int pos : bits) {
-            if (pos / 8 == m_crcByte) {
-                text += tr("  ⚠ overlaps byte %1, which is reserved for the CRC8 checksum.")
-                            .arg(m_crcByte);
-                break;
-            }
+    //
+    // Each distinct reason once, however many bits it claims: a selector across
+    // eight bits is one fact, not eight.
+    QStringList claims;
+    for (int pos : bits) {
+        const QString why = m_reserved.value(pos);
+        if (!why.isEmpty() && !claims.contains(why))
+            claims << why;
+    }
+    for (const QString &why : claims)
+        text += tr("  ⚠ %1.").arg(why);
+
+    // The other channels this one lands on. m_owners is already built for the
+    // colouring, so this costs a lookup per bit and says the thing the red
+    // cells only imply — WHICH channel is in the way.
+    QStringList others;
+    for (int pos : bits) {
+        for (int idx : m_owners.value(pos)) {
+            if (idx == m_selected || idx < 0 || idx >= m_rows.size())
+                continue;
+            const QString name = displayLabel(this, m_rows[idx].channelName);
+            if (!others.contains(name))
+                others << name;
         }
     }
+    if (!others.isEmpty())
+        text += tr("  ⚠ overlaps %1.").arg(others.join(QStringLiteral(", ")));
     return text;
 }
 

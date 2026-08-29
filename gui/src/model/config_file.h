@@ -87,11 +87,31 @@
 //
 // Every .ct3 written before this release is JSON, and every one of them still
 // opens: Configuration::loadFromFile routes on what the file actually starts
-// with, never on the extension. A format-1 file loaded and saved comes back as
-// format 2, which is the only migration there is and it needs no user action.
-// There is deliberately no way to write format 1 again — an escape hatch back
-// to legible JSON would be the leak this change exists to close, sitting behind
-// a menu item.
+// with, never on the extension. A format-1 .ct3 loaded and saved comes back as
+// format 2, which is the only automatic migration there is and it needs no user
+// action.
+//
+// LEGIBLE JSON CAN BE WRITTEN AGAIN, and this paragraph used to say the
+// opposite. It read: "There is deliberately no way to write format 1 again — an
+// escape hatch back to legible JSON would be the leak this change exists to
+// close, sitting behind a menu item." That was the honest position when the only
+// question was what .ct3 should be, and it is left quoted here rather than
+// deleted, because the reasoning is still exactly right about what the format
+// costs and anybody weighing the option again should read it.
+//
+// What changed is not the reasoning but who is choosing. Save As now offers
+// three formats, sealed first and JSON named in the list as "readable, not
+// encrypted" — see Configuration::saveJsonToFile. It is never a default, never
+// what a new document becomes, and never what a Save on a .ct3 or a .ct3s turns
+// into; every one of those paths still writes a sealed container, and
+// test_json_format exists to keep it that way. A user who picks JSON from that
+// list has asked for a legible file on purpose, for reasons this format cannot
+// see and should not overrule — diffing a configuration in version control,
+// handing it to another tool, or keeping something that outlives this program.
+//
+// So the leak that mattered is the one nobody chose, and that one is still shut.
+// The .ct3 written by Save is sealed, and the only way past it is a deliberate
+// answer to a question that names what it does.
 #pragma once
 
 #include <QByteArray>

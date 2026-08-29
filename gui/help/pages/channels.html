@@ -432,9 +432,28 @@ genuine conflict: both writers overwrite each other's values.</li>
 <b>Select Output Channel</b>, depending on whether the field reads or writes.
 The picker searches by any part of the name or a regular expression, marks
 channels that have no generator yet or that are already written elsewhere, and
-its <b>New…</b> and <b>Edit…</b> buttons open Edit Custom Channel without leaving
-the picker. The same picker is used for math, condition, counter, timer,
-integrator and table inputs and outputs.</p>
+its <b>Edit…</b> button — and, on an output, <b>New…</b> — opens Edit Custom
+Channel without leaving the picker. The same picker is used for math, condition,
+counter, timer, integrator and table inputs and outputs.</p>
+
+<p><b>Only an output can create a channel.</b> <b>Select Output Channel</b> has
+a <b>New…</b> button; <b>Select Input Channel</b> has none. What a field reads
+has to be produced somewhere first — a receive message row, a calculation, a
+constant — and a channel invented where it is only read would have nothing
+writing it: a transmit message row would send that channel's default value for
+ever, and a math input would read the same default. So the read side offers the
+catalogue and nothing beyond it. This covers the transmit comms row, math A/B/C,
+both sides of a condition, counter and timer triggers, an integrator's input,
+enable and reset, and a table axis.</p>
+
+<p><b>Nothing becomes harder to build — only differently ordered.</b>
+<b>Tools &gt; Channel Editor…</b> creates a channel from anywhere, and
+so does every output picker: a receive message row, a math or condition or
+counter or timer or integrator or table <em>output</em>. Define the channel at
+the thing that generates it, then read it wherever you like — which is the
+order the device runs in anyway. <b>Edit…</b> is on both sides throughout:
+correcting a channel's unit or range is a different matter from defining one
+that nothing writes.</p>
 
 <p><b>New… picks the channel it creates.</b> Defining a channel from inside
 the picker <em>is</em> the choice — you opened the picker to pick one and there

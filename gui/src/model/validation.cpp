@@ -10,6 +10,7 @@
 #include "config_report.h"
 #include "configuration.h"
 #include "device_mapper.h"
+#include "frame_layout.h"
 
 namespace ct {
 
@@ -235,14 +236,26 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                         collect->append({occupancyOf(row), row.channelName});
                 }
             };
-            // Report overlapping fields within `occ`.
-            const auto reportOverlaps = [&](const QList<Occupancy> &occ) {
-                for (int i = 0; i < occ.size(); ++i)
-                    for (int j = i + 1; j < occ.size(); ++j)
-                        if ((occ[i].bits & occ[j].bits).any())
-                            add(ValidationIssue::Warning, loc,
-                                QStringLiteral("'%1' and '%2' overlap in the frame")
-                                    .arg(occ[i].channel, occ[j].channel));
+            // EVERY bit collision in this section — channel vs channel, channel
+            // vs a compound identifier's selector, channel vs the CRC8 stamp —
+            // comes from frame_layout.h, and so does the verdict on each. This
+            // file used to compute all three itself and got the identifier one
+            // wrong: it treated a row as a contiguous run of absolute bit
+            // positions, which is true only under WordSwap alignment and not
+            // under the default. See the header for what that cost.
+            //
+            // Reported once for the whole section rather than per frame variant,
+            // because findLayoutClashes already walks the identifiers and knows
+            // which rows really share a frame.
+            const auto reportLayoutClashes = [&]() {
+                for (const LayoutClash &clash : findLayoutClashes(s)) {
+                    const QString cloc =
+                        clash.identifierIndex >= 0
+                            ? QStringLiteral("%1 — ID %2").arg(loc).arg(clash.identifierIndex + 1)
+                            : loc;
+                    add(clash.blocking ? ValidationIssue::Error : ValidationIssue::Warning, cloc,
+                        clash.message());
+                }
             };
 
             if (s.compound) {
@@ -271,13 +284,12 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                                 .arg(ident.byteOffset).arg(s.messageLengthBytes));
                     QList<Occupancy> active;
                     checkRows(ident.rows, QStringLiteral("ID %1").arg(i + 1), &active);
-                    reportOverlaps(active);
                 }
             } else {
                 QList<Occupancy> occ;
                 checkRows(s.rows, QString(), &occ);
-                reportOverlaps(occ);
             }
+            reportLayoutClashes();
 
             if (s.isTransmit()) {
                 if (s.transmitRateHz < 1 || s.transmitRateHz > 200)
@@ -380,38 +392,14 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                         }
                     }
 
-                    // The selector is written into the frame LAST, after the
-                    // channels, so a channel sharing those bits is silently
-                    // overwritten by the identifier value — the frame goes out
-                    // carrying the selector where the data should be, which
-                    // reads on a trace as a channel that is always zero.
-                    for (int i = 0; i < s.identifiers.size(); ++i) {
-                        const CompoundIdentifier &ident = s.identifiers[i];
-                        if (!ident.configured)
-                            continue;
-                        // The selector window is the 2 bytes at byteOffset; only
-                        // the bits the mask names are actually written.
-                        const int selFirst = ident.byteOffset * 8;
-                        for (const CommsChannelRow &row : ident.rows) {
-                            const int rowFirst = row.startBit;
-                            const int rowLast = row.startBit + qMax(1, row.bitLength) - 1;
-                            bool clash = false;
-                            for (int bit = 0; bit < 16 && !clash; ++bit) {
-                                if (!((ident.idMask >> bit) & 1u))
-                                    continue;
-                                const int selBit = selFirst + bit;
-                                clash = selBit >= rowFirst && selBit <= rowLast;
-                            }
-                            if (clash)
-                                add(ValidationIssue::Error, loc,
-                                    QStringLiteral("identifier %1 writes its selector over "
-                                                   "channel '%2' — the selector is written "
-                                                   "last, so that channel arrives as the "
-                                                   "identifier value instead of its own")
-                                        .arg(i + 1)
-                                        .arg(row.channelName));
-                        }
-                    }
+                    // The channel-vs-selector check used to live here, computed
+                    // by hand and computed WRONGLY (a contiguous span, ignoring
+                    // alignment and the IEEE754 32-bit override). It is now part
+                    // of reportLayoutClashes() above, on the device's own bit
+                    // walk, and it applies to RECEIVE sections too — the selector
+                    // is stamped over the channel on the way out and read back
+                    // over it on the way in, and a receive row under it decodes
+                    // the identifier value rather than its own either way.
                 }
             }
             if (s.isCrc8()) {
@@ -429,22 +417,13 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                         QStringLiteral("CRC byte location %1 is outside the %2-byte message — "
                                        "the stamp has no byte to land in")
                             .arg(s.crcByteLocation).arg(s.messageLengthBytes));
-                // A channel row packed into the CRC's byte is not an error the
-                // way two rows overlapping is — the section still maps — but the
-                // stamp runs LAST, so whatever the row put there leaves the
-                // device overwritten. allRows(): on a compound section every
-                // variant frame is stamped, so identifier rows are just as
-                // exposed as the always-present ones.
-                for (const CommsChannelRow &row : s.allRows()) {
-                    bool touchesCrcByte = false;
-                    for (int pos : rowBitPositions(row, s.alignment))
-                        touchesCrcByte = touchesCrcByte || pos / 8 == s.crcByteLocation;
-                    if (touchesCrcByte)
-                        add(ValidationIssue::Warning, loc,
-                            QStringLiteral("'%1' occupies byte %2, where the CRC is stamped — "
-                                           "the stamp overwrites those bits in every frame")
-                                .arg(row.channelName).arg(s.crcByteLocation));
-                }
+                // Channel-vs-CRC-byte moved to reportLayoutClashes() above, and
+                // it is an ERROR there rather than the Warning it was here. The
+                // old rationale — "not an error the way two rows overlapping is,
+                // the section still maps" — judged it by whether the mapper
+                // survived, which is the wrong question: the section maps and
+                // then transmits a channel the stamp has already overwritten, so
+                // what ships is a frame that does not carry what it claims.
                 // An element-less recipe maps and runs — the engine stamps the
                 // constant init/final-XOR value — but a checksum that checks
                 // nothing is far more often a recipe someone stopped halfway

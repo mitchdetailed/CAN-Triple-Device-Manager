@@ -450,10 +450,44 @@ public:
     bool saveSecureToFile(const QString &path, const SecureSaveOptions &options,
                           QString *error = nullptr);
 
-    // True when the document came from (or was last written as) a .ct3s. Save
-    // follows the format the file already has rather than silently downgrading
-    // a secure configuration to plain JSON.
-    bool isSecureFile() const { return m_secureFile; }
+    // Write the document as INDENTED, LEGIBLE JSON — byte-for-byte the shape a
+    // format-1 .ct3 had, which is why loadFromFile already reads it back with no
+    // new code.
+    //
+    // WHAT CHOOSING THIS GIVES UP, stated here because it is the whole of the
+    // decision. A .ct3 is sealed precisely so a configuration is not legible by
+    // accident: every CAN ID, byte order, start bit, length, factor and offset,
+    // and every channel name, is in this file in plain text, findable by a text
+    // search of a whole drive and quotable into an email by anyone who opens it.
+    // Messages marked Hidden or Protect Communication are written out with all
+    // the rest — the marking travels, so the app still padlocks them on reload,
+    // but the protocol they were protecting is in the file for anyone who does
+    // not use the app.
+    //
+    // That is not a defect of this function and it is not something it should
+    // second-guess: it is what the user asked for when they picked JSON in Save
+    // As, and it is a reasonable thing to want — a configuration that diffs in
+    // version control, that another tool can read, that survives this program.
+    // The one thing that would be wrong is for it to happen without being
+    // chosen, which is why nothing defaults to it.
+    bool saveJsonToFile(const QString &path, QString *error = nullptr);
+
+    // WHICH OF THE THREE SHAPES this document's file has. Save follows it
+    // rather than choosing, because every silent change of format here is a
+    // change in who can read the file, and the file keeps its name either way.
+    enum class FileFormat {
+        Sealed, // .ct3  — the sealed binary container (config_file.h). The default.
+        Secure, // .ct3s — sealed, and optionally wrapped under a password.
+        // .json — indented, legible, exactly what format 1 .ct3 files were. Only
+        // ever reached by the user asking for it in Save As: it is never a
+        // default, never what a new document becomes, and never what a Save on
+        // a .ct3 quietly turns into. See saveJsonToFile for what choosing it
+        // gives up.
+        Json,
+    };
+    FileFormat fileFormat() const { return m_format; }
+    // Kept as its own question because most callers only care about this one.
+    bool isSecureFile() const { return m_format == FileFormat::Secure; }
     // The options the current .ct3s was saved with, so a plain Save can repeat
     // them without re-asking.
     const SecureSaveOptions &secureOptions() const { return m_secureOptions; }
@@ -819,7 +853,7 @@ private:
     // what the source refuses.
     QList<SectionGrant> m_sectionGrants;
 
-    bool m_secureFile = false;
+    FileFormat m_format = FileFormat::Sealed;
     SecureSaveOptions m_secureOptions;
 };
 

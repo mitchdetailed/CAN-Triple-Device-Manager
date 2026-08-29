@@ -1,6 +1,6 @@
 # Configuration Files (.ct3)
 
-One document — one configuration file. The document holds everything: buses, messages, channels, calculations, the fleet identity and the upload policy. There are two on-disk formats, and both are binary.
+One document — one configuration file. The document holds everything: buses, messages, channels, calculations, the fleet identity and the upload policy. There are three on-disk formats: two binary, and one you can read.
 
 <table>
 <tr><th>Format</th><th>Written by</th><th>What it is</th></tr>
@@ -10,6 +10,9 @@ it — followed by the document as an encrypted binary body.</td></tr>
 <tr><td><b>.ct3s</b></td><td>File → Save Secure Config…</td>
 <td>The same container with no readable header, plus the two things a .ct3 does
 not have: concealment that survives the file, and an optional password.</td></tr>
+<tr><td><b>.json</b></td><td>File → Save As… → <b>JSON</b></td>
+<td>The whole configuration as indented, readable JSON. Never a default — you
+have to pick it — see <a href="#json">Saving as JSON</a>.</td></tr>
 </table>
 
 **Configurations saved before this version were indented JSON**, and they still open normally — there is nothing to convert and nothing to do. The first time you save one it is written in the new format. Going back is not offered.
@@ -39,11 +42,23 @@ In both cases the prompt appears *before* the current document is touched — ca
 **File → Recent Files** keeps the last 8 files you opened or saved, most recent first, with the full path shown as a tooltip. Opening one behaves exactly like Open…, including the password handling. The submenu is disabled while the list is empty.
 
 ## Saving
-- **Save** writes back to the file's own path *in the format the file already has*. A secure .ct3s is never silently downgraded to a .ct3 just because Save was the quick path — that would drop its concealment and its password. An older JSON .ct3 is the one thing Save does change: it comes back in the current format.
-- **Save As…** always writes a plain .ct3, whatever the document came from. This is deliberate: Save As… is how you produce an ordinary working copy, and Save Secure Config… is its counterpart for one that has to keep its concealment. A name typed without an extension gets ".ct3" appended.
+- **Save** writes back to the file's own path *in the format the file already has* — all three of them. A secure .ct3s is never silently downgraded to a .ct3 just because Save was the quick path, and a .json you are keeping in version control is never silently turned into a binary .ct3. Either change would alter who can read the file while it kept its name and its place on disk. An older JSON **.ct3** is the one thing Save does change: it comes back as a current sealed .ct3. (To keep it readable, use Save As… and pick JSON.)
+- **Save As…** offers all three formats in one dropdown, **.ct3** first so it is what you get without touching it. A name typed without an extension takes the format the dropdown is showing; an extension you type yourself wins over the dropdown, so typing "setup.json" saves JSON however the list is set.
 - **Save Secure Config…** always writes a .ct3s (its file dialog offers only "CAN Triple Secure Configurations (\*.ct3s)"), and appends ".ct3s" to an extensionless name.
 
 Closing the program, File → New and File → Open… all ask about unsaved changes first ("The configuration has unsaved changes. Do you want to save them?" — Save / Discard / Cancel).
+
+<a id="json"></a>
+
+## Saving as JSON
+
+Choose **File → Save As…** and pick **JSON — readable, not encrypted (\*.json)**. What you get is the entire configuration as indented JSON: openable in any editor, greppable, and diffable line by line in version control. It is the same shape .ct3 files had before they became binary, so the program opens one straight back with no conversion step.
+
+> **Warning:** This is the one format that is *meant* to be readable, so be deliberate about it. Every CAN identifier, byte order, start bit, bit length, scaling factor and offset is in the file in plain text, along with every channel name — findable by a text search of a whole drive, and quotable into an email by anyone you send it to. Messages marked **Hidden** or **Protect Communication** are written out with everything else: the marking travels, so this program still padlocks them when the file is reopened and still asks for the password, but the protocol those markings were protecting is in the file for anything that is not this program. If you are sending a configuration to a customer, .ct3 or .ct3s is what you want.
+
+Nothing becomes JSON by accident. It is never the default in Save As…, a new document is never JSON, and **Save** on a .ct3 or a .ct3s never turns into it — you get JSON only by choosing it, and then only that document keeps using it.
+
+Good reasons to choose it anyway: keeping a configuration in git where the history is worth reading, feeding one to a script or a spreadsheet, sending a support ticket somebody can inspect without this program, or simply wanting a copy that outlives the software.
 
 ## Save Secure Config… — the two modes
 

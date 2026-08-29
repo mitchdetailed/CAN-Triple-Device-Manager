@@ -13,6 +13,7 @@
 #include <QtMath>
 
 #include "../model/device_mapper.h"
+#include "../model/frame_layout.h"
 #include "channel_field.h"
 #include "select_channel_dialog.h"
 #include "trimmed_spin_box.h"
@@ -22,11 +23,13 @@ namespace ct {
 AddChannelDialog::AddChannelDialog(Configuration *config, const CommsChannelRow &initial,
                                    SectionAlignment alignment, int messageLengthBytes,
                                    bool transmit, const ConfigPatch &livePatch,
-                                   QWidget *parent, CommsProtection sectionProtection)
+                                   QWidget *parent, CommsProtection sectionProtection,
+                                   const QHash<int, QString> &reservedBits)
     : QDialog(parent)
     , m_config(config)
     , m_alignment(alignment)
     , m_messageLength(messageLengthBytes)
+    , m_reservedBits(reservedBits)
     , m_transmit(transmit)
     , m_protection(sectionProtection)
     // Derived from the tier by the same rule CommsSection::isEditLocked() uses,
@@ -304,9 +307,13 @@ CommsChannelRow AddChannelDialog::row() const
 
 void AddChannelDialog::onSelectChannel()
 {
-    // A transmit row reads a channel; a receive row writes one. Only the write
-    // side has a rule to enforce (the duplicate-writer confirmation) — the read
-    // side offers the whole catalogue.
+    // A transmit row reads a channel; a receive row writes one. Two things
+    // follow from that, and both live in ChannelRole rather than here: only the
+    // write side has a conflict to guard (the duplicate-writer confirmation),
+    // and only the write side offers New…. What a message transmits has to be
+    // produced on the device first — a receive row, a calculation, a constant —
+    // so a channel invented at the transmit row's picker would have nothing
+    // writing it and the row would send its default value for ever.
     // The picker is given, and gives back, the BARE name.
     const QString current = ct::channelField(m_channelEdit);
     const QString picked =
@@ -314,8 +321,9 @@ void AddChannelDialog::onSelectChannel()
                    : SelectChannelDialog::pickOutput(m_config, current, this, m_livePatch);
     if (picked.isEmpty())
         return;
-    // The picker's New…/Edit… can add or rename a channel and rewrite every
-    // reference to it, so the view this dialog judges against has to follow —
+    // Edit… (and New… on the receive side) can add or rename a channel and
+    // rewrite every reference to it, so the view this dialog judges against has
+    // to follow —
     // and the field is relabelled after it, so a channel whose unit was just
     // changed in the picker shows the unit it now has.
     m_config->buildLiveView(m_live, m_livePatch);
@@ -446,6 +454,32 @@ void AddChannelDialog::revalidate()
             error = reason;
     }
 
+    // BITS THAT ARE ALREADY SPOKEN FOR. Refused here, while the row is being
+    // placed, rather than waited for and reported at the section editor's OK:
+    // the device writes a compound identifier's selector and a CRC8 stamp into
+    // the frame AFTER the channels, so a row put here would not share those bits
+    // with anything, it would be overwritten by them on every single frame.
+    //
+    // Checked only once the row is otherwise sound — a row that does not fit the
+    // frame at all has a better thing to be told about it, and stacking two
+    // complaints would bury the one that matters. rowBitPositions() is the
+    // device's own walk, which is what makes this agree with the map's shading
+    // and with the refusal at OK.
+    if (error.isEmpty() && !m_reservedBits.isEmpty()) {
+        QStringList claims;
+        for (int pos : rowBitPositions(current, m_alignment)) {
+            const QString why = m_reservedBits.value(pos);
+            // One line per distinct claimant, however many bits it holds: a
+            // selector across eight bits is one fact, not eight.
+            if (!why.isEmpty() && !claims.contains(why))
+                claims << why;
+        }
+        if (!claims.isEmpty())
+            error = tr("This lands on bits that are already spoken for: %1. "
+                       "Move the start bit, or shorten the field.")
+                        .arg(claims.join(QStringLiteral("; ")));
+    }
+
     if (error.isEmpty()) {
         const QString unit = channel.isValid() ? channel.unit : QString();
         QString preview = tr("Physical = raw × %1 + %2 %3")
@@ -472,16 +506,97 @@ void AddChannelDialog::revalidate()
             // exists only there), so it states the transmit end of the deal.
             const double lo = (rawLo - current.dbcOffset) * current.dbcFactor;
             const double hi = (rawHi - current.dbcOffset) * current.dbcFactor;
-            preview += QLatin1String("\n")
-                       + (current.clampToRange
-                              ? tr("%1 bits hold %2 to %3 %4 — anything outside is sent as the "
-                                   "nearer end.")
-                              : tr("%1 bits hold %2 to %3 %4 — anything outside rolls over into "
-                                   "that range."))
-                             .arg(len)
-                             .arg(qMin(lo, hi))
-                             .arg(qMax(lo, hi))
-                             .arg(unit);
+            // Ordered, because a negative resolution swaps which end of the
+            // field is the larger physical value.
+            const double fieldLo = qMin(lo, hi);
+            const double fieldHi = qMax(lo, hi);
+            // Carries its own leading space, or is empty. A unitless channel
+            // otherwise leaves "63 , but" and "63  —", which read as typos.
+            const QString unitSuffix = unit.isEmpty() ? QString() : QLatin1Char(' ') + unit;
+
+            if (!current.clampToRange) {
+                // A WRAPPING row skips the channel's range outright — the firmware
+                // does so deliberately, because a channel ranged 0..255 would
+                // otherwise present 255 and an 8-bit field would have nothing
+                // left to roll over. So the field really is the whole story
+                // here, and this line says only what the field holds.
+                preview += QLatin1String("\n")
+                           + tr("%1 bits hold %2 to %3%4 — anything outside rolls over "
+                                "into that range.")
+                                 .arg(len)
+                                 .arg(fieldLo)
+                                 .arg(fieldHi)
+                                 .arg(unitSuffix);
+            } else {
+                // TWO CLAMPS APPLY, AND THE PREVIEW USED TO NAME ONLY ONE.
+                //
+                // engine_core.c's inverseSignalScaling runs them in this order
+                // on a non-wrapping row: the CHANNEL's declared Min/Max first,
+                // then the raw value is scaled and clamped into what the FIELD
+                // can represent. So the number that actually limits what goes
+                // out is whichever of the two is narrower — and this line
+                // stated the field's capacity alone, which is the right answer
+                // only while the channel is the wider of the two.
+                //
+                // That is worth more than a footnote: a channel ranged -32..31
+                // feeding a 6-bit UNSIGNED field can never send 32..63, and a
+                // preview promising "0 to 63" is describing a field the value
+                // cannot reach. The bits are honest; the sentence was not.
+                double effLo = fieldLo;
+                double effHi = fieldHi;
+                bool channelBinds = false;
+                if (channel.isValid()) {
+                    if (channel.minValue > effLo) {
+                        effLo = channel.minValue;
+                        channelBinds = true;
+                    }
+                    if (channel.maxValue < effHi) {
+                        effHi = channel.maxValue;
+                        channelBinds = true;
+                    }
+                }
+                if (effLo > effHi) {
+                    // The two do not overlap at all: every value the channel
+                    // can hold is outside what the field can carry, so the
+                    // clamp pins the field to one end and the row sends a
+                    // constant. Named as the fault it is rather than printed as
+                    // an inside-out range.
+                    preview +=
+                        QLatin1String("\n")
+                        + tr("%1 bits hold %2 to %3%4, but \"%5\" is ranged %6 to %7 — "
+                             "entirely outside what the field can carry, so every value would "
+                             "be sent as the nearer end.")
+                              .arg(len)
+                              .arg(fieldLo)
+                              .arg(fieldHi)
+                              .arg(unitSuffix)
+                              .arg(channel.name)
+                              .arg(channel.minValue)
+                              .arg(channel.maxValue);
+                } else if (channelBinds) {
+                    preview += QLatin1String("\n")
+                               + tr("%1 bits hold %2 to %3%4, but \"%5\" is ranged %6 to %7, so "
+                                    "%8 to %9 is what is sent — anything outside is sent as "
+                                    "the nearer end.")
+                                     .arg(len)
+                                     .arg(fieldLo)
+                                     .arg(fieldHi)
+                                     .arg(unitSuffix)
+                                     .arg(channel.name)
+                                     .arg(channel.minValue)
+                                     .arg(channel.maxValue)
+                                     .arg(effLo)
+                                     .arg(effHi);
+                } else {
+                    preview += QLatin1String("\n")
+                               + tr("%1 bits hold %2 to %3%4 — anything outside is sent as "
+                                    "the nearer end.")
+                                     .arg(len)
+                                     .arg(fieldLo)
+                                     .arg(fieldHi)
+                                     .arg(unitSuffix);
+                }
+            }
         }
         m_previewLabel->setText(preview);
     } else {

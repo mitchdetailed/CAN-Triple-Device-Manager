@@ -1,6 +1,5 @@
-// Main window — menu shell: File, Connections,
-// Calculations, Online, Tools, Help. Offline-first document workflow with
-// explicit Send/Get Configuration.
+// Main window — menu shell: File, Connections, Calculations, Online, Tools,
+// Help. Offline-first document workflow with explicit Send/Get Configuration.
 #pragma once
 
 #include <QMainWindow>

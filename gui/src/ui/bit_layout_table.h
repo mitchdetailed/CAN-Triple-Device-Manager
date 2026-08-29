@@ -40,13 +40,22 @@ public:
     void setSelectedRow(int index);
     int selectedRow() const { return m_selected; }
 
-    // The byte a Transmit CRC8 section stamps its checksum into; -1 for "no CRC"
-    // (every other section kind). Shaded even though no channel owns it, because
-    // that byte is spoken for BEFORE any channel is placed — the whole point of
-    // telling the map is that a user laying out channels sees the reserved byte
-    // and routes around it, instead of meeting the collision as a validation
-    // finding after OK. Cheap like setSelectedRow — recolours, never rebuilds.
-    void setCrcByte(int byteIndex);
+    // Bits SPOKEN FOR BY SOMETHING THAT IS NOT A CHANNEL, as bit position -> a
+    // short reason: a compound identifier's selector, and the byte a Transmit
+    // CRC8 stamps its checksum into. Build it with ct::reservedBits()
+    // (frame_layout.h) rather than by hand, so the map shades exactly the bits
+    // the editor is about to refuse a channel on.
+    //
+    // Shaded even though no channel owns them, because they are spoken for
+    // BEFORE any channel is placed — the whole point of telling the map is that
+    // a user laying out channels sees the reserved bits and routes around them,
+    // instead of meeting the collision as a refusal at OK. Cheap like
+    // setSelectedRow — recolours, never rebuilds.
+    //
+    // This was setCrcByte(int) and carried one BYTE. An identifier's selector is
+    // not byte-shaped — idMask names individual bits inside a two-byte window —
+    // so shading its whole byte would have claimed bits the device leaves alone.
+    void setReservedBits(const QHash<int, QString> &reserved);
 
     // One-line caption for what is highlighted: where it actually lands, and a
     // warning when that is somewhere the device will not read it. Empty when
@@ -76,7 +85,7 @@ private:
     int m_byteCount = 8;
     int m_usableBytes = 8;
     int m_selected = -1;
-    int m_crcByte = -1; // byte reserved for a Transmit CRC8 checksum; -1 = none
+    QHash<int, QString> m_reserved; // bit position -> why it is spoken for
     QHash<int, QList<int>> m_owners; // bit position -> indices into m_rows
 };
 

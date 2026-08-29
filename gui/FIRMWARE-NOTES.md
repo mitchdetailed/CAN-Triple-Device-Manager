@@ -44,9 +44,9 @@ firmware unlocks a cleaner protocol; none block basic use.
 
 3. **No periodic transmit composer.** The routing engine can receive, parse,
    route, and inject, but there is no engine that *composes* frames from
-   signal values and transmits them cyclically — "Transmit
-   Message" sections have nothing to run on. Suggest a `TransmitMessageConfig`
-   table (can_id, bus, rate, signal packing list) serviced from
+   signal values and transmits them cyclically — "Transmit Message" sections
+   have nothing to run on. Suggest a `TransmitMessageConfig` table (can_id,
+   bus, rate, signal packing list) serviced from
    `events_100Hz`/`events_50Hz`. *GUI behavior: transmit sections can be
    edited and saved in the document, but upload validation reports them as
    requiring firmware support.*

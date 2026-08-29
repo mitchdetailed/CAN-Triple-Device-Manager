@@ -1,6 +1,5 @@
-// "Set Access Passwords" — Online > Set Access Passwords…:
-// a list of protected functions, a Set…
-// button, and a tick against the ones that have a password.
+// "Set Access Passwords" — Online > Set Access Passwords…: a list of protected
+// functions, a Set… button, and a tick against the ones that have a password.
 //
 //     ┌ Function Passwords ────────────────────────────────┐
 //     │ Select the function to set the password for :      │

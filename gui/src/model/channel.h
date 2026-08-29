@@ -1,6 +1,6 @@
-// A channel: a named quantity with fixed base resolution,
-// units, and range. Scaling on comms rows converts raw CAN values into
-// base-resolution counts; the channel defines what those counts mean.
+// A channel: a named quantity with fixed base resolution, units, and range.
+// Scaling on comms rows converts raw CAN values into base-resolution counts;
+// the channel defines what those counts mean.
 #pragma once
 
 #include <QJsonObject>

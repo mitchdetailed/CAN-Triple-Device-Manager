@@ -66,7 +66,9 @@ SelectChannelDialog::SelectChannelDialog(Configuration *config, ChannelRole role
     auto *roleLabel = new QLabel(
         role == ChannelRole::Input
             ? tr("This is an <b>input</b>. It <b>reads</b> the channel's value and never "
-                 "changes it, so any channel can be used here, in as many places as you like.")
+                 "changes it, so any channel can be used here, in as many places as you "
+                 "like — but it cannot create one. What you read has to be produced "
+                 "somewhere first: a receive message row, a calculation, or a constant.")
             : tr("This is an <b>output</b>. It <b>writes</b> the channel's value. The device "
                  "has one slot per channel, so if something else already writes it the two "
                  "overwrite each other."));
@@ -100,13 +102,23 @@ SelectChannelDialog::SelectChannelDialog(Configuration *config, ChannelRole role
     layout->addWidget(m_noteLabel);
 
     auto *buttons = new QHBoxLayout;
-    m_newButton = new QPushButton(tr("New…"));
-    connect(m_newButton, &QPushButton::clicked, this, &SelectChannelDialog::onNewChannel);
-    // Offered on both sides. Building a configuration out of order — naming the
-    // channel at the transmit row, then adding the receive row or calculation
-    // that fills it — is a normal way to work, and the un-filled state is just
-    // an annotation now, not an error.
-    buttons->addWidget(m_newButton);
+    // THE WRITING SIDE ONLY, and not created at all on the other one: a
+    // channel invented at a picker that merely READS it has nothing filling it,
+    // so a transmit row would send its default value for ever and a math input
+    // would read that same default. Gone rather than grayed, for the reason the
+    // CRC8 tab is gone rather than grayed — a disabled New… advertises a way to
+    // define a channel here and then refuses it, and there is nothing this
+    // picker could offer that would un-gray it.
+    //
+    // Nothing is unbuildable as a result. Tools -> Channel Editor creates a
+    // channel from anywhere, and every Output picker still does, so building
+    // out of order means defining the channel at the thing that GENERATES it
+    // and then reading it here — which is the order the device runs in.
+    if (role == ChannelRole::Output) {
+        m_newButton = new QPushButton(tr("New…"));
+        connect(m_newButton, &QPushButton::clicked, this, &SelectChannelDialog::onNewChannel);
+        buttons->addWidget(m_newButton);
+    }
     m_editButton = new QPushButton(tr("Edit…"));
     connect(m_editButton, &QPushButton::clicked, this, &SelectChannelDialog::onEditChannel);
     buttons->addWidget(m_editButton);
@@ -265,6 +277,8 @@ void SelectChannelDialog::onAccept()
 
 void SelectChannelDialog::onNewChannel()
 {
+    if (m_role != ChannelRole::Output)
+        return; // no button on the read side; no other path may define one either
     const QString created = EditChannelDialog::createOrEdit(m_config, Channel{}, true, this);
     if (created.isEmpty())
         return;

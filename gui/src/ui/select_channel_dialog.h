@@ -17,15 +17,18 @@ class QPushButton;
 namespace ct {
 
 // Which side of a channel the picker sits on. Every call site still has to say
-// which, but the two sides differ in what they DO to the channel, and only one
-// of them carries a guard rail:
+// which, but the two sides differ in what they DO to the channel, and the role
+// decides two things: which guard rail applies, and whether New… is there at
+// all.
 //
 //   Output — the site WRITES the channel (a receive comms row, a math /
 //            condition / counter / timer / integrator / table output). The
 //            device has one slot per channel, so two writers overwrite each
 //            other and whichever runs last wins — picking a channel something
 //            else already writes asks for confirmation. This is the ONLY
-//            channel conflict the app guards against.
+//            channel conflict the app guards against. THE CREATING SIDE:
+//            New… is offered here, because a channel defined at a site that
+//            writes it is filled the moment that site is saved.
 //
 //   Input  — the site READS the channel (a transmit comms row, a math or
 //            condition input, a counter/timer trigger, an integrator input, a
@@ -35,6 +38,19 @@ namespace ct {
 //            channel with no writer is annotated — it reads its default value
 //            until something generates it — but it is never hidden, never
 //            flagged as a conflict, and never blocks OK.
+//
+//            NO New… ON THIS SIDE. What you read has to be produced somewhere
+//            first — a receive message row, a calculation, a constant — and a
+//            channel invented at a picker that only reads has nothing writing
+//            it: a transmit row would send its default value for ever, and a
+//            math input would read that same default. The catalogue is the
+//            offer, and it is the whole offer.
+//
+//            Not a restriction on what can be built, only on where. Tools ->
+//            Channel Editor creates a channel from anywhere, and every Output
+//            picker still does — so the out-of-order path is "define it at the
+//            thing that generates it, then read it here", which is the order
+//            the device runs in anyway.
 enum class ChannelRole { Input, Output };
 
 class SelectChannelDialog : public QDialog
@@ -96,7 +112,7 @@ private:
     QLineEdit *m_searchEdit;
     QListWidget *m_list;
     QLabel *m_noteLabel;
-    QPushButton *m_newButton;
+    QPushButton *m_newButton = nullptr;       // Output only — see ChannelRole
     QPushButton *m_editButton;
     QPushButton *m_okButton;
     QString m_selected;

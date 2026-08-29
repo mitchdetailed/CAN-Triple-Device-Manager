@@ -183,6 +183,7 @@ private:
     void buildChannelsTab(QWidget *page);
     void onMessageTypeToggled();
     void rebuildChannelList();
+    void sortSectionRows(); // frame order, every list — see commsRowPrecedes
     // Frame layout map. refresh re-lays the whole grid (rows, alignment, frame
     // size); updateBitSelection only moves the highlight, and is what the
     // channel list's selection drives.
