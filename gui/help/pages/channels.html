@@ -253,13 +253,26 @@ expression (^Cruise, Speed$, set|limit).</li>
 receive message times out — filled in only when that message declares a Receive
 Timeout <i>and</i> has "Default value on timeout" enabled (see
 <a href="communications.html">Communications</a>).</li>
-<li><b>Source</b> names what generates the channel: the comms section that
-carries it ("CAN1 · Dash") or publishes its checksum to it ("CAN1 · Dash
-CRC8" — see <a href="communications.html#crc8">Transmit CRC8</a>), or Math,
-User Condition, Counter, Timer, Integrator,
-Constant, Table 2x16, Table 8x8 — or <b>Internal</b> for a
-<b>Device Channel</b>, which the unit produces itself whether or not anything
-uses it — or "unused".</li>
+<li><b>Source</b> names what <em>generates</em> the channel — what the value
+comes from, never where it is sent. A <b>receive</b> message decodes the frame
+and writes the channel, so it is named ("CAN 1 · Dash"). A <b>transmit</b>
+message is not: it <em>reads</em> the channel and puts it on the wire, so it is
+a destination, and this column does not report destinations. The one exception
+is a <b>Transmit CRC8</b>, which computes a checksum and publishes it into a
+channel ("CAN 1 · Dash CRC8" — see
+<a href="communications.html#crc8">Transmit CRC8</a>); the device really does
+write that one. Otherwise: Math, User Condition, Counter, Timer, Integrator,
+Constant, Table 2x16, Table 8x8, or <b>Internal</b> for a <b>Device Channel</b>,
+which the unit produces itself whether or not anything uses it.
+<br>Two entries separated by a comma mean two things write the channel — they
+share one slot and whichever runs last wins, which
+<a href="validation-report.html">Check Channels</a> reports.
+<br><b>"not generated"</b> means nothing produces it yet: it may still be read
+(transmitted, or fed to a calculation), it just has no writer, so it carries its
+default value. <b>"unused"</b> is the stronger statement — nothing generates it
+<em>and</em> nothing reads it — and is exactly the set Check Channels offers to
+remove. A message or calculation that is switched off keeps a channel out of
+"unused" so cleanup cannot break it, but does not make it generated.</li>
 <li><b>New…</b> creates a channel; <b>Edit…</b> opens the selected one.
 Double-clicking a row also opens it.</li>
 </ul>

@@ -1304,9 +1304,25 @@ that password either, which is the trade its author made.
 - **Tools → Channel Editor…** — every channel in the document in one sortable
   table: Channel, Data Type, Dec, Resolution, Minimum, Maximum, Unit, Default on
   Timeout (shown only where a receive section actually enables it, i.e. the
-  condition that makes the mapper emit a timeout), and Source (the CAN section
-  or the calculation that generates it). Same search box as Select Channel;
-  **New… / Edit…** reuse Edit Custom Channel. A channel whose data type cannot
+  condition that makes the mapper emit a timeout), and Source. Same search box
+  as Select Channel;
+  **New… / Edit…** reuse Edit Custom Channel.
+
+  **Source is read out of `analyzeChannelUsage()`**, not derived here. The
+  column had its own walk of the document and disagreed with the model in five
+  ways, each of them naming as a source something that produces no value: a
+  TRANSMIT section (a transmit row *reads* the channel — the message is the
+  destination, and this column does not report destinations), a relay's
+  leftover rows, a zero-mask compound identifier, the output of an inactive
+  calculation, and Off sections excluded by a second rule of its own. One
+  lookup now, so the Channel Editor, Check Channels and the Config Summary give
+  the same answer in the same words. A Transmit CRC8's publish channel stays a
+  source — the device writes it on every compose. With no generator the column
+  says **"not generated"**, which is distinct from **"unused"**: unused means
+  neither generated nor used, and is precisely the set cleanup offers to
+  delete, so a transmitted-but-ungenerated channel must not land in it.
+
+  A channel whose data type cannot
   represent its own range is flagged in red with the type that would fit —
   an integer channel stores a scaled integer, so its reach is
   `rawRange × 10^-decimals`, and the device clamps to the channel's range.

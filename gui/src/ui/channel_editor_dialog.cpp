@@ -15,6 +15,7 @@
 #include <QBrush>
 #include <QSet> // the hoisted edit-locked channel set in rebuild()
 
+#include "../model/config_report.h" // analyzeChannelUsage - the Source column
 #include "../model/configuration.h"
 #include "../model/dbc_import.h" // storageTypeHoldsRange / storageTypeForRange
 #include "edit_channel_dialog.h"
@@ -63,68 +64,56 @@ bool timeoutDefaultFor(const Configuration &config, const QString &channelName, 
     return false;
 }
 
-// Where a channel comes from, for the Source column: the comms section that
-// receives or transmits it, the calculation that generates it, or the device
-// itself.
-QString sourceFor(const Configuration &config, const QString &name)
+// Where a channel comes from, for the Source column.
+//
+// READ OUT OF ChannelUsage, not re-derived here. This column used to walk the
+// document itself, and it disagreed with the model in five ways — every one of
+// them naming as a source something that produces no value:
+//
+//   * A TRANSMIT section. This is the one that was reported, and the plainest:
+//     a transmit row READS the channel. The message is where the value GOES.
+//     Naming it under "Source" inverts the direction of the whole column, and
+//     for a channel that is only transmitted it also answered a question nobody
+//     asked — where the value is sent.
+//   * A RELAY's leftover rows, from a section re-typed to Message Relay. The
+//     device emits no relay signals, so nothing is generated.
+//   * A compound identifier whose ID Mask is 0. mapToDevice skips it, so its
+//     rows are never decoded.
+//   * The output of an INACTIVE calculation. It does not run.
+//   * Off sections were skipped, which was right, but by a second rule written
+//     here rather than by the model's.
+//
+// analyzeChannelUsage() decides all of this once, for Check Channels and the
+// Config Summary, and the strings are theirs too — so a channel's source now
+// reads identically in all three places instead of three times in two ways.
+//
+// A DESTINATION IS STILL NOT DISCLOSED. A channel that is only transmitted
+// reports "not generated": true, and it says nothing about which message
+// carries it.
+QString sourceFor(const ChannelUsage &usage, const QString &name)
 {
-    const auto sameName = [&name](const QString &other) {
-        return other.compare(name, Qt::CaseInsensitive) == 0;
-    };
-    for (int b = 0; b < 3; ++b) {
-        for (const CommsSection &s : config.bus[b].sections) {
-            if (s.device == SectionDevice::Off)
-                continue;
-            for (const QString &n : s.channelNames())
-                if (sameName(n))
-                    return QStringLiteral("CAN%1 · %2").arg(b + 1).arg(s.name);
-            // The CRC8 publish channel is written by the section without being
-            // one of its rows, so it needs naming here or its Source reads
-            // blank in the Channel Editor.
-            if (s.isCrc8() && sameName(s.crcChannel))
-                return QStringLiteral("CAN%1 · %2 CRC8").arg(b + 1).arg(s.name);
-        }
+    // Keyed exactly as UsageCollector keys it: trimmed and lower-cased.
+    const QStringList generators = usage.generators.value(name.trimmed().toLower());
+    if (!generators.isEmpty()) {
+        // Joined rather than truncated to the first. Two generators is a
+        // duplicate-writer conflict that Check Channels reports, and a column
+        // showing only one of them would hide the half that explains the
+        // reading.
+        return generators.join(QStringLiteral(", "));
     }
-    for (const MathRow &m : config.mathRows)
-        if (sameName(m.destChannel))
-            return QObject::tr("Math");
-    for (const ConditionRow &c : config.conditionRows)
-        if (sameName(c.outputChannel))
-            return QObject::tr("User Condition");
-    for (const CounterRow &c : config.counterRows)
-        if (sameName(c.outputChannel))
-            return QObject::tr("Counter");
-    for (const TimerRow &t : config.timerRows)
-        if (sameName(t.outputChannel))
-            return QObject::tr("Timer");
-    for (const IntegratorRow &g : config.integratorRows)
-        if (sameName(g.outputChannel))
-            return QObject::tr("Integrator");
-    for (const ConstantRow &k : config.constantRows)
-        if (sameName(k.name))
-            return QObject::tr("Constant");
-    for (const Table2x16Row &t : config.table2x16Rows)
-        if (sameName(t.outputChannel))
-            return QObject::tr("Table 2x16");
-    for (const Table8x8Row &t : config.table8x8Rows)
-        if (sameName(t.outputChannel))
-            return QObject::tr("Table 8x8");
-    // A DEVICE CHANNEL HAS A SOURCE EVEN WHEN NOTHING ABOVE CLAIMS IT. Device
-    // On Time, the per-bus diagnostics — Rx Count, Tx Count, Rx/Tx Errors,
-    // Error Frames, Bus Load and the three bus-state flags — and the MCU health
-    // block are produced by the firmware every sample, whether or not any
-    // message or calculation touches them. Falling through to "unused" said the
-    // opposite of the truth about the one category that is never unused: this
-    // column answers "where does this value come from", and for these the
-    // answer is the unit.
-    //
-    // LAST, deliberately. A device channel that a section transmits goes on
-    // naming that section, exactly as a Math output does, because putting the
-    // section first is this column's existing rule and a device channel is not
-    // a reason to grow a second one. What changes here is only the fallback.
+    // Produced by the firmware every sample whether or not anything references
+    // them: Device On Time, the per-bus diagnostics, the MCU health block.
+    // Before the split below, because a device channel nothing touches is still
+    // generated — by the unit.
     if (ChannelCatalog::isDeviceChannel(name))
         return QObject::tr("Internal");
-    return QObject::tr("unused");
+    // "unused" is the model's word for neither generated NOR used, and it is
+    // the one this column must not get wrong: Check Channels offers to delete
+    // exactly that set. A channel a transmit row reads is USED, so it falls
+    // through to the line below rather than being called unused.
+    if (usage.unused.contains(name, Qt::CaseInsensitive))
+        return QObject::tr("unused");
+    return QObject::tr("not generated");
 }
 
 } // namespace
@@ -215,6 +204,10 @@ void ChannelEditorDialog::rebuild()
     QSet<QString> editLocked;
     for (const QString &n : m_config->editLockedChannelNames())
         editLocked.insert(n.toCaseFolded());
+    // Once for the whole table, not once per row: the old Source column walked
+    // all three buses and every calculation list for EVERY channel, which is
+    // the whole document re-read a few hundred times on a large configuration.
+    const ChannelUsage usage = analyzeChannelUsage(*m_config);
     int miscount = 0;  // channels whose type cannot hold their own range
     int lockcount = 0; // channels owned by a protected message
     for (const Channel &c : shown) {
@@ -246,7 +239,7 @@ void ChannelEditorDialog::rebuild()
             item->setText(ColDefault, trimmedNumber(dflt, c.decimalPlaces));
             item->setToolTip(ColDefault, tr("Applied when \"%1\" times out").arg(where));
         }
-        item->setText(ColSource, sourceFor(*m_config, c.name));
+        item->setText(ColSource, sourceFor(usage, c.name));
 
         // An integer channel holds a scaled integer, so its reach is
         // rawRange x 10^-decimals. A type too small for the channel's own range

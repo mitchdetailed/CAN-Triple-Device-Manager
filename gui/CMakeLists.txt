@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.1.5 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.1.6 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -1015,6 +1015,43 @@ qt_add_executable(test_add_channel_preview
 )
 target_include_directories(test_add_channel_preview PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_add_channel_preview PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
+    ct_device_core) # device_mapper.cpp - see test_roundtrip
+
+# The Channel Editor's Source column: where a value COMES FROM.
+#
+# Reported as a bug: the column named a TRANSMIT message as a channel's source.
+# A transmit row READS the channel - the message is where the value goes, not
+# where it comes from - and for a channel that is only transmitted the column
+# was also disclosing which message carries it.
+#
+# The fix was a deletion rather than a special case: the column had its own walk
+# of the document, a second implementation of a rule analyzeChannelUsage()
+# already owns for Check Channels and the Config Summary. Four more
+# disagreements came out with the transmit one (a relay's leftover rows, a
+# zero-mask identifier, an inactive calculation, an Off section), and this suite
+# pins all five plus the one transmit message that IS a source: a Transmit CRC8
+# publishes its computed checksum into a channel.
+qt_add_executable(test_channel_source
+    test/test_channel_source.cpp
+    src/ui/channel_editor_dialog.cpp
+    src/ui/edit_channel_dialog.cpp
+    src/ui/numeric_grid.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_channel_source PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_channel_source PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
     ct_device_core) # device_mapper.cpp - see test_roundtrip
 
 # Saving as JSON: the deliberate exception to the sealed .ct3.
