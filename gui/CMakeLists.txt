@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.1.6 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.1.8 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -1015,6 +1015,43 @@ qt_add_executable(test_add_channel_preview
 )
 target_include_directories(test_add_channel_preview PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_add_channel_preview PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
+    ct_device_core) # device_mapper.cpp - see test_roundtrip
+
+# What a DBC signal is imported as: underscores become spaces.
+#
+# DBC signal names are C identifiers, so an author who wants "Engine Speed" has
+# to write "Engine_Speed" - the underscore is the format's limitation, and the
+# channel catalogue has no such rule.
+#
+# The part that is easy to get wrong is WHERE. The file refers to its own
+# signals by the underscored name: a SIG_VALTYPE_ line is what marks a signal as
+# a float, and it is matched against DbcSignal::name. Substitute in the parser
+# and every float in the file silently stops being one. So the parser keeps the
+# file's spelling and the substitution sits at the one point where a signal
+# becomes a CHANNEL - the import dialog's editable name column. This suite pins
+# both halves together, because either alone looks fine.
+qt_add_executable(test_dbc_names
+    test/test_dbc_names.cpp
+    src/ui/import_dbc_dialog.cpp
+    src/ui/select_channel_dialog.cpp
+    src/ui/edit_channel_dialog.cpp
+    src/ui/numeric_grid.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_dbc_names PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_dbc_names PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
     ct_device_core) # device_mapper.cpp - see test_roundtrip
 
 # The Channel Editor's Source column: where a value COMES FROM.

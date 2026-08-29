@@ -1,6 +1,7 @@
 #include "main_window.h"
 
 #include <QApplication>
+#include <QCoreApplication> // applicationVersion(), for the title bar
 #include <QClipboard>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -416,8 +417,23 @@ void MainWindow::buildCentral()
 
 void MainWindow::updateWindowTitle()
 {
-    setWindowTitle(tr("CAN Triple Device Manager - %1%2%3")
-                       .arg(m_config.displayName(),
+    // The version rides in the title bar, because it is the one place a user
+    // can read which build they are running without opening a dialog — and
+    // "which version is that on?" is the first question about any behaviour
+    // worth reporting. Help > About still carries the full detail.
+    //
+    // From QCoreApplication::applicationVersion() rather than CT_APP_VERSION
+    // directly: main() sets it from that macro, which CMake sets from
+    // project(), so the number keeps ONE origin and this file needs no compile
+    // definition of its own. Empty only where main() never ran (a harness
+    // constructing the window directly), and the name then stands alone
+    // instead of trailing a stray space.
+    const QString version = QCoreApplication::applicationVersion();
+    const QString product = version.isEmpty()
+                                ? tr("CAN Triple Device Manager")
+                                : tr("CAN Triple Device Manager %1").arg(version);
+    setWindowTitle(tr("%1 - %2%3%4")
+                       .arg(product, m_config.displayName(),
                             m_config.isDirty() ? QStringLiteral(" *") : QString(),
                             m_config.hasCommsPassword() ? tr(" [protected]") : QString()));
     if (m_documentLabel)

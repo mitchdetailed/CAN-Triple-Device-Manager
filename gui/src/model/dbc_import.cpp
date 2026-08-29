@@ -330,6 +330,13 @@ void dbcPhysicalRange(const DbcSignal &sig, double *lo, double *hi)
     *hi = std::max(a, b);
 }
 
+QString channelNameFromDbcSignal(const QString &signalName)
+{
+    QString name = signalName;
+    name.replace(QLatin1Char('_'), QLatin1Char(' '));
+    return name.simplified();
+}
+
 Channel channelFromDbcSignal(const DbcSignal &sig, const QString &channelName)
 {
     Channel c;

@@ -33,7 +33,8 @@ creates are made in that same order. Note that the id sorted on is the
 arbitration id itself, so an extended-frame message sorts by its 29-bit id and
 not after every standard one.</li>
 <li>Two columns are editable on signal rows before importing: the name in
-<b>Message / Signal</b> (this becomes the channel name, capped at 31 bytes) and
+<b>Message / Signal</b> (this becomes the channel name, with underscores already
+turned into spaces, capped at 31 bytes) and
 <b>Channel Type</b> (the physical quantity, pre-guessed from the DBC
 unit).</li>
 <li><b>Select All</b> / <b>Select None</b> tick or clear everything; the label
@@ -57,6 +58,15 @@ never allowed to clobber existing channels.</p>
 <b>Show Details</b>.</p>
 
 <h3>Channel names</h3>
+
+<p><b>Underscores become spaces.</b> A DBC signal name has to be a C identifier,
+so an author who means "Engine Speed" is obliged to write <code>Engine_Speed</code>
+— the underscore is the file format's limitation, not part of the name, and
+channels in this application are spelled with spaces. Runs of underscores
+collapse to one space and the ends are trimmed, so <code>Engine__Speed</code>
+imports as "Engine Speed" and <code>_Rpm</code> as "Rpm". It is a starting
+point, not a rule: the name column is editable, so type the underscore back if
+you want it.</p>
 
 <p>The device stores a 31-byte channel label. A longer DBC signal name is clipped
 to that budget (never splitting a multi-byte UTF-8 character), and a name already

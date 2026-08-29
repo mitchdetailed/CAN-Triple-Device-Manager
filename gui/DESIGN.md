@@ -1646,6 +1646,16 @@ expects. Multiplexed DBC messages become compound sections (multiplexor value �
 identifier selector via `muxSelectorForValue()`); mixed-endianness or
 byte-unmappable multiplexors are skipped with a warning.
 
+**Signal names import with underscores turned into spaces**
+(`channelNameFromDbcSignal()`, simplified() so runs collapse and the ends are
+trimmed): a DBC signal name must be a C identifier, so "Engine Speed" can only
+be written `Engine_Speed`, and the underscore is the format's limitation rather
+than the name. Applied where the signal becomes a CHANNEL — the dialog's
+editable name column, so it is a default the user can override — and
+deliberately NOT in the parser: the file refers to its own signals by the
+underscored name, so a `SIG_VALTYPE_` line (which is what marks a signal as a
+float) would match nothing and every float would decode as raw bits.
+
 **Lookup tables (v12, 1-axis widened v13, 2-axis replaced by the 8x8):** a
 **Tables** entry under Calculations backs the device's lookup tables — the
 1-axis table (`x_count` active of **16** `x_sites` → `outputs`) and the 2-axis

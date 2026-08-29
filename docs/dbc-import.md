@@ -7,7 +7,7 @@ To import messages and signals from an industry-standard .dbc file, open **Conne
 - **Filter :** type to filter messages and signals by name.
 - The tree has columns **Message / Signal**, **Channel Type**, **Details** and **Unit**. Tick the signals to import; ticking a message row ticks all of its signals, and a partially ticked message shows a tristate check.
 - **Messages are listed by arbitration id, lowest first**, whatever order they appear in the file — a DBC has no required message order, and the tool that wrote it may have used none you would recognise. Sorting them makes the list match a spec sheet and puts related ids together. The sections the import creates are made in that same order. Note that the id sorted on is the arbitration id itself, so an extended-frame message sorts by its 29-bit id and not after every standard one.
-- Two columns are editable on signal rows before importing: the name in **Message / Signal** (this becomes the channel name, capped at 31 bytes) and **Channel Type** (the physical quantity, pre-guessed from the DBC unit).
+- Two columns are editable on signal rows before importing: the name in **Message / Signal** (this becomes the channel name, with underscores already turned into spaces, capped at 31 bytes) and **Channel Type** (the physical quantity, pre-guessed from the DBC unit).
 - **Select All** / **Select None** tick or clear everything; the label beside them counts "*N channel(s) in M message(s) selected*".
 - **Parser notes :** lists anything the parser had to work around in the file itself.
 - **Import** is enabled once at least one signal is ticked.
@@ -19,6 +19,8 @@ Each message with at least one ticked signal becomes a **Receive Message** secti
 If any signal had to be renamed or skipped, a summary box reports "Imported N message(s) with M note(s)" — the full list is under **Show Details**.
 
 ### Channel names
+
+**Underscores become spaces.** A DBC signal name has to be a C identifier, so an author who means "Engine Speed" is obliged to write `Engine_Speed` — the underscore is the file format's limitation, not part of the name, and channels in this application are spelled with spaces. Runs of underscores collapse to one space and the ends are trimmed, so `Engine__Speed` imports as "Engine Speed" and `_Rpm` as "Rpm". It is a starting point, not a rule: the name column is editable, so type the underscore back if you want it.
 
 The device stores a 31-byte channel label. A longer DBC signal name is clipped to that budget (never splitting a multi-byte UTF-8 character), and a name already in use gains a numeric suffix (" 2", " 3", …) that fits inside the same budget. Every rename is listed in the import notes.
 

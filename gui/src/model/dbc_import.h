@@ -74,6 +74,22 @@ SectionAlignment alignmentForDbcSignal(const DbcSignal &sig);
 
 // Build a device extraction row / catalogue channel from a signal, using the
 // given (already-unique) channel name.
+// The channel name a DBC signal is IMPORTED under: underscores become spaces.
+// DBC signal names are C identifiers, so a name that wants to read "Engine
+// Speed" has to be written "Engine_Speed"; the underscore is the format's
+// limitation, not the author's intent, and the catalogue has no such rule.
+//
+// Applied where the signal BECOMES a channel and nowhere earlier. DbcSignal::
+// name keeps the file's spelling, because the file refers to its own signals by
+// it — SIG_VALTYPE_ lines are matched on that name, and rewriting it at parse
+// time would leave every float signal's value type unresolved.
+//
+// simplified(), so "Engine__Speed" does not import as "Engine  Speed" and
+// "_Rpm" does not import with a leading space. A name that is nothing but
+// underscores comes back empty, which the importer already handles — it falls
+// back to "Signal".
+QString channelNameFromDbcSignal(const QString &signalName);
+
 CommsChannelRow rowFromDbcSignal(const DbcSignal &sig, const QString &channelName);
 Channel channelFromDbcSignal(const DbcSignal &sig, const QString &channelName);
 

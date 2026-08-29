@@ -221,7 +221,13 @@ void ImportDbcDialog::buildTree()
             // its own column (3) beside it, which is where it belongs anyway —
             // these signals are not in the catalogue yet, so their unit comes
             // from the DBC rather than from labelFor().
-            sItem->setText(0, sig.name);
+            // Underscores become spaces here, at the one point where a DBC
+            // signal turns into a channel name the user can see and edit
+            // before it is created. Not in the parser: the file refers to its
+            // own signals by the underscored name (SIG_VALTYPE_), and not in
+            // accept() either, which would import a name different from the
+            // one shown in this column.
+            sItem->setText(0, channelNameFromDbcSignal(sig.name));
             sItem->setText(1, quantityForUnit(sig.unit));
             sItem->setText(2, signalDetails(sig));
             sItem->setText(3, sig.unit);
