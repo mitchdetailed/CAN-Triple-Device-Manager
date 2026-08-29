@@ -49,8 +49,12 @@ inputs; <b>Follow Changes</b> counts changes of a single Follow input;
 at all. The selection enables the matching rows.</td></tr>
 <tr><td>Up :</td><td>Adds <i>Step</i> on each rising edge (Up / Down type).</td></tr>
 <tr><td>Down :</td><td>Subtracts <i>Step</i> on each rising edge (Up / Down type).</td></tr>
-<tr><td>Follow :</td><td>Adds <i>Step</i> on <em>every change</em> of the input
-— rising or falling (Follow Changes type).</td></tr>
+<tr><td>Follow :</td><td>Adds <i>Step</i> every time the input's <em>value</em>
+changes — by any amount, in either direction, so 3000 to 3100 counts exactly as
+0 to 1 does. A repeated value is not a change, so a cyclic message re-sending the
+same reading does not step (counting <em>frames</em> is what the message option
+on Up/Down is for). Non-finite readings are ignored rather than counted forever.
+(Follow Changes type.)</td></tr>
 <tr><td>Rate :</td><td>How many steps a second, and whether each one
 <b>Increment</b>s or <b>Decrement</b>s (Every x Hz type). See below.</td></tr>
 <tr><td>Reset :</td><td>On its rising edge the counter is set to <i>Reset

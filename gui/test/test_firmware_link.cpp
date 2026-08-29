@@ -2721,6 +2721,220 @@ static void testTriggeredTransmit()
 // it is what a migrated configuration must NOT accidentally acquire — which is
 // why the migration pairs a Set with its exact inverse, so the two can never
 // both be false and the latch can never hold anything.
+// A FOLLOW counter counts changes of its input's VALUE.
+//
+// It did not. For as long as the mode existed the input was read through
+// boolAt(), so what it actually counted was the input crossing zero: an RPM
+// channel stepping 3000 -> 3100 -> 3200 counted NOTHING, while a flag going
+// 0 -> 1 -> 0 counted twice. The mode is documented as tracking a channel's
+// value in four places - protocol.h, the counters help page, the counters
+// dialog, and the comment directly above the line itself - and only the code
+// disagreed.
+//
+// The frames below are all non-zero and all different, which is precisely the
+// case the boolean version was blind to: it scores 1 here (the first frame,
+// crossing from the initial zero) where the value comparison scores one per
+// change.
+namespace flw {
+constexpr quint16 kIn = 0, kCount = 1;
+constexpr quint32 kRxId = 0x400;
+
+// One receive message carrying one 16-bit unsigned field, factor 1, so the
+// number fed in IS the value on the channel.
+static bool installInput()
+{
+    ct::CanMessageConfig msg{};
+    msg.can_id = kRxId;
+    msg.flags = ct::MSGFLAG_ACTIVE;
+    msg.src_bus = 1;
+    msg.dlc = 8;
+    msg.tx_trigger_cond = ct::TX_TRIGGER_COND_NONE;
+
+    ct::CanSignalConfig sig[2]{};
+    for (auto &s : sig) {
+        s.factor = 1.0f;
+        s.min_val = -1.0e9f; // a real span; min == max would clamp to a point
+        s.max_val = 1.0e9f;
+    }
+    ct::sigSetHeader(sig[kIn], 0, 0, 1);
+    ct::sigSetBits(sig[kIn], 0, 16, ct::SIGNAL_TYPE_UINT16, 0, 0);
+    ct::sigSetHeader(sig[kCount], ct::SIG_MSG_NONE, 0, 1); // counter output
+
+    return engine_table_write(ENGINE_TABLE_MESSAGES, 0, 1,
+                              reinterpret_cast<const uint8_t *>(&msg))
+           && engine_table_write(ENGINE_TABLE_SIGNALS, 0, 2,
+                                 reinterpret_cast<const uint8_t *>(sig));
+}
+
+static bool installCounter(quint16 followIdx, float step, quint16 enableIdx)
+{
+    ct::CounterConfig c{};
+    c.up_signal_idx = ct::SIG_MSG_NONE;
+    c.down_signal_idx = ct::SIG_MSG_NONE;
+    c.follow_signal_idx = followIdx;
+    c.reset_signal_idx = ct::SIG_MSG_NONE;
+    c.enable_signal_idx = enableIdx;
+    c.dest_signal_idx = kCount;
+    c.min_value = 0.0f;
+    c.max_value = 1.0e6f;
+    c.reset_value = 0.0f;
+    c.step = step;
+    c.mode = ct::COUNTER_MODE_FOLLOW;
+    c.flags = ct::COUNTERFLAG_ACTIVE;
+    return engine_table_write(ENGINE_TABLE_COUNTERS, 0, 1,
+                              reinterpret_cast<const uint8_t *>(&c));
+}
+
+static void feed(int value)
+{
+    const uint8_t f[8] = {uint8_t(value & 0xFF), uint8_t((value >> 8) & 0xFF),
+                          0, 0, 0, 0, 0, 0};
+    engine_process_can(1, kRxId, 0, 0, f, 8);
+}
+
+static float count() { return engine_signal_value(kCount); }
+} // namespace flw
+
+static void testFollowCounterCountsValueChanges()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    CHECK(flw::installInput());
+    CHECK(flw::installCounter(flw::kIn, 1.0f, ct::SIG_MSG_NONE));
+
+    // THE REPORTED CASE. Three different non-zero values: three changes.
+    flw::feed(3000);
+    CHECK(flw::count() == 1.0f); // 0 -> 3000
+    flw::feed(3100);
+    CHECK(flw::count() == 2.0f); // the one the boolean version could not see
+    flw::feed(3200);
+    CHECK(flw::count() == 3.0f);
+    std::printf("  follow: 3000/3100/3200 -> %g (boolean version scored 1)\n",
+                double(flw::count()));
+
+    // A REPEAT IS NOT A CHANGE. A cyclic message re-sending the same value must
+    // not step, or the counter degenerates into counting frames - which is what
+    // COUNTER_SRC_MSG_RX is for, and a different question.
+    flw::feed(3200);
+    flw::feed(3200);
+    CHECK(flw::count() == 3.0f);
+
+    // And zero is a value like any other, in both directions.
+    flw::feed(0);
+    CHECK(flw::count() == 4.0f);
+    flw::feed(0);
+    CHECK(flw::count() == 4.0f);
+    flw::feed(7);
+    CHECK(flw::count() == 5.0f);
+
+    // The calculation pass must not double-count what the frame pass already
+    // counted: both run executeCounters, and the value has not moved between
+    // them.
+    engine_tick(10);
+    engine_tick(10);
+    CHECK(flw::count() == 5.0f);
+    std::printf("  follow: steady through two ticks -> %g\n", double(flw::count()));
+}
+
+static void testFollowCounterHonoursStepAndEnable()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    CHECK(flw::installInput());
+    CHECK(flw::installCounter(flw::kIn, 5.0f, ct::SIG_MSG_NONE));
+
+    flw::feed(10);
+    flw::feed(20);
+    CHECK(flw::count() == 10.0f); // two changes at a step of 5
+    std::printf("  follow: step 5, two changes -> %g\n", double(flw::count()));
+}
+
+static void testAnUnconfiguredFollowInputNeverSteps()
+{
+    // 0xFFFF is the "unused" index. valueAt() reads it as 0, which is also what
+    // the previous-value store holds, so it can never differ from itself - the
+    // same shape of answer boolAt() gave, and the one that keeps a half-built
+    // counter quiet instead of counting every pass.
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    CHECK(flw::installInput());
+    CHECK(flw::installCounter(ct::SIG_MSG_NONE, 1.0f, ct::SIG_MSG_NONE));
+
+    flw::feed(100);
+    flw::feed(200);
+    engine_tick(10);
+    CHECK(flw::count() == 0.0f);
+    std::printf("  follow: unconfigured input -> %g\n", double(flw::count()));
+}
+
+static void testAChangeWhileDisabledIsAbsorbed()
+{
+    // The enable gate holds the count still, and the change that happened while
+    // it was shut is not banked for later: re-enabling must not spend a step on
+    // something the user switched the counter off for. Same rule the three
+    // boolean inputs already followed, which is why the store is unconditional.
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    CHECK(flw::installInput());
+    // Enable reads channel kCount itself, which starts at 0 = disabled and
+    // becomes non-zero only once the counter has stepped - so the counter is
+    // disabled for the whole of this test.
+    CHECK(flw::installCounter(flw::kIn, 1.0f, flw::kCount));
+
+    flw::feed(10);
+    flw::feed(20);
+    flw::feed(30);
+    CHECK(flw::count() == 0.0f);
+    std::printf("  follow: disabled throughout -> %g\n", double(flw::count()));
+}
+
+static void testANonFiniteFollowInputDoesNotRunAway()
+{
+    // NaN != NaN is TRUE, so an unguarded value comparison steps on every pass
+    // for as long as the input stays poisoned - a counter running away at tick
+    // rate, which is the worst way for this to fail.
+    //
+    // Reachable: executeConstants writes a constant's value straight into its
+    // channel with no finite check, so a corrupt record puts NaN in a slot that
+    // a Follow counter can be pointed at. The decode path cannot (it clamps
+    // non-finite readings), which is why this is the door that has to be shut.
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    CHECK(flw::installInput());
+    CHECK(flw::installCounter(flw::kIn, 1.0f, ct::SIG_MSG_NONE));
+
+    ct::ConstantConfig k{};
+    k.dest_signal_idx = flw::kIn;
+    k.value = std::numeric_limits<float>::quiet_NaN();
+    k.is_active = 1;
+    CHECK(engine_table_write(ENGINE_TABLE_CONSTANTS, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&k)));
+
+    for (int i = 0; i < 20; ++i)
+        engine_tick(10);
+    std::printf("  follow: NaN input over 20 ticks -> %g\n", double(flw::count()));
+    CHECK(flw::count() == 0.0f);
+
+    // RECOVERY IS NOT EXERCISED HERE, and the reason is the fixture rather than
+    // the code: the constants table takes one write per configuration, so this
+    // input cannot be un-poisoned without a clear that would also reset the
+    // counter state the recovery is about. What makes recovery work is the
+    // store rule next to the guard — only a finite value is kept — so the
+    // comparison comes back against the last real value rather than against a
+    // NaN that would never equal anything again. The guard alone would not be
+    // enough, which is why both lines are there.
+}
+
 static void testConditionSetResetLatch()
 {
     EngineCallbacks cb{};
@@ -8402,6 +8616,11 @@ int main(int argc, char *argv[])
     testTxFairnessUnderSaturation();
     testTxDeadBusDoesNotSilenceOthers();
     testTriggeredTransmit();
+    testFollowCounterCountsValueChanges();
+    testFollowCounterHonoursStepAndEnable();
+    testAnUnconfiguredFollowInputNeverSteps();
+    testAChangeWhileDisabledIsAbsorbed();
+    testANonFiniteFollowInputDoesNotRunAway();
     testConditionSetResetLatch();
     testConditionMomentaryHold();
     testConditionMessageEvents();
