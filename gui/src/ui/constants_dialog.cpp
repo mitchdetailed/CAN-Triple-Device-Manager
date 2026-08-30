@@ -22,6 +22,7 @@
 
 #include "../model/channel_catalog.h"
 #include "../protocol/wire_structs.h"
+#include "name_limits.h"
 #include "trimmed_spin_box.h"
 
 namespace ct {
@@ -106,7 +107,9 @@ public:
         auto *nameGroup = new QGroupBox(QObject::tr("Channel Name"), this);
         auto *nameForm = new QFormLayout(nameGroup);
         m_nameEdit = new QLineEdit(nameGroup);
-        m_nameEdit->setMaxLength(MAX_CHANNEL_NAME_BYTES); // device label budget
+        // The device label budget, in BYTES - see name_limits.h for why
+        // setMaxLength was not it.
+        ct::limitToUtf8Bytes(m_nameEdit, MAX_CHANNEL_NAME_BYTES);
         m_nameEdit->setToolTip(
             QObject::tr("Up to %1 characters — the device stores a %2-byte label.")
                 .arg(MAX_CHANNEL_NAME_BYTES).arg(SIGNAL_LABEL_LEN));

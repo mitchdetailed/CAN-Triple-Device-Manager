@@ -30,6 +30,7 @@
 #include "../protocol/wire_structs.h" // CRC8_MAX_ELEMENTS, asserted == kCrcElementSlots
 #include "add_channel_dialog.h"
 #include "channel_field.h"
+#include "name_limits.h"
 #include "color_item_delegate.h"
 #include "select_channel_dialog.h"
 
@@ -259,6 +260,16 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
     paramGrid->addWidget(new QLabel(tr("Name :")), r, 0);
     m_nameEdit = new QLineEdit(m_section.name);
     m_nameEdit->setPlaceholderText(tr("(automatic)"));
+    // The device stores 17 bytes (store v18). Capped here so the field cannot
+    // hold a name that would not survive a Send - before this the only sign was
+    // a mapper warning at Send time, and a Get that came back with a shorter
+    // name than the one on screen.
+    ct::limitToUtf8Bytes(m_nameEdit, MAX_MESSAGE_NAME_BYTES);
+    m_nameEdit->setToolTip(
+        tr("Up to %1 characters, stored on the device so a Get Configuration "
+           "returns it. Accented and non-Latin characters take 2-4 bytes of the "
+           "%1, so a name using them holds fewer.")
+            .arg(MAX_MESSAGE_NAME_BYTES));
     paramGrid->addWidget(m_nameEdit, r, 1, 1, 3);
     ++r;
 

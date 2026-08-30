@@ -18,6 +18,16 @@ Each message with at least one ticked signal becomes a **Receive Message** secti
 
 If any signal had to be renamed or skipped, a summary box reports "Imported N message(s) with M note(s)" — the full list is under **Show Details**.
 
+### Units
+
+A `.dbc` writes its unit as free text, and every tool spells it differently: `degC`, `°C` and `Celsius` are one unit, and none of them is how this application spells it (**C**). The import translates, so `kph` arrives as **km/h** and `1/min` as **rpm** — an imported channel ends up indistinguishable from one you made by hand, and its unit can be picked from the same lists everywhere else.
+
+**Both columns are yours to change before importing.** **Channel Type** chooses the quantity, and **Unit** offers exactly the units that quantity has. Changing the type resets the unit to that type's default, because a Pressure channel measured in rpm is not something the application can express.
+
+**A unit nothing matches is flagged, not guessed.** If the file says something this application has no equivalent for, the Unit cell reads **(pick one)** in the warning colour and its tooltip quotes what the file actually said. Set the Channel Type, then pick a unit — or leave it, and the channel imports unitless, which the import notes list at the end.
+
+> **Note:** **Nothing converts the numbers.** The unit is a label on the value the scaling already produces. If a signal arrives in psi and you pick kPa, the readings are still psi — change the **Bit Resolution** instead, which is what actually scales them. This matters most where the translation is not exact: `hPa` imports as **mbar** (identical), but `atm` arrives as **bar** and `kV` as **V**, and those are relabels rather than conversions.
+
 ### Channel names
 
 **Underscores become spaces.** A DBC signal name has to be a C identifier, so an author who means "Engine Speed" is obliged to write `Engine_Speed` — the underscore is the file format's limitation, not part of the name, and channels in this application are spelled with spaces. Runs of underscores collapse to one space and the ends are trimmed, so `Engine__Speed` imports as "Engine Speed" and `_Rpm` as "Rpm". It is a starting point, not a rule: the name column is editable, so type the underscore back if you want it.

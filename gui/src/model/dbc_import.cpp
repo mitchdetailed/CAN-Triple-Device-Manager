@@ -1,6 +1,7 @@
 #include "dbc_import.h"
 
 #include <QHash>
+#include <QPair>
 #include <QRegularExpression>
 
 #include <algorithm>
@@ -341,8 +342,14 @@ Channel channelFromDbcSignal(const DbcSignal &sig, const QString &channelName)
 {
     Channel c;
     c.name = channelName;
-    c.unit = sig.unit;
-    c.quantity = quantityForUnit(sig.unit);
+    // The catalogue's spelling, not the DBC's. Importing "degC" verbatim gave
+    // channels a unit no list offers, which then matched no other channel and
+    // had to be retyped; dbcUnitFor answers with a unit the app actually has.
+    // The import dialog overwrites both from its own columns anyway - this is
+    // the answer for any caller that does not.
+    const DbcUnit picked = dbcUnitFor(sig.unit);
+    c.unit = picked.unit;
+    c.quantity = picked.quantity;
     c.decimalPlaces = decimalsForFactor(sig.factor);
     c.baseResolution = std::pow(10.0, -c.decimalPlaces);
 
@@ -444,49 +451,117 @@ bool muxSelectorForValue(const DbcSignal &mux, int value, int *byteOffset, quint
 
 // -------------------------------------------------------- unit -> quantity
 
+// Every DBC spelling this import knows, and what it is in the catalogue's terms.
+//
+// The value is (quantity, unit) rather than just the quantity, which is the
+// whole change: knowing "degC" is a Temperature was never enough, because the
+// channel still ended up carrying the string "degC" that no unit list offers.
+// The second half says which of Temperature's units it IS.
+//
+// Where the DBC's own spelling is already the catalogue's, the pair simply
+// repeats it - "psi" and "bar" and "rpm" are the same word in both - and those
+// rows are here rather than special-cased so that one table answers the whole
+// question.
+static const QHash<QString, QPair<QString, QString>> &dbcUnitTable()
+{
+    static const QHash<QString, QPair<QString, QString>> map = {
+        {"c", {"Temperature", "C"}},       {"°c", {"Temperature", "C"}},
+        {"degc", {"Temperature", "C"}},    {"celsius", {"Temperature", "C"}},
+        {"f", {"Temperature", "F"}},       {"°f", {"Temperature", "F"}},
+        {"degf", {"Temperature", "F"}},    {"k", {"Temperature", "K"}},
+        {"kelvin", {"Temperature", "K"}},
+        {"kpa", {"Pressure and Stress", "kPa"}},  {"pa", {"Pressure and Stress", "Pa"}},
+        {"mpa", {"Pressure and Stress", "MPa"}},  {"bar", {"Pressure and Stress", "bar"}},
+        {"mbar", {"Pressure and Stress", "mbar"}}, {"psi", {"Pressure and Stress", "psi"}},
+        // hPa and atm have no catalogue unit; mbar is hPa exactly, and atm is
+        // named as bar because that is the nearest thing offered. Both are
+        // marked ADJUSTED below rather than silently accepted, because the
+        // NUMBERS do not convert - only the label changes, and a user who meant
+        // atmospheres needs to see that and decide.
+        {"hpa", {"Pressure and Stress", "mbar"}}, {"atm", {"Pressure and Stress", "bar"}},
+        {"inhg", {"Pressure and Stress", "inHg"}},
+        {"mmhg", {"Pressure and Stress", "mmHg"}},
+        {"km/h", {"Speed", "km/h"}}, {"kph", {"Speed", "km/h"}}, {"kmh", {"Speed", "km/h"}},
+        {"mph", {"Speed", "mile/h"}}, {"mi/h", {"Speed", "mile/h"}},
+        {"m/s", {"Speed", "m/s"}}, {"knots", {"Speed", "knots"}}, {"kn", {"Speed", "knots"}},
+        {"rpm", {"Rotational Speed", "rpm"}}, {"1/min", {"Rotational Speed", "rpm"}},
+        {"rev/min", {"Rotational Speed", "rpm"}}, {"min-1", {"Rotational Speed", "rpm"}},
+        {"v", {"Voltage", "V"}}, {"mv", {"Voltage", "mV"}}, {"volt", {"Voltage", "V"}},
+        {"volts", {"Voltage", "V"}},
+        // kV has no catalogue unit; V is the nearest, and it is a 1000x
+        // relabel, so it is ADJUSTED rather than accepted.
+        {"kv", {"Voltage", "V"}},
+        {"a", {"Current", "A"}}, {"ma", {"Current", "mA"}}, {"amp", {"Current", "A"}},
+        {"amps", {"Current", "A"}},
+        {"deg", {"Angle", "deg"}}, {"°", {"Angle", "deg"}},
+        {"degree", {"Angle", "deg"}}, {"degrees", {"Angle", "deg"}},
+        {"rad", {"Angle", "rad"}}, {"radians", {"Angle", "rad"}},
+        {"nm", {"Torque", "Nm"}}, {"n.m", {"Torque", "Nm"}},
+        {"ftlb", {"Torque", "ftlb"}}, {"lbft", {"Torque", "ftlb"}},
+        {"w", {"Power", "W"}}, {"kw", {"Power", "kW"}}, {"hp", {"Power", "hp"}},
+        {"watt", {"Power", "W"}},
+        // PS (metric horsepower) is not hp, but hp is what is offered.
+        {"ps", {"Power", "hp"}},
+        {"%", {"Ratio", "%"}}, {"percent", {"Ratio", "%"}}, {"ratio", {"Ratio", "Ratio"}},
+        {"s", {"Time", "s"}}, {"sec", {"Time", "s"}}, {"secs", {"Time", "s"}},
+        {"ms", {"Time", "ms"}}, {"us", {"Time", "us"}}, {"µs", {"Time", "us"}},
+        {"min", {"Time", "min"}}, {"h", {"Time", "h"}}, {"hr", {"Time", "h"}},
+        {"hour", {"Time", "h"}},
+        {"kg", {"Weight & Force", "kg"}}, {"g", {"Weight & Force", "g"}},
+        {"mg", {"Weight & Force", "mg"}}, {"t", {"Weight & Force", "t"}},
+        {"n", {"Weight & Force", "N"}}, {"lb", {"Weight & Force", "lb"}},
+        {"lbs", {"Weight & Force", "lb"}}, {"oz", {"Weight & Force", "oz"}},
+        {"newton", {"Weight & Force", "N"}},
+        {"l", {"Volume", "l"}}, {"ml", {"Volume", "ml"}}, {"cc", {"Volume", "cc"}},
+        {"cm3", {"Volume", "cc"}}, {"gal", {"Volume", "USgal"}},
+        {"gallon", {"Volume", "USgal"}},
+        {"l/h", {"Volume Flow", "l/h"}}, {"l/min", {"Volume Flow", "l/min"}},
+        {"l/s", {"Volume Flow", "l/s"}}, {"cc/min", {"Volume Flow", "cc/min"}},
+        {"cc/s", {"Volume Flow", "cc/s"}},
+        {"g/s", {"Mass Flow", "g/s"}}, {"kg/h", {"Mass Flow", "kg/h"}},
+        {"kg/s", {"Mass Flow", "kg/s"}}, {"g/min", {"Mass Flow", "g/min"}},
+        {"lb/h", {"Mass Flow", "lb/h"}},
+        {"ohm", {"Resistance", "ohm"}}, {"ohms", {"Resistance", "ohm"}},
+        {"kohm", {"Resistance", "kohm"}},
+        {"lambda", {"Air Fuel Ratio", "LA"}}, {"afr", {"Air Fuel Ratio", "A/F"}},
+        {"a/f", {"Air Fuel Ratio", "A/F"}},
+        {"m/s2", {"Acceleration", "m/s/s"}}, {"m/s^2", {"Acceleration", "m/s/s"}},
+        {"m/s²", {"Acceleration", "m/s/s"}}, {"g/s/s", {"Acceleration", "m/s/s"}},
+    };
+    return map;
+}
+
+DbcUnit dbcUnitFor(const QString &rawUnit)
+{
+    DbcUnit out;
+    const QString key = rawUnit.trimmed().toLower();
+    if (key.isEmpty()) {
+        // No unit is not an unrecognised unit. A DBC signal with "" really is
+        // unitless, and flagging every one of them would bury the handful that
+        // need a decision under the many that do not.
+        out.quantity = QStringLiteral("Unitless");
+        out.unit = QString();
+        return out;
+    }
+    const auto it = dbcUnitTable().constFind(key);
+    if (it != dbcUnitTable().constEnd()) {
+        out.quantity = it->first;
+        out.unit = it->second;
+        return out;
+    }
+    // Unplaceable. Unitless with the flag up, so the row is marked in the
+    // import panel and the user picks - which is the only honest answer, since
+    // a wrong guess here becomes a channel whose unit says something untrue
+    // about its numbers.
+    out.quantity = QStringLiteral("Unitless");
+    out.unit = QString();
+    out.recognised = false;
+    return out;
+}
+
 QString quantityForUnit(const QString &unit)
 {
-    static const QHash<QString, QString> map = {
-        {"c", "Temperature"},      {"°c", "Temperature"},   {"degc", "Temperature"},
-        {"celsius", "Temperature"},{"f", "Temperature"},    {"°f", "Temperature"},
-        {"degf", "Temperature"},   {"k", "Temperature"},    {"kelvin", "Temperature"},
-        {"kpa", "Pressure and Stress"}, {"pa", "Pressure and Stress"},
-        {"mpa", "Pressure and Stress"}, {"bar", "Pressure and Stress"},
-        {"mbar", "Pressure and Stress"}, {"psi", "Pressure and Stress"},
-        {"hpa", "Pressure and Stress"}, {"inhg", "Pressure and Stress"},
-        {"mmhg", "Pressure and Stress"}, {"atm", "Pressure and Stress"},
-        {"km/h", "Speed"}, {"kph", "Speed"}, {"kmh", "Speed"}, {"mph", "Speed"},
-        {"mi/h", "Speed"}, {"m/s", "Speed"}, {"knots", "Speed"}, {"kn", "Speed"},
-        {"rpm", "Rotational Speed"}, {"1/min", "Rotational Speed"},
-        {"rev/min", "Rotational Speed"}, {"min-1", "Rotational Speed"},
-        {"v", "Voltage"}, {"mv", "Voltage"}, {"kv", "Voltage"}, {"volt", "Voltage"},
-        {"volts", "Voltage"},
-        {"a", "Current"}, {"ma", "Current"}, {"amp", "Current"}, {"amps", "Current"},
-        {"deg", "Angle"}, {"°", "Angle"}, {"degree", "Angle"}, {"degrees", "Angle"},
-        {"rad", "Angle"}, {"radians", "Angle"},
-        {"nm", "Torque"}, {"n.m", "Torque"}, {"ftlb", "Torque"}, {"lbft", "Torque"},
-        {"w", "Power"}, {"kw", "Power"}, {"hp", "Power"}, {"ps", "Power"}, {"watt", "Power"},
-        {"%", "Ratio"}, {"percent", "Ratio"}, {"ratio", "Ratio"},
-        {"s", "Time"}, {"sec", "Time"}, {"secs", "Time"}, {"ms", "Time"}, {"us", "Time"},
-        {"µs", "Time"}, {"min", "Time"}, {"h", "Time"}, {"hr", "Time"}, {"hour", "Time"},
-        {"kg", "Weight & Force"}, {"g", "Weight & Force"}, {"mg", "Weight & Force"},
-        {"t", "Weight & Force"}, {"n", "Weight & Force"}, {"lb", "Weight & Force"},
-        {"lbs", "Weight & Force"}, {"oz", "Weight & Force"}, {"newton", "Weight & Force"},
-        {"l", "Volume"}, {"ml", "Volume"}, {"cc", "Volume"}, {"cm3", "Volume"},
-        {"gal", "Volume"}, {"gallon", "Volume"},
-        {"l/h", "Volume Flow"}, {"l/min", "Volume Flow"}, {"l/s", "Volume Flow"},
-        {"cc/min", "Volume Flow"}, {"cc/s", "Volume Flow"},
-        {"g/s", "Mass Flow"}, {"kg/h", "Mass Flow"}, {"kg/s", "Mass Flow"},
-        {"g/min", "Mass Flow"}, {"lb/h", "Mass Flow"},
-        {"ohm", "Resistance"}, {"ohms", "Resistance"}, {"kohm", "Resistance"},
-        {"lambda", "Air Fuel Ratio"}, {"afr", "Air Fuel Ratio"}, {"a/f", "Air Fuel Ratio"},
-        {"g/s/s", "Acceleration"}, {"m/s2", "Acceleration"}, {"m/s^2", "Acceleration"},
-        {"m/s²", "Acceleration"},
-    };
-    const QString key = unit.trimmed().toLower();
-    if (key.isEmpty())
-        return QStringLiteral("Unitless");
-    return map.value(key, QStringLiteral("Unitless"));
+    return dbcUnitFor(unit).quantity;
 }
 
 } // namespace ct

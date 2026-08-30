@@ -18,6 +18,7 @@
 #include "../model/channel_catalog.h"
 #include "../protocol/wire_structs.h"
 #include "channel_field.h"
+#include "name_limits.h"
 #include "trimmed_spin_box.h"
 
 namespace ct {
@@ -86,7 +87,9 @@ EditChannelDialog::EditChannelDialog(Configuration *config, const Channel &initi
     // The device label holds MAX_CHANNEL_NAME_BYTES characters; cap typing here
     // so the limit is felt rather than reported. validate() still checks the
     // UTF-8 byte count, which a non-ASCII name can exceed within this cap.
-    m_nameEdit->setMaxLength(MAX_CHANNEL_NAME_BYTES);
+    // BYTES, not characters: setMaxLength counts QChars, and the two part
+    // company the moment a name is not ASCII. See name_limits.h.
+    ct::limitToUtf8Bytes(m_nameEdit, MAX_CHANNEL_NAME_BYTES);
     m_nameEdit->setToolTip(tr("Up to %1 characters — the device stores a %2-byte label.")
                                .arg(MAX_CHANNEL_NAME_BYTES).arg(SIGNAL_LABEL_LEN));
     nameForm->addRow(tr("Channel Name:"), m_nameEdit);

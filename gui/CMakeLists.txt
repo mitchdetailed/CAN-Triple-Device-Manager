@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.1.10 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.1.11 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -1015,6 +1015,42 @@ qt_add_executable(test_add_channel_preview
 )
 target_include_directories(test_add_channel_preview PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_add_channel_preview PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
+    ct_device_core) # device_mapper.cpp - see test_roundtrip
+
+# Name fields cannot hold more than the device stores.
+#
+# The budget is a BYTE count and QLineEdit::setMaxLength counts QChars. For an
+# ASCII name the two agree, which is why the gap stayed invisible - the channel
+# fields were capped at 31 "characters" against a 31-BYTE label and every name
+# anyone typed fitted both. One non-ASCII character is 2-4 bytes, so a
+# 21-character German name is 22 bytes: over budget, clipped by the mapper, and
+# returned by a Get as a different name than the one on screen. The message name
+# field (17 bytes, store v18) had no cap at all.
+qt_add_executable(test_name_limits
+    test/test_name_limits.cpp
+    src/ui/section_editor_dialog.cpp
+    src/ui/edit_channel_dialog.cpp
+    src/ui/constants_dialog.cpp
+    src/ui/add_channel_dialog.cpp
+    src/ui/select_channel_dialog.cpp
+    src/ui/bit_layout_table.cpp
+    src/ui/numeric_grid.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_name_limits PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_name_limits PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
     ct_device_core) # device_mapper.cpp - see test_roundtrip
 
 # What a DBC signal is imported as: underscores become spaces.

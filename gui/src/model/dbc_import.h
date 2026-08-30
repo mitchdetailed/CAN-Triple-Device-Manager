@@ -124,6 +124,26 @@ bool muxSelectorForValue(const DbcSignal &multiplexor, int value, int *byteOffse
 
 // Best-effort Channel Type (quantity) guess from a DBC unit string; "Unitless"
 // when unknown. The user can override it in the import dialog.
+// What a DBC's unit string means in this application's terms.
+//
+// A .dbc writes its unit as free text and every tool spells it differently:
+// "degC", "Deg C", "\u00b0C" and "Celsius" are one unit, and NONE of them is how the
+// channel catalogue spells it ("C"). Importing the DBC's text verbatim gave
+// channels units the app does not offer, which then could not be picked from
+// any list, matched no other channel, and had to be retyped by hand.
+//
+// `quantity` and `unit` are always things the catalogue offers, so an imported
+// channel is indistinguishable from a hand-made one. `recognised` is false when
+// the unit was not empty and nothing matched it: the import cannot know what
+// "Nm/deg" is, so it says so and lets the user choose rather than inventing an
+// answer.
+struct DbcUnit {
+    QString quantity;   // a ChannelCatalog::quantities() entry
+    QString unit;       // one of ChannelCatalog::unitsForQuantity(quantity)
+    bool recognised = true; // false: the DBC said something we could not place
+};
+DbcUnit dbcUnitFor(const QString &rawUnit);
+
 QString quantityForUnit(const QString &unit);
 
 } // namespace ct

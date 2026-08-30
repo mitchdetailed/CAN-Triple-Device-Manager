@@ -57,6 +57,34 @@ never allowed to clobber existing channels.</p>
 "Imported N message(s) with M note(s)" — the full list is under
 <b>Show Details</b>.</p>
 
+<h3>Units</h3>
+
+<p>A <code>.dbc</code> writes its unit as free text, and every tool spells it
+differently: <code>degC</code>, <code>°C</code> and <code>Celsius</code> are one
+unit, and none of them is how this application spells it (<b>C</b>). The import
+translates, so <code>kph</code> arrives as <b>km/h</b> and <code>1/min</code> as
+<b>rpm</b> — an imported channel ends up indistinguishable from one you made by
+hand, and its unit can be picked from the same lists everywhere else.</p>
+
+<p><b>Both columns are yours to change before importing.</b> <b>Channel Type</b>
+chooses the quantity, and <b>Unit</b> offers exactly the units that quantity
+has. Changing the type resets the unit to that type's default, because a
+Pressure channel measured in rpm is not something the application can express.</p>
+
+<p><b>A unit nothing matches is flagged, not guessed.</b> If the file says
+something this application has no equivalent for, the Unit cell reads
+<b>(pick one)</b> in the warning colour and its tooltip quotes what the file
+actually said. Set the Channel Type, then pick a unit — or leave it, and the
+channel imports unitless, which the import notes list at the end.</p>
+
+<p class="note"><b>Nothing converts the numbers.</b> The unit is a label on the
+value the scaling already produces. If a signal arrives in psi and you pick
+kPa, the readings are still psi — change the <b>Bit Resolution</b> instead, which
+is what actually scales them. This matters most where the translation is not
+exact: <code>hPa</code> imports as <b>mbar</b> (identical), but <code>atm</code>
+arrives as <b>bar</b> and <code>kV</code> as <b>V</b>, and those are relabels
+rather than conversions.</p>
+
 <h3>Channel names</h3>
 
 <p><b>Underscores become spaces.</b> A DBC signal name has to be a C identifier,

@@ -19,6 +19,7 @@
 #include "../model/channel_catalog.h"
 #include "../model/configuration.h"
 #include "../protocol/wire_structs.h"
+#include "name_limits.h"
 
 namespace ct {
 
@@ -27,6 +28,11 @@ namespace {
 enum {
     RoleMsgIdx = Qt::UserRole + 1,
     RoleSigIdx = Qt::UserRole + 2, // -1 on message rows
+    // The unit string the FILE said, kept beside the one being imported. The
+    // two differ whenever the DBC spelled a unit the catalogue does not offer,
+    // and the original is what the warning has to quote - "degC" means nothing
+    // to the user if the dialog has already replaced it with "C".
+    RoleRawUnit = Qt::UserRole + 3,
 };
 
 // Column 1 editor: a combo of Channel Type (quantity) values, but only on
@@ -60,6 +66,67 @@ public:
     }
 };
 
+// A signal whose DBC unit this import could not place. Marked rather than
+// guessed at, and marked on the UNIT cell because that is the one to fix.
+void markUnknownUnit(QTreeWidgetItem *item, const QString &rawUnit)
+{
+    const QColor warn = item->treeWidget()
+                            && item->treeWidget()->palette().color(QPalette::Base).lightness() < 128
+                        ? QColor(0xFF, 0xA1, 0x78)
+                        : QColor(0xC0, 0x30, 0x00);
+    item->setForeground(3, warn);
+    item->setText(3, QObject::tr("(pick one)"));
+    const QString tip =
+        QObject::tr("The file says the unit is \"%1\", which is not one this application "
+                    "offers. Set the Channel Type, then pick a unit here - or leave it "
+                    "unitless. Nothing converts the NUMBERS, so choose the unit the raw "
+                    "values are already in.")
+            .arg(rawUnit);
+    item->setToolTip(3, tip);
+    item->setToolTip(1, tip);
+}
+
+// Column 3 editor: the UNIT, as a combo of what the catalogue offers for the
+// Channel Type in column 1 - so an imported channel ends up with a unit the app
+// actually has, and is indistinguishable from a hand-made one.
+//
+// It was a ReadOnlyDelegate, which is what made an unmapped unit a dead end: a
+// DBC saying "Nm/deg" imported a channel whose unit no list contained, the
+// column showed it, and there was no way to correct it without leaving the
+// import and editing the channel afterwards.
+//
+// The list is rebuilt per edit rather than cached because column 1 is editable
+// too: change the Channel Type and the units that make sense change with it.
+class UnitDelegate : public QStyledItemDelegate
+{
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    QWidget *createEditor(QWidget *parent, const QStyleOptionViewItem &,
+                          const QModelIndex &index) const override
+    {
+        const QModelIndex c0 = index.model()->index(index.row(), 0, index.parent());
+        if (c0.data(RoleSigIdx).toInt() < 0)
+            return nullptr; // message row
+        const QModelIndex c1 = index.model()->index(index.row(), 1, index.parent());
+        auto *combo = new QComboBox(parent);
+        combo->addItems(ChannelCatalog::unitsForQuantity(c1.data(Qt::EditRole).toString()));
+        return combo;
+    }
+    void setEditorData(QWidget *editor, const QModelIndex &index) const override
+    {
+        if (auto *combo = qobject_cast<QComboBox *>(editor)) {
+            const int i = combo->findText(index.data(Qt::EditRole).toString());
+            combo->setCurrentIndex(i >= 0 ? i : 0);
+        }
+    }
+    void setModelData(QWidget *editor, QAbstractItemModel *model,
+                      const QModelIndex &index) const override
+    {
+        if (auto *combo = qobject_cast<QComboBox *>(editor))
+            model->setData(index, combo->currentText(), Qt::EditRole);
+    }
+};
+
 // Column 0 editor: the imported channel name, capped to what fits the device
 // label. Only signal rows are editable, so this never sees a message row (whose
 // name becomes a host-side section name and has no device-side limit).
@@ -71,8 +138,10 @@ public:
                           const QModelIndex &index) const override
     {
         QWidget *editor = QStyledItemDelegate::createEditor(parent, option, index);
+        // BYTES, not characters - setMaxLength counts QChars and the label
+        // budget is UTF-8 bytes. See name_limits.h.
         if (auto *line = qobject_cast<QLineEdit *>(editor))
-            line->setMaxLength(MAX_CHANNEL_NAME_BYTES);
+            ct::limitToUtf8Bytes(line, MAX_CHANNEL_NAME_BYTES);
         return editor;
     }
 };
@@ -154,7 +223,7 @@ ImportDbcDialog::ImportDbcDialog(Configuration *config, const DbcFile &dbc,
     m_tree->setItemDelegateForColumn(0, new ChannelNameDelegate(m_tree));
     m_tree->setItemDelegateForColumn(1, new QuantityDelegate(m_tree));
     m_tree->setItemDelegateForColumn(2, new ReadOnlyDelegate(m_tree));
-    m_tree->setItemDelegateForColumn(3, new ReadOnlyDelegate(m_tree));
+    m_tree->setItemDelegateForColumn(3, new UnitDelegate(m_tree));
     m_tree->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
     m_tree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
     m_tree->setColumnWidth(0, 240);
@@ -228,9 +297,22 @@ void ImportDbcDialog::buildTree()
             // accept() either, which would import a name different from the
             // one shown in this column.
             sItem->setText(0, channelNameFromDbcSignal(sig.name));
-            sItem->setText(1, quantityForUnit(sig.unit));
+            // THE CATALOGUE'S SPELLING, not the file's. A .dbc writes its unit
+            // as free text - "degC", "Deg C", "Celsius" are one unit and none
+            // of them is how this application spells it - so importing the
+            // string verbatim produced channels whose unit no list offered.
+            const DbcUnit picked = dbcUnitFor(sig.unit);
+            sItem->setText(1, picked.quantity);
             sItem->setText(2, signalDetails(sig));
-            sItem->setText(3, sig.unit);
+            sItem->setText(3, picked.unit);
+            sItem->setData(0, RoleRawUnit, sig.unit);
+            if (!picked.recognised) {
+                // Nothing matched, so the import does not guess. The row is
+                // marked, both columns are editable, and the note at OK counts
+                // whatever is still unresolved - the alternative is a channel
+                // carrying a unit that says something untrue about its numbers.
+                markUnknownUnit(sItem, sig.unit);
+            }
             sItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable
                             | Qt::ItemIsEditable);
             sItem->setCheckState(0, Qt::Unchecked);
@@ -262,7 +344,34 @@ void ImportDbcDialog::applyFilter()
 
 void ImportDbcDialog::onItemChanged(QTreeWidgetItem *item, int column)
 {
-    if (m_updating || column != 0)
+    if (m_updating)
+        return;
+    // CHANNEL TYPE MOVED: the unit beside it may no longer be one of that
+    // type's, and a Pressure channel measured in "rpm" is not a thing the
+    // catalogue can express. Snap it to the new type's default rather than
+    // leaving a pair that cannot both be true.
+    if (column == 1 && item->data(0, RoleSigIdx).toInt() >= 0) {
+        const QStringList allowed = ChannelCatalog::unitsForQuantity(item->text(1));
+        if (!allowed.contains(item->text(3))) {
+            m_updating = true;
+            item->setText(3, ChannelCatalog::defaultUnitForQuantity(item->text(1)));
+            // Whatever the file said is answered for now, so the mark comes off
+            // and the row stops counting as unresolved.
+            item->setForeground(3, QBrush());
+            item->setToolTip(3, QString());
+            item->setToolTip(1, QString());
+            m_updating = false;
+        }
+        return;
+    }
+    if (column == 3 && item->data(0, RoleSigIdx).toInt() >= 0) {
+        // A unit chosen by hand clears the mark for the same reason.
+        item->setForeground(3, QBrush());
+        item->setToolTip(3, QString());
+        item->setToolTip(1, QString());
+        return;
+    }
+    if (column != 0)
         return;
     m_updating = true;
     if (item->data(0, RoleSigIdx).toInt() < 0) {
@@ -413,6 +522,19 @@ void ImportDbcDialog::accept()
             const QString unique = uniqueName(importName);
             Channel ch = channelFromDbcSignal(sig, unique);
             ch.quantity = sItem->text(1); // the (possibly edited) Channel Type
+            // AND THE UNIT, which this column used to show and then discard:
+            // the channel took the DBC's raw string from channelFromDbcSignal
+            // whatever the user picked here. "(pick one)" means they were asked
+            // and did not, so the channel is unitless rather than carrying a
+            // placeholder as its unit.
+            const QString chosenUnit = sItem->text(3);
+            ch.unit = chosenUnit == tr("(pick one)") ? QString() : chosenUnit;
+            if (chosenUnit == tr("(pick one)")) {
+                warns.append(tr("%1 . %2: the file's unit \"%3\" is not one this application "
+                                "offers and none was picked, so the channel is unitless")
+                                 .arg(msg.name, sig.name,
+                                      sItem->data(0, RoleRawUnit).toString()));
+            }
             newChannels.append(ch);
             *rowOut = rowFromDbcSignal(sig, unique);
             return true;
