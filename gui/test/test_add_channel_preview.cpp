@@ -65,7 +65,7 @@ void buildConfig(Configuration &config, const QString &dataType, double lo = -1e
 // line back off the label. Everything goes through the real controls so the
 // answer is the one on screen.
 QString previewFor(Configuration &config, int startBit, int bitLength, DbcType type,
-                   double factor, double offset, bool clamp)
+                   double factor, double offset, bool clamp, bool transmit = true)
 {
     CommsChannelRow initial;
     initial.channelName = QStringLiteral("Signal");
@@ -76,8 +76,7 @@ QString previewFor(Configuration &config, int startBit, int bitLength, DbcType t
     initial.dbcOffset = offset;
     initial.clampToRange = clamp;
 
-    AddChannelDialog dialog(&config, initial, SectionAlignment::WordSwap, 8,
-                            /*transmit=*/true);
+    AddChannelDialog dialog(&config, initial, SectionAlignment::WordSwap, 8, transmit);
 
     // Set through the widgets rather than trusting the constructor, so the
     // recompute path a user triggers is the one under test.
@@ -89,11 +88,13 @@ QString previewFor(Configuration &config, int startBit, int bitLength, DbcType t
     if (QCheckBox *box = dialog.findChild<QCheckBox *>())
         box->setChecked(clamp);
 
-    // Anchored on the line EVERY preview starts with, not on "bits hold":
-    // the non-overlapping case is a different sentence, and a helper that could
-    // not see it would have reported an empty string as a passing test.
+    // Anchored on the one word both forms of the headline share. It was
+    // "Physical = raw", which is the RECEIVE form - once the transmit row
+    // started stating its own mapping ("raw = (Physical + o) / f") that string
+    // stopped appearing on the very rows this suite drives, and every case
+    // silently read an empty label.
     for (QLabel *label : dialog.findChildren<QLabel *>())
-        if (label->text().contains(QStringLiteral("Physical = raw")))
+        if (label->text().contains(QStringLiteral("Physical")))
             return label->text();
     return {};
 }
@@ -107,6 +108,32 @@ QString rangeIn(const QString &preview)
     const QString tail = preview.mid(at + 10);
     const int dash = tail.indexOf(QStringLiteral(" — "));
     return dash < 0 ? tail.trimmed() : tail.left(dash).trimmed();
+}
+
+void testTheHeadlineStatesThisRowsOwnMapping()
+{
+    // The line above the range used to print the RECEIVE formula on both kinds
+    // of row, so a transmit row was shown one rule and, two lines down, a range
+    // computed from a different one. The two contradicted each other and the
+    // wrong one looked like the answer - which is how a reported offset of 12
+    // at resolution 0.001 came to be read as +12 when the device would apply
+    // 0.012 of it.
+    Configuration config;
+    buildConfig(config, QStringLiteral("u16"));
+
+    const QString tx = previewFor(config, 0, 16, DbcType::Unsigned, 0.001, 12.0, true, true);
+    REQUIRE(!tx.isEmpty());
+    std::printf("  transmit headline              : %s\n",
+                qPrintable(tx.section(QLatin1Char('\n'), 0, 0)));
+    CHECK(tx.contains(QStringLiteral("raw = (Physical")));
+    CHECK(!tx.contains(QStringLiteral("Physical = raw")));
+
+    const QString rx = previewFor(config, 0, 16, DbcType::Unsigned, 0.001, 12.0, true, false);
+    REQUIRE(!rx.isEmpty());
+    std::printf("  receive headline               : %s\n",
+                qPrintable(rx.section(QLatin1Char('\n'), 0, 0)));
+    CHECK(rx.contains(QStringLiteral("Physical = raw")));
+    CHECK(!rx.contains(QStringLiteral("raw = (Physical")));
 }
 
 void testTheReportedCase()
@@ -161,6 +188,14 @@ void testScalingMovesTheEndsButNotTheirOrder()
     const QString shifted = rangeIn(previewFor(config, 0, 8, DbcType::Unsigned, 1.0, 10.0, true));
     std::printf("  8-bit unsigned, offset 10      : %s\n", qPrintable(shifted));
     CHECK(shifted == QStringLiteral("-10 to 245"));
+
+    // THE CASE THAT SEPARATES THE TWO RULES, and the reporter's own numbers:
+    // 16 bits, resolution 0.001, offset 12. The offset is in channel units, so
+    // the ends are raw * 0.001 - 12. Under the old raw-count rule the same row
+    // read -0.012 to 65.523, which is what sent them looking.
+    const QString milli = rangeIn(previewFor(config, 0, 16, DbcType::Unsigned, 0.001, 12.0, true));
+    std::printf("  16-bit, 0.001, offset 12       : %s\n", qPrintable(milli));
+    CHECK(milli == QStringLiteral("-12 to 53.535"));
 
     // A NEGATIVE factor flips which end is which; the line must still read
     // low-to-high rather than printing them in field order.
@@ -246,6 +281,7 @@ int main(int argc, char **argv)
     QApplication app(argc, argv);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
+    testTheHeadlineStatesThisRowsOwnMapping();
     testTheReportedCase();
     testSignedIsTheOtherHalf();
     testTheChannelTypeNeverChangesTheAnswer();

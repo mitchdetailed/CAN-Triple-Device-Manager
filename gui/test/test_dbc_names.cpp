@@ -25,6 +25,7 @@
 #include <cstdio>
 
 #include "../src/model/channel_catalog.h"
+#include "../src/model/frame_layout.h"
 #include "../src/model/configuration.h"
 #include "../src/model/dbc_import.h"
 #include "../src/ui/import_dbc_dialog.h"
@@ -385,6 +386,184 @@ void testTheImportedChannelCarriesTheChosenUnit()
     CHECK(strange.unit.isEmpty());
 }
 
+
+// -------------------------------------------------------------- multiplexing
+
+// THE MULTIPLEXOR IS NOT A CHANNEL.
+//
+// A multiplexed DBC message imports as a COMPOUND section: each multiplexor
+// value becomes an identifier, and the identifier's selector is the multiplexor
+// signal's own bits. Importing that signal as a channel row as well put a
+// channel exactly on top of the selector - and the device writes the selector
+// into the frame AFTER the channels, so the channel does not share those bits,
+// it is replaced by them. The section editor refuses to save it.
+//
+// Which is what made this a bad shape rather than merely a wasted row: the
+// import succeeded, and the complaint arrived later, from the editor, about a
+// row the user never chose to put anywhere.
+const char *const kMuxDbc = R"DBC(VERSION "unit-test"
+
+BO_ 512 MuxMsg: 8 ECU
+ SG_ Selector M : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ Common_Value : 48|16@1+ (1,0) [0|65535] "" Vector__XXX
+ SG_ Val_A m0 : 8|16@1+ (1,0) [0|65535] "" Vector__XXX
+ SG_ Val_B m1 : 8|16@1+ (1,0) [0|65535] "" Vector__XXX
+)DBC";
+
+void testTheMultiplexorIsNotOfferedAsAChannel()
+{
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kMuxDbc), &warnings);
+    Configuration config;
+    config.clear();
+    ImportDbcDialog dialog(&config, file, QStringLiteral("mux.dbc"), 0, {});
+    auto *tree = dialog.findChild<QTreeWidget *>();
+    REQUIRE(tree != nullptr);
+    REQUIRE(tree->topLevelItemCount() == 1);
+    QTreeWidgetItem *msg = tree->topLevelItem(0);
+    REQUIRE(msg->childCount() == 4);
+
+    // Still SHOWN - the row is how a reader sees which signal picks the variant
+    // - but with no checkbox, and the Details column says what becomes of it.
+    QTreeWidgetItem *selector = nullptr;
+    for (int i = 0; i < msg->childCount(); ++i)
+        if (msg->child(i)->text(0) == QStringLiteral("Selector"))
+            selector = msg->child(i);
+    REQUIRE(selector != nullptr);
+    std::printf("  multiplexor row              : checkable=%d  %s\n",
+                int(bool(selector->flags() & Qt::ItemIsUserCheckable)),
+                qPrintable(selector->text(2)));
+    CHECK(!(selector->flags() & Qt::ItemIsUserCheckable));
+    CHECK(selector->text(2).contains(QStringLiteral("identifier")));
+
+    // Every other signal is offered as usual.
+    for (int i = 0; i < msg->childCount(); ++i) {
+        if (msg->child(i) == selector)
+            continue;
+        CHECK(msg->child(i)->flags() & Qt::ItemIsUserCheckable);
+    }
+}
+
+void testTheImportedCompoundSectionHasNoBlockingClash()
+{
+    // THE SYMPTOM, end to end. Import everything the panel offers, then ask
+    // frame_layout the same question the section editor asks when OK is
+    // pressed. It used to answer "the identifier writes its selector over
+    // channel Selector".
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kMuxDbc), &warnings);
+    Configuration config;
+    config.clear();
+    const QList<CommsSection> sections = importAll(config, file, nullptr);
+    REQUIRE(sections.size() == 1);
+    const CommsSection &s = sections.first();
+    REQUIRE(s.compound);
+    REQUIRE(s.identifiers.size() == 2);
+
+    QStringList blocking;
+    for (const LayoutClash &clash : findLayoutClashes(s))
+        if (clash.blocking)
+            blocking << clash.message();
+    std::printf("  blocking clashes on import   : %d%s\n", int(blocking.size()),
+                blocking.isEmpty() ? "" : qPrintable(QStringLiteral("  ") + blocking.first()));
+    CHECK(blocking.isEmpty());
+
+    // And no channel called Selector was created at all.
+    CHECK(!config.catalog().findByName(QStringLiteral("Selector")).isValid());
+    for (const CompoundIdentifier &ident : s.identifiers)
+        for (const CommsChannelRow &row : ident.rows)
+            CHECK(row.channelName != QStringLiteral("Selector"));
+
+    // The signals that ARE channels came through: the common one replicated
+    // into each variant, and one muxed signal per identifier.
+    CHECK(config.catalog().findByName(QStringLiteral("Common Value")).isValid());
+    CHECK(config.catalog().findByName(QStringLiteral("Val A")).isValid());
+    CHECK(config.catalog().findByName(QStringLiteral("Val B")).isValid());
+}
+
+void testTheMessageRowStillReadsFullyChecked()
+{
+    // A consequence of taking the checkbox away, and one that would have been
+    // its own small annoyance: the parent tristate counted ALL children, so a
+    // multiplexed message could never reach Checked - every signal it offers
+    // ticked and the header still showing partial, for ever.
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kMuxDbc), &warnings);
+    Configuration config;
+    config.clear();
+    ImportDbcDialog dialog(&config, file, QStringLiteral("mux.dbc"), 0, {});
+    auto *tree = dialog.findChild<QTreeWidget *>();
+    REQUIRE(tree != nullptr);
+    QTreeWidgetItem *msg = tree->topLevelItem(0);
+    REQUIRE(msg != nullptr);
+
+    // Tick everything the panel actually offers, exactly as a user would.
+    for (int i = 0; i < msg->childCount(); ++i)
+        if (msg->child(i)->flags() & Qt::ItemIsUserCheckable)
+            msg->child(i)->setCheckState(0, Qt::Checked);
+    std::printf("  message row after ticking all: %s\n",
+                msg->checkState(0) == Qt::Checked      ? "Checked"
+                : msg->checkState(0) == Qt::PartiallyChecked ? "PartiallyChecked"
+                                                             : "Unchecked");
+    CHECK(msg->checkState(0) == Qt::Checked);
+}
+
+void testSelectAllLeavesTheMultiplexorAlone()
+{
+    // Select All walks every child and sets its state, and setCheckState writes
+    // the role whether the item is user-checkable or not - so without a guard
+    // the button puts a ticked checkbox back on the one row that must not have
+    // one.
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kMuxDbc), &warnings);
+    Configuration config;
+    config.clear();
+    ImportDbcDialog dialog(&config, file, QStringLiteral("mux.dbc"), 0, {});
+    auto *tree = dialog.findChild<QTreeWidget *>();
+    REQUIRE(tree != nullptr);
+    QPushButton *selectAll = nullptr;
+    for (QPushButton *b : dialog.findChildren<QPushButton *>())
+        if (b->text() == QStringLiteral("Select All"))
+            selectAll = b;
+    REQUIRE(selectAll != nullptr);
+    selectAll->click();
+
+    QTreeWidgetItem *msg = tree->topLevelItem(0);
+    REQUIRE(msg != nullptr);
+    int ticked = 0;
+    QTreeWidgetItem *selector = nullptr;
+    for (int i = 0; i < msg->childCount(); ++i) {
+        if (msg->child(i)->text(0) == QStringLiteral("Selector"))
+            selector = msg->child(i);
+        else if (msg->child(i)->checkState(0) == Qt::Checked)
+            ++ticked;
+    }
+    REQUIRE(selector != nullptr);
+    std::printf("  after Select All             : %d signals ticked, multiplexor %s\n",
+                ticked,
+                selector->checkState(0) == Qt::Checked ? "TICKED" : "left alone");
+    CHECK(ticked == 3);
+    CHECK(selector->checkState(0) != Qt::Checked);
+}
+
+void testAMessageWithNoMuxedSignalsPickedStaysPlain()
+{
+    // The other branch, and the reason the multiplexor is held back rather than
+    // dropped outright: with no multiplexed signal selected there is no
+    // identifier, nothing writes over those bits, and the multiplexor is an
+    // ordinary field the user may well want. This DBC has no multiplexing at
+    // all, which is that case in its simplest form - the signal is just a
+    // signal.
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kDbc), &warnings);
+    Configuration config;
+    config.clear();
+    const QList<CommsSection> sections = importAll(config, file, nullptr);
+    REQUIRE(sections.size() == 1);
+    CHECK(!sections.first().compound);
+    CHECK(sections.first().rows.size() == 3);
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -405,6 +584,11 @@ int main(int argc, char **argv)
     testAnUnplaceableUnitIsFlaggedRatherThanGuessed();
     testTheImportPanelOffersTheCatalogueUnit();
     testTheImportedChannelCarriesTheChosenUnit();
+    testTheMultiplexorIsNotOfferedAsAChannel();
+    testTheImportedCompoundSectionHasNoBlockingClash();
+    testTheMessageRowStillReadsFullyChecked();
+    testSelectAllLeavesTheMultiplexorAlone();
+    testAMessageWithNoMuxedSignalsPickedStaysPlain();
 
     if (fails == 0)
         std::printf("test_dbc_names: all checks passed\n");

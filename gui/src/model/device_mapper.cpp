@@ -657,7 +657,10 @@ MappingResult mapToDevice(const Configuration &config)
                     sigSetTxWrap(sig, !row.clampToRange);
                     sigSetBits(sig, fields.startBit, fields.bitLength, fields.valueType,
                                0 /* scaling is fully in factor/offset */, muxOffset);
-                    sig.factor = float(row.dbcFactor); // DBC scaling: physical = raw × factor + offset
+                    // Receive reads physical = raw x factor + offset; transmit
+                    // packs raw = (physical + offset) / factor. Both directions
+                    // ADD the offset, in channel units - see comms_types.h.
+                    sig.factor = float(row.dbcFactor);
                     sig.offset = float(row.dbcOffset);
                     sig.min_val = float(ch.isValid() ? ch.minValue : -1e9);
                     sig.max_val = float(ch.isValid() ? ch.maxValue : 1e9);
@@ -905,7 +908,9 @@ MappingResult mapToDevice(const Configuration &config)
                 sigSetTxWrap(sig, false);
                 // decimals 0: the scaling is fully expressed in factor/offset
                 sigSetBits(sig, fields.startBit, fields.bitLength, fields.valueType, 0, muxOffset);
-                sig.factor = float(row.dbcFactor); // DBC scaling: physical = raw × factor + offset
+                // See the transmit branch above: the offset adds in channel
+                // units in both directions.
+                sig.factor = float(row.dbcFactor);
                 sig.offset = float(row.dbcOffset);
                 sig.min_val = float(ch.isValid() ? ch.minValue : -1e9);
                 sig.max_val = float(ch.isValid() ? ch.maxValue : 1e9);

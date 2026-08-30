@@ -3420,7 +3420,10 @@ static void testTransmitOffsetAddsOnTheWayOut()
     const Field fields[4] = {
         {1.0f,  64.0f, true,   65},
         {1.0f, -64.0f, true,  -63},
-        {0.1f,  64.0f, true,   74},
+        // (1 + 64) / 0.1. Was 74 under the raw-count rule (1/0.1 + 64), and
+        // this is the single case in this table the two rules disagree about -
+        // the others all have a resolution of 1, where they coincide.
+        {0.1f,  64.0f, true,  650},
         {1.0f,  64.0f, false,  65},
     };
 
@@ -3464,6 +3467,82 @@ static void testTransmitOffsetAddsOnTheWayOut()
     // rather than only that one of four is.
     CHECK(tx.data[0] == 0x41 && tx.data[1] == 0x00); // offset  64 -> 0x0041
     CHECK(tx.data[2] == 0xC1 && tx.data[3] == 0xFF); // offset -64 -> 0xFFC1
+}
+
+// The transmit offset, in the reporter's own numbers.
+//
+// Two 8-bit unsigned fields, each fed its own value, spelling out the rule that
+// the offset is in CHANNEL UNITS and adds before the resolution divides:
+//
+//     value 0, resolution 0.1, offset 12  ->  (0 + 12) / 0.1  = 120 = 0x78
+//     value 5, resolution 0.1, offset -1  ->  (5 - 1) / 0.1   =  40 = 0x28
+//
+// Under the rule this replaced - offset as a bias in RAW COUNTS, added after
+// the divide - the same rows sent 12 and 49. That is the whole difference, and
+// at resolution 0.001 it was the difference between an offset of 12 moving a
+// value by 12 and by 0.012.
+static void testTransmitOffsetIsInChannelUnits()
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_clear_config();
+    g_txFrames.clear();
+
+    ct::CanMessageConfig msg{};
+    msg.can_id = 0x461;
+    msg.flags = ct::MSGFLAG_ACTIVE | ct::MSGFLAG_TRANSMIT;
+    msg.src_bus = 1;
+    msg.dlc = 8;
+    msg.period_ms = 10;
+    msg.tx_trigger_cond = ct::TX_TRIGGER_COND_NONE;
+    CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, 1,
+                             reinterpret_cast<const uint8_t *>(&msg)));
+
+    // Slots 0 and 1 are the fields; 2 and 3 hold the values they send, so the
+    // two cases can carry different numbers through one frame.
+    ct::CanSignalConfig sig[4]{};
+    const float res[2] = {0.1f, 0.1f};
+    const float off[2] = {12.0f, -1.0f};
+    for (int i = 0; i < 2; ++i) {
+        sig[i].factor = res[i];
+        sig[i].offset = off[i];
+        sig[i].min_val = -1.0e9f;
+        sig[i].max_val = 1.0e9f;
+        ct::sigSetHeader(sig[i], 0, 0, 1);
+        ct::sigSetBits(sig[i], quint16(i * 8), 8, ct::SIGNAL_TYPE_UINT8, 0, 0);
+        sig[i].tx_source = quint16(2 + i + 1); // slot 2 / 3, encoded +1
+    }
+    for (int i = 2; i < 4; ++i) {
+        sig[i].factor = 1.0f;
+        sig[i].min_val = -1.0e9f;
+        sig[i].max_val = 1.0e9f;
+        ct::sigSetHeader(sig[i], ct::SIG_MSG_NONE, 0, 1);
+    }
+    std::memcpy(sig[2].label, "ValueA", 7);
+    std::memcpy(sig[3].label, "ValueB", 7);
+    CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 4,
+                             reinterpret_cast<const uint8_t *>(sig)));
+
+    ct::ConstantConfig k[2]{};
+    k[0].dest_signal_idx = 2;
+    k[0].value = 0.0f;
+    k[0].is_active = 1;
+    k[1].dest_signal_idx = 3;
+    k[1].value = 5.0f;
+    k[1].is_active = 1;
+    CHECK(engine_table_write(ENGINE_TABLE_CONSTANTS, 0, 2,
+                             reinterpret_cast<const uint8_t *>(k)));
+
+    engine_tick(10);
+    CHECK(g_txFrames.size() == 1);
+    if (g_txFrames.isEmpty())
+        return;
+    const CapturedTx &tx = g_txFrames.first();
+    std::printf("  tx offset in channel units   : 0 @0.1 +12 -> 0x%02X, 5 @0.1 -1 -> 0x%02X\n",
+                tx.data[0], tx.data[1]);
+    CHECK(tx.data[0] == 120); // 0x78
+    CHECK(tx.data[1] == 40);  // 0x28
 }
 
 static void testSelectorOnlyVariantsAreTransmitted()
@@ -8633,6 +8712,7 @@ int main(int argc, char *argv[])
     testBatchCompoundEmitsAllVariantsBeforeItsEvent();
     testTriggeredTransmitBrokenReferenceIsSilent();
     testTransmitOffsetAddsOnTheWayOut();
+    testTransmitOffsetIsInChannelUnits();
     testSelectorOnlyVariantsAreTransmitted();
     testTransmitClampOrRollOver();
     testRollOverIsIgnoredOnReceive();

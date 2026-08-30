@@ -21,19 +21,25 @@ enum class DbcType { Unsigned = 0, Signed = 1, IEEE754 = 2 };
 // in each direction:
 //
 //     receive:   physical = raw × Bit Resolution + Offset
-//     transmit:  raw      = physical ÷ Bit Resolution + Offset
+//     transmit:  raw      = (physical + Offset) ÷ Bit Resolution
 //
 // The RESOLUTION means one thing both ways — 0.1 is a tenth per count whether
 // the message is received or transmitted — which is why the editor calls it
 // "Bit Resolution" rather than "DBC Factor".
 //
-// The OFFSET is always ADDED, and that is the point of it: "Offset 64" means
-// put 64 more on the wire, the same way "+40" means add forty. Transmit used to
-// run the algebraic inverse, (physical − Offset) ÷ resolution, which made the
-// same field SUBTRACT on the way out — correct arithmetic, wrong answer to the
-// question the field asks. It lands after the resolution, so on transmit it is
-// counted in RAW COUNTS: value 1 at resolution 0.1 with Offset 64 sends 74, not
-// (1 + 64) ÷ 0.1 = 650.
+// The OFFSET is always ADDED, and always in CHANNEL UNITS. "+12" adds twelve
+// of whatever the channel measures, whichever way the message goes: receiving,
+// twelve is added after the counts are scaled; transmitting, twelve is added
+// before they are divided back out. At resolution 0.1, sending 0 with Offset 12
+// puts (0 + 12) ÷ 0.1 = 120 on the wire, and sending 5 with Offset -1 puts
+// (5 - 1) ÷ 0.1 = 40.
+//
+// Two earlier rules sat here. The algebraic inverse, (physical - Offset) ÷
+// resolution, made the same field SUBTRACT on the way out: correct arithmetic,
+// wrong answer to the question the field asks. Then the bias moved AFTER the
+// divide, which kept the sign but made the offset count in RAW COUNTS - so at
+// resolution 0.001 an "Offset 12" moved the value by 0.012. The sign is what
+// stays fixed now, and the units come with it.
 //
 // Consequence, and it is not an accident: the two directions are NOT inverses.
 // Two CAN Triples wired together with the SAME row apply the offset twice.

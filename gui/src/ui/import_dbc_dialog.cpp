@@ -169,7 +169,7 @@ QString signalDetails(const DbcSignal &sig)
                     .arg(sig.offset >= 0 ? QStringLiteral("+") : QString())
                     .arg(sig.offset);
     if (sig.isMultiplexor)
-        s += QObject::tr("  [multiplexor]");
+        s += QObject::tr("  [multiplexor — becomes the compound identifier]");
     else if (sig.isMultiplexed)
         s += QObject::tr("  [mux=%1]").arg(sig.muxValue);
     return s;
@@ -313,9 +313,33 @@ void ImportDbcDialog::buildTree()
                 // carrying a unit that says something untrue about its numbers.
                 markUnknownUnit(sItem, sig.unit);
             }
-            sItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable
-                            | Qt::ItemIsEditable);
-            sItem->setCheckState(0, Qt::Unchecked);
+            // THE MULTIPLEXOR IS NOT A CHANNEL, and offering it as one is how a
+            // multiplexed message imported into a section that could not be
+            // saved. Its bits ARE the compound identifier's selector: the
+            // import turns each multiplexor VALUE into an identifier, and the
+            // device writes that selector into the frame after the channels.
+            // Imported as a row as well, it sat exactly on top of its own
+            // selector - a blocking clash that the section editor reports the
+            // moment the message is opened, about a row the user never chose to
+            // put there.
+            //
+            // Shown, though, and not hidden: the row is how a reader sees which
+            // signal decides the variant, and the Details column now says what
+            // becomes of it. Only the checkbox goes.
+            const bool isSelector = sig.isMultiplexor && msg.hasMultiplexing();
+            if (isSelector) {
+                sItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+                sItem->setToolTip(0,
+                    tr("The multiplexor is not imported as a channel: this message becomes "
+                       "a compound section, and each of its multiplexor values becomes an "
+                       "identifier. The identifier IS this signal - the device writes it "
+                       "into the frame itself, so a channel on the same bits would be "
+                       "overwritten by it."));
+            } else {
+                sItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable
+                                | Qt::ItemIsEditable);
+                sItem->setCheckState(0, Qt::Unchecked);
+            }
             sItem->setData(0, RoleMsgIdx, mi);
             sItem->setData(0, RoleSigIdx, si);
         }
@@ -379,16 +403,28 @@ void ImportDbcDialog::onItemChanged(QTreeWidgetItem *item, int column)
         const Qt::CheckState st = item->checkState(0);
         if (st != Qt::PartiallyChecked)
             for (int si = 0; si < item->childCount(); ++si)
-                item->child(si)->setCheckState(0, st);
+                if (item->child(si)->flags() & Qt::ItemIsUserCheckable)
+                    item->child(si)->setCheckState(0, st);
     } else if (QTreeWidgetItem *p = item->parent()) {
         // Signal row toggled: recompute the parent's tristate.
+        //
+        // Over the CHECKABLE children only. A multiplexed message has one child
+        // with no checkbox — the multiplexor, which becomes the identifier
+        // rather than a channel — and counting it in the total would leave the
+        // message stuck at PartiallyChecked with every signal it actually
+        // offers already ticked.
         int checked = 0;
-        for (int si = 0; si < p->childCount(); ++si)
+        int checkable = 0;
+        for (int si = 0; si < p->childCount(); ++si) {
+            if (!(p->child(si)->flags() & Qt::ItemIsUserCheckable))
+                continue;
+            ++checkable;
             if (p->child(si)->checkState(0) == Qt::Checked)
                 ++checked;
+        }
         p->setCheckState(0, checked == 0 ? Qt::Unchecked
-                                         : checked == p->childCount() ? Qt::Checked
-                                                                      : Qt::PartiallyChecked);
+                                         : checked == checkable ? Qt::Checked
+                                                                : Qt::PartiallyChecked);
     }
     m_updating = false;
     updateOkState();
@@ -402,7 +438,8 @@ void ImportDbcDialog::setAllChecked(bool checked)
         QTreeWidgetItem *mItem = m_tree->topLevelItem(mi);
         mItem->setCheckState(0, st);
         for (int si = 0; si < mItem->childCount(); ++si)
-            mItem->child(si)->setCheckState(0, st);
+            if (mItem->child(si)->flags() & Qt::ItemIsUserCheckable)
+                mItem->child(si)->setCheckState(0, st);
     }
     m_updating = false;
     updateOkState();
@@ -548,11 +585,28 @@ void ImportDbcDialog::accept()
             // (one channel), and the row copied into each identifier.
             QList<CommsChannelRow> commonRows;
             QHash<int, QList<QTreeWidgetItem *>> byValue;
+            // HELD BACK rather than made into a row. The tree does not offer the
+            // multiplexor a checkbox, so this normally holds nothing; it is
+            // separated anyway because the fallbacks below turn the message into
+            // a PLAIN section, and there the multiplexor is an ordinary field
+            // with no selector to collide with - so which branch runs decides
+            // whether it is a channel, and that decision cannot be made until
+            // the selected signals are known.
             for (QTreeWidgetItem *sItem : checkedSigs) {
                 const DbcSignal &sig = msg.signalList[sItem->data(0, RoleSigIdx).toInt()];
-                if (sig.isMultiplexed)
+                if (sig.isMultiplexed) {
                     byValue[sig.muxValue].append(sItem);
-                else {
+                } else if (sig.isMultiplexor) {
+                    // NOT A ROW. Its bits become the identifier selector below,
+                    // and the device writes that selector into the frame after
+                    // the channels - so a channel here is not sharing those bits
+                    // but being overwritten by them, which the section editor
+                    // refuses to save. buildTree gives it no checkbox for the
+                    // same reason; this is the second lock on the same door,
+                    // because the first one is a UI flag and this is the code
+                    // that builds the section.
+                    continue;
+                } else {
                     CommsChannelRow row;
                     if (makeRow(sItem, &row))
                         commonRows.append(row);

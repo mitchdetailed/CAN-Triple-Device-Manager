@@ -473,13 +473,13 @@ Channel rows are DBC-native: **physical = raw × Bit Resolution + Offset**, stor
 <tr><th>Direction</th><th>Arithmetic</th><th>Offset is in</th></tr>
 <tr><td><b>Receive</b></td><td>physical = raw × Bit Resolution + Offset</td>
 <td>channel units</td></tr>
-<tr><td><b>Transmit</b></td><td>raw = physical ÷ Bit Resolution + Offset</td>
-<td>raw counts</td></tr>
+<tr><td><b>Transmit</b></td><td>raw = (physical + Offset) ÷ Bit Resolution</td>
+<td>channel units</td></tr>
 </table>
 
-So a transmit row with Bit Resolution 1 and Offset 64, sending a channel that reads 1, puts **65** on the wire. At Bit Resolution 0.1 the same row sends 1 ÷ 0.1 + 64 = **74** — the offset is applied after the resolution, so it counts in raw counts rather than channel units.
+**The Offset is in the channel's own units both ways**, which is what lets one number mean one thing on either kind of row. A transmit row at Bit Resolution 0.1 with Offset 12, sending a channel that reads 0, puts (0 + 12) ÷ 0.1 = **120** on the wire. The same row with Offset −1, sending 5, puts (5 − 1) ÷ 0.1 = **40**.
 
-> **Note:** These two are deliberately **not** inverses of one another. If you are transmitting to another CAN Triple that receives the same signal with the same Offset, the offset is applied twice — once going out and once coming in. Negate the Offset on one of the two rows to get the value back unchanged.
+> **Note:** These two are deliberately **not** inverses of one another, because the Offset keeps its sign rather than reversing. If you are transmitting to another CAN Triple that receives the same signal with the same Offset, the offset is applied twice — once going out and once coming in. **Negate the Offset on one of the two rows** to get the value back unchanged. The same applies when the far end is an ECU decoding the DBC way (physical = raw × factor + offset): negate the Offset on the transmit row.
 
 A transmit row also chooses what happens when the value will not fit: **Clamp to Signal Limit**, ticked by default, sends the nearest value the signal's bits can carry, while unticking it sends the low bits and lets the count roll over. 256 into an 8-bit field is 255 ticked and 0 unticked. Unticking also skips the channel's own range clamp, which would otherwise decide the answer before the field width came into it. See [Channels](channels.md) for the full note. The Config Summary marks such a row **rolls over**, and so does the channel list in the section editor.
 

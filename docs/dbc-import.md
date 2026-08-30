@@ -51,7 +51,9 @@ Each imported channel keeps the DBC scaling exactly — physical = raw × factor
 
 ### Multiplexed messages
 
-A DBC message with a multiplexor imports as a **compound** section: each multiplexor value becomes an identifier (byte offset, ID and ID mask derived from the multiplexor field), and that value's signals become the identifier's rows. Signals that are not multiplexed — including the multiplexor itself, if ticked — apply to every variant, so they are replicated into each identifier (a compound section has no shared always-present set). Identifiers are emitted in ascending multiplexor-value order.
+A DBC message with a multiplexor imports as a **compound** section: each multiplexor value becomes an identifier (byte offset, ID and ID mask derived from the multiplexor field), and that value's signals become the identifier's rows. Signals that are not multiplexed apply to every variant, so they are replicated into each identifier (a compound section has no shared always-present set). Identifiers are emitted in ascending multiplexor-value order.
+
+**The multiplexor itself is not imported as a channel**, and its row in the list has no tick box. Its bits *are* the identifier's selector: the device writes that selector into the frame after the channels, so a channel on the same bits would not share them, it would be overwritten by them — and the section editor refuses to save a message in that state. The row is still shown, so you can see which signal picks the variant, and the Details column says what becomes of it.
 
 > **Warning:** The device matches selectors through a 16-bit window, so a multiplexor field must be 1–16 bits wide, and a Motorola multiplexor must not span multiple bytes. A multiplexor value that cannot be expressed is skipped with a note and its channels are not imported; a message whose multiplexed signals all fail imports as a plain message carrying only the non-multiplexed channels.
 

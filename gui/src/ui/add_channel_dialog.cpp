@@ -195,11 +195,12 @@ AddChannelDialog::AddChannelDialog(Configuration *config, const CommsChannelRow 
     m_dbcOffsetSpin->setToolTip(
         m_transmit
             ? tr("Added to the raw count on its way out, after the resolution has "
-                 "been divided out. Offset 64 puts 64 more on the wire: a value of "
-                 "1 at resolution 1 sends 65.\n\n"
-                 "This is a bias in raw counts, not the reverse of a receive row's "
-                 "offset. Sending to another CAN Triple that receives with the same "
-                 "offset? Negate one of the two, or the offset is applied twice.")
+                 "the channel's own units, before the resolution divides. Offset 12 "
+                 "at resolution 0.1 sends (0 + 12) / 0.1 = 120 for a value of 0.\n\n"
+                 "It ADDS on this side too, the same as on a receive row — it is not "
+                 "the reverse. Sending to an ECU that decodes the DBC way, or to "
+                 "another CAN Triple receiving with the same offset? Negate one of "
+                 "the two, or the offset is applied twice.")
             : tr("Added after scaling to reach the channel's units. -40 on a "
                  "temperature whose counts start at -40 makes a raw 0 read as "
                  "-40."));
@@ -482,10 +483,20 @@ void AddChannelDialog::revalidate()
 
     if (error.isEmpty()) {
         const QString unit = channel.isValid() ? channel.unit : QString();
-        QString preview = tr("Physical = raw × %1 + %2 %3")
-                              .arg(current.dbcFactor)
-                              .arg(current.dbcOffset)
-                              .arg(unit);
+        // THE FORMULA FOR THE DIRECTION THIS ROW ACTUALLY GOES. This line read
+        // "Physical = raw x factor + offset" on both kinds, which is the
+        // RECEIVE mapping - so a transmit row was shown one rule and then, two
+        // lines down, a range computed from a different one. The two
+        // contradicted each other, and the wrong one was the one that looked
+        // like the answer.
+        QString preview =
+            m_transmit ? tr("raw = (Physical + %1) ÷ %2")
+                             .arg(current.dbcOffset)
+                             .arg(current.dbcFactor)
+                       : tr("Physical = raw × %1 + %2 %3")
+                             .arg(current.dbcFactor)
+                             .arg(current.dbcOffset)
+                             .arg(unit);
         // What the field can carry, in the channel's own units, so the choice
         // above is judged against a number rather than an idea. IEEE754 is left
         // out: its 32 bits hold any float the channel can, so there is no edge
@@ -498,14 +509,15 @@ void AddChannelDialog::revalidate()
             const double span = qPow(2.0, len);
             const double rawLo = isSigned ? -span / 2.0 : 0.0;
             const double rawHi = (isSigned ? span / 2.0 : span) - 1.0;
-            // Transmit packs raw = physical / resolution + offset, so the
-            // physical values the field can carry are (raw - offset) * res.
+            // Transmit packs raw = (physical + offset) / resolution, so the
+            // physical values the field can carry are raw * res - offset.
             // NOT raw * res + offset — that is the RECEIVE mapping, and the two
-            // stopped being inverses when the offset was made to add on the way
-            // out. This line only ever renders on a transmit row (m_clampCheck
-            // exists only there), so it states the transmit end of the deal.
-            const double lo = (rawLo - current.dbcOffset) * current.dbcFactor;
-            const double hi = (rawHi - current.dbcOffset) * current.dbcFactor;
+            // are deliberately not inverses: the offset ADDS in both directions
+            // rather than reversing. This line only ever renders on a transmit
+            // row (m_clampCheck exists only there), so it states the transmit
+            // end of the deal.
+            const double lo = rawLo * current.dbcFactor - current.dbcOffset;
+            const double hi = rawHi * current.dbcFactor - current.dbcOffset;
             // Ordered, because a negative resolution swaps which end of the
             // field is the larger physical value.
             const double fieldLo = qMin(lo, hi);

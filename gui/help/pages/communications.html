@@ -931,19 +931,25 @@ the two directions are describing different things:</p>
 <tr><th>Direction</th><th>Arithmetic</th><th>Offset is in</th></tr>
 <tr><td><b>Receive</b></td><td>physical = raw × Bit Resolution + Offset</td>
 <td>channel units</td></tr>
-<tr><td><b>Transmit</b></td><td>raw = physical ÷ Bit Resolution + Offset</td>
-<td>raw counts</td></tr>
+<tr><td><b>Transmit</b></td><td>raw = (physical + Offset) ÷ Bit Resolution</td>
+<td>channel units</td></tr>
 </table>
 
-<p>So a transmit row with Bit Resolution 1 and Offset 64, sending a channel that
-reads 1, puts <b>65</b> on the wire. At Bit Resolution 0.1 the same row sends
-1&nbsp;÷&nbsp;0.1&nbsp;+&nbsp;64&nbsp;=&nbsp;<b>74</b> — the offset is applied
-after the resolution, so it counts in raw counts rather than channel units.</p>
+<p><b>The Offset is in the channel's own units both ways</b>, which is what
+lets one number mean one thing on either kind of row. A transmit row at Bit
+Resolution 0.1 with Offset 12, sending a channel that reads 0, puts
+(0&nbsp;+&nbsp;12)&nbsp;÷&nbsp;0.1&nbsp;=&nbsp;<b>120</b> on the wire. The same row
+with Offset&nbsp;&minus;1, sending 5, puts
+(5&nbsp;&minus;&nbsp;1)&nbsp;÷&nbsp;0.1&nbsp;=&nbsp;<b>40</b>.</p>
 
-<p class="note">These two are deliberately <b>not</b> inverses of one another.
-If you are transmitting to another CAN Triple that receives the same signal with
-the same Offset, the offset is applied twice — once going out and once coming in.
-Negate the Offset on one of the two rows to get the value back unchanged.</p>
+<p class="note">These two are deliberately <b>not</b> inverses of one another,
+because the Offset keeps its sign rather than reversing. If you are transmitting
+to another CAN Triple that receives the same signal with the same Offset, the
+offset is applied twice — once going out and once coming in. <b>Negate the
+Offset on one of the two rows</b> to get the value back unchanged. The same
+applies when the far end is an ECU decoding the DBC way
+(physical&nbsp;=&nbsp;raw&nbsp;×&nbsp;factor&nbsp;+&nbsp;offset): negate the
+Offset on the transmit row.</p>
 
 <p>A transmit row also chooses what happens when the value will not fit:
 <b>Clamp to Signal Limit</b>, ticked by default, sends the nearest value the
