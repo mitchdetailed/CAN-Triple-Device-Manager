@@ -400,9 +400,29 @@ below — so a Get in the window the configuration was built in restores every
 password and reads normally. Do not read the marking's survival as the
 protection's.
 
+**THE NAME NOW TRAVELS (store v18).** `CanMessageConfig` and `RelayConfig` each
+carry an 18-byte `label` — 17 characters + NUL — written by `mapToDevice` and
+read back by `mapFromDevice`, which is what makes a Get from a unit this host
+has never seen come back with the author's names instead of "Receive 0x640"
+invented from the id. The device WINS over the snapshot below: a Get reads what
+is on the unit. A section the device stored no name for (an older store, or a
+message nobody named) still falls through to the snapshot, which is the only
+record in that case.
+
+It was bought, not found. The config region is fixed at 131,072 B and stood
+1,504 B from full, so `MAX_SCRIPT_CHUNKS` went 512 -> 384 to return 8,192 B
+against the 8,000 the message table needed (500 slots, 16 -> 32); the relay
+table took the same field for another 512. The margin ended at 1,184 B. See the
+budget comment in `flash_store.c`, which frames every such request as "which
+table is paying" — this is the first one to answer it deliberately.
+
+A name longer than 17 bytes is clipped on the way out and `mapToDevice` warns,
+because a name that survives a Get as a DIFFERENT name than the one on screen,
+silently, is worse than either alternative.
+
 `clearContent()` does empty the buses, though, so a Get rebuilds every section
-from scratch and the two per-section facts the wire does not carry — `messageKey`
-and the user's **name** — would be lost with it. `mapFromDevice` therefore
+from scratch and the per-section facts the wire does not carry — `messageKey`,
+and the **name** for anything stored before v18 — would be lost with it. `mapFromDevice` therefore
 snapshots both before `clearContent()` and re-applies them to the matching
 rebuilt section; a section the device no longer has simply drops. Two indexes
 over one set of snapshots, each record handed out once:

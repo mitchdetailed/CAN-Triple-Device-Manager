@@ -178,6 +178,11 @@ constexpr int CONFIG_NAME_LEN           = 32;
 // misses a change to this number silently truncates or rejects a legal name.
 constexpr int SIGNAL_LABEL_LEN          = 32;
 constexpr int MAX_CHANNEL_NAME_BYTES    = SIGNAL_LABEL_LEN - 1;
+// A MESSAGE's name. 18 is what lands CanMessageConfig on 32 bytes exactly
+// (14 + 18), which PAD8 leaves alone; one more character would pad the slot to
+// 40 and cost another 4,000 B of config flash.
+constexpr int MESSAGE_LABEL_LEN         = 18;
+constexpr int MAX_MESSAGE_NAME_BYTES    = MESSAGE_LABEL_LEN - 1;
 
 constexpr uint8_t CMD_ACK            = 0x80;
 constexpr uint8_t CMD_NACK           = 0x81;
@@ -296,7 +301,10 @@ constexpr int MAX_CRC8_MESSAGES     = 20;  // transmit-CRC8 rules, one per stamp
 constexpr int kMsgPasswordSlots      = 4;
 // Script bytecode chunks: 512 * 64 = 32,768 bytes of compiled script, the cap
 // the firmware's flash table is sized for (protocol.h MAX_SCRIPT_CHUNKS).
-constexpr int MAX_SCRIPT_CHUNKS     = 512;
+// 512 -> 384 to pay for CanMessageConfig::label: 128 chunks give back 8,192 B
+// and 500 messages at a 32-byte slot cost 8,000. See protocol.h, and the budget
+// in the firmware's flash_store.c that decides which table pays.
+constexpr int MAX_SCRIPT_CHUNKS     = 384;
 // The engine ticks at 100 Hz, so one step per tick is the ceiling — an
 // integrator cannot add more often than the evaluation pass runs.
 constexpr int INTEGRATOR_MAX_HZ     = 100;
@@ -653,6 +661,12 @@ struct CanMessageConfig {
     // path, which keeps the spare bits from becoming private host storage —
     // the reason the old scrub existed, carried over.
     uint8_t password_slot;
+    // The message's NAME. Last, so no offset above moves. Host metadata: the
+    // engine never reads it, and it exists so a Get from a device this host has
+    // never seen returns the author's names rather than "Receive 0x640".
+    // Written for concealed messages too — see protocol.h for why that
+    // discloses nothing the device did not already hold.
+    char label[MESSAGE_LABEL_LEN];
 };
 
 // 64 bytes: label 32 + five floats 20 + four u16 8 + one u32 4.
@@ -1159,6 +1173,11 @@ struct RelayConfig {
     uint8_t flags;            // RELAYFLAG_*
     uint8_t src_bus;          // bus this rule listens on (1..3)
     uint8_t forward_bus_mask; // bit0=CAN1 bit1=CAN2 bit2=CAN3
+    // The relay rule's NAME, on the same terms as CanMessageConfig::label: a
+    // relay is a section in the list like any other, and a Get returning every
+    // message's name but inventing "Relay 0x640" for these would be a hole with
+    // no reason behind it. 32 slots going 16 -> 32 costs 512 B.
+    char label[MESSAGE_LABEL_LEN];
 };
 
 // v13: 2x16 lookup table â€” one axis, up to 16 ascending sites (x_count active).
@@ -1331,11 +1350,11 @@ struct FwUpdateStatus {
 // ConditionTerm shrank 10 -> 8 to pay for it. Both store hazards at once —
 // the record size changed AND every table after conditions shifted — so a
 // v10 image would be misread twice over. v10 was built but never released.
-constexpr uint16_t EXPECTED_STORE_VERSION = 17;
+constexpr uint16_t EXPECTED_STORE_VERSION = 18;
 
 #pragma pack(pop)
 
-static_assert(sizeof(CanMessageConfig) == 14, "must match firmware");
+static_assert(sizeof(CanMessageConfig) == 32, "must match firmware");
 static_assert(sizeof(CanSignalConfig) == 64, "must match firmware"); // 32+20+8+4
 
 // --- packed-field accessors -------------------------------------------------
@@ -1454,7 +1473,7 @@ static_assert(sizeof(DeviceChannelsConfig) == 72, "must match firmware"); // 36 
 static_assert(DEVCH_ONTIME == 0, "Device OnTime must stay at offset 0 — see above");
 static_assert(sizeof(TimerConfig) == 32, "must match firmware");
 static_assert(sizeof(ConstantConfig) == 7, "must match firmware");
-static_assert(sizeof(RelayConfig) == 11, "must match firmware");
+static_assert(sizeof(RelayConfig) == 29, "must match firmware");
 static_assert(sizeof(Table2x16Def) == 70, "must match firmware");
 static_assert(sizeof(Table2x16Out) == 64, "must match firmware");
 // 6 indices + 3 counts + 8*4 X sites + 8*4 Y sites = 73 (padded slot 80), and
@@ -1507,9 +1526,11 @@ static_assert(kMaxCobsFrameBytes <= MAX_TX_WIRE_BYTES,
 // one of these was recomputed when the cap went 112 -> 496; the "next n would
 // be" figure is written out so the next record-size change can be checked
 // against it without redoing the division.
-constexpr int WRITE_CHUNK_MESSAGES   = 35; // 4 + 35*14 = 494 (36 -> 508 > 496).
-                                           // Was 49 while the record was 10 bytes;
-                                           // v20 added the per-message key.
+constexpr int WRITE_CHUNK_MESSAGES   = 15; // 4 + 15*32 = 484 (16 -> 516 > 496).
+                                           // Was 35 at 14 bytes and 49 at 10; store
+                                           // v18 added the 18-byte label. A stale
+                                           // value here is not a size error at run
+                                           // time - it overruns the frame buffer.
 constexpr int WRITE_CHUNK_SIGNALS    = 7;  // 4 + 7*64  = 452 (64 B signal; 8 -> 516).
                                            // 2/frame at the old 112-byte cap, so a
                                            // full-table Send is 3.5x fewer round trips
@@ -1522,7 +1543,8 @@ constexpr int WRITE_CHUNK_CONDITIONS = 7;  // 4 + 7*62 = 438 (8 -> 500), store v
 constexpr int WRITE_CHUNK_COUNTERS   = 15; // 4 + 15*32 = 484 (16 -> 516), store v15
 constexpr int WRITE_CHUNK_TIMERS     = 15; // 4 + 15*32 = 484 (16 -> 516), store v12
 constexpr int WRITE_CHUNK_CONSTANTS  = 70; // 4 + 70*7  = 494 (71 -> 501)
-constexpr int WRITE_CHUNK_RELAYS     = 44; // 4 + 44*11 = 488 (45 -> 499)
+constexpr int WRITE_CHUNK_RELAYS     = 16; // 4 + 16*29 = 468 (17 -> 497 > 496).
+                                           // Was 44 at 11 bytes; store v18's label.
 constexpr int WRITE_CHUNK_TABLES_2X16_DEF = 7; // 4 + 7*70 = 494 (8 -> 564)
 constexpr int WRITE_CHUNK_TABLES_2X16_OUT = 7; // 4 + 7*64 = 452 (8 -> 516)
 constexpr int WRITE_CHUNK_TABLES_8X8_DEF  = 6; // 4 + 6*73 = 442 (7 -> 515)
@@ -1541,10 +1563,10 @@ constexpr int WRITE_CHUNK_SCRIPT      = 7;  // 4 + 7*64  = 452 (8 -> 516)
 // path was never the constrained one — so these are 4 + n*item_size <= 2030,
 // further capped by the table's own capacity where a whole table fits in one
 // request.
-constexpr int READ_CHUNK_MESSAGES   = 125; // 4 + 125*14 = 1754; the cap allows 144,
-                                           // 125 splits MAX_MESSAGES exactly 4 ways.
-                                           // Was 200 while the record was 10 bytes;
-                                           // v20 added the per-message key.
+constexpr int READ_CHUNK_MESSAGES   = 50;  // 4 + 50*32 = 1604; the cap allows 63,
+                                           // 50 splits MAX_MESSAGES exactly 10 ways.
+                                           // Was 125 at 14 bytes and 200 at 10;
+                                           // store v18 added the label.
 constexpr int READ_CHUNK_SIGNALS    = 31;  // 4 + 31*64  = 1988 (64 B signal;
                                            // 32 -> 2052 > 2030)
 constexpr int READ_CHUNK_MATH       = 84;  // 4 + 84*24  = 2020 (24 B with operand C)
@@ -1555,7 +1577,8 @@ constexpr int READ_CHUNK_COUNTERS   = 50;  // 4 + 50*32  = 1604 (the whole table
 constexpr int READ_CHUNK_TIMERS     = 50;  // 4 + 50*32  = 1604 (the whole table now
                                            // that MAX_TIMERS is 50)
 constexpr int READ_CHUNK_CONSTANTS  = 100; // 4 + 100*7  = 704 (the whole table)
-constexpr int READ_CHUNK_RELAYS     = 32;  // 4 + 32*11  = 356 (the whole table)
+constexpr int READ_CHUNK_RELAYS     = 32;  // 4 + 32*29  = 932 (still the whole
+                                           // table at store v18's 29 bytes)
 constexpr int READ_CHUNK_TABLES_2X16_DEF = 8; // 4 + 8*70 = 564
 constexpr int READ_CHUNK_TABLES_2X16_OUT = 8; // 4 + 8*64 = 516
 constexpr int READ_CHUNK_TABLES_8X8_DEF  = 8; // 4 + 8*73 = 588 (the whole table)

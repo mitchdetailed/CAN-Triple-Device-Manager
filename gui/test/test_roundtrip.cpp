@@ -66,6 +66,17 @@ static constexpr int kFutureSchemaProbe = kCurrentSchemaVersion + 1;
         }                                                                                        \
     } while (0)
 
+// CHECK that returns. Some cases below dereference what they have just checked
+// for, and a soft CHECK would carry straight on into the crash.
+#define RT_REQUIRE(cond)                                                                         \
+    do {                                                                                         \
+        if (!(cond)) {                                                                           \
+            std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);                          \
+            ++failures;                                                                          \
+            return;                                                                              \
+        }                                                                                        \
+    } while (0)
+
 // The body of a format-2 .ct3, for the checks that assert on what the writer
 // PUT IN THE FILE rather than on what a reload produces. Reading the file as
 // JSON is what these used to do and it no longer works: the body is sealed, and
@@ -6964,6 +6975,130 @@ static void testDisabledBusSectionsSurviveGet()
     CHECK(again.bus[2].sections.size() == 0);
 }
 
+// SECTION NAMES SURVIVE A GET, and the test is a Get into a BLANK document.
+//
+// That is the whole case. mapFromDevice has always been able to recover a name
+// by matching the device's messages against the sections already open in the
+// host - so a Get into the document you sent from looked fine, and the gap only
+// showed on a unit this host had never seen, where there was nothing to match
+// and every section came back named "Receive 0x640" after its id.
+//
+// Store v18 gives CanMessageConfig and RelayConfig an 18-byte label, paid for
+// by MAX_SCRIPT_CHUNKS going 512 -> 384. These cases go through a blank
+// Configuration so the prior-matching path cannot answer for the label.
+static void testSectionNamesSurviveAGetIntoABlankDocument()
+{
+    Configuration config;
+    config.clear();
+
+    const auto named = [](const char *name, SectionDevice device, quint32 id) {
+        CommsSection s;
+        s.name = QString::fromUtf8(name);
+        s.device = device;
+        s.baseAddress = id;
+        s.messageLengthBytes = 8;
+        return s;
+    };
+
+    config.bus[0].enabled = true;
+    config.bus[0].sections << named("ECU Broadcast", SectionDevice::ReceiveMessage, 0x640);
+    config.bus[1].enabled = true;
+    config.bus[1].sections << named("Dash Out", SectionDevice::TransmitMessage, 0x700);
+    config.bus[2].enabled = true;
+    CommsSection relay = named("Gateway Rule", SectionDevice::MessageRelay, 0x200);
+    relay.relayBitmask = 0x7F0;
+    relay.routeBusMask = 0x1; // forward to CAN 1
+    config.bus[2].sections << relay;
+
+    const MappingResult mapped = mapToDevice(config);
+    Configuration blank; // NOT the document that was sent - nothing to match on
+    blank.clear();
+    mapFromDevice(mapped.tables, blank, nullptr);
+
+    const auto nameOn = [&blank](int bus) {
+        return blank.bus[bus].sections.isEmpty() ? QString()
+                                                 : blank.bus[bus].sections.first().name;
+    };
+    std::printf("  names back from a blank Get : %s | %s | %s\n",
+                qPrintable(nameOn(0)), qPrintable(nameOn(1)), qPrintable(nameOn(2)));
+    CHECK(nameOn(0) == QStringLiteral("ECU Broadcast"));
+    CHECK(nameOn(1) == QStringLiteral("Dash Out"));
+    // The relay too: it is a section in the list like any other, and a Get that
+    // named every message but invented "Relay 0x200" would be a hole with no
+    // reason behind it.
+    CHECK(nameOn(2) == QStringLiteral("Gateway Rule"));
+}
+
+static void testAnUnnamedSectionStillGetsAGeneratedName()
+{
+    // A section the author never named stores EMPTY rather than the generated
+    // text, so the reader can tell "no name" from "a name that looks generated"
+    // and fall through to its own rules. Those rules are unchanged.
+    Configuration config;
+    config.clear();
+    config.bus[0].enabled = true;
+    CommsSection s;
+    s.device = SectionDevice::ReceiveMessage;
+    s.baseAddress = 0x640;
+    s.messageLengthBytes = 8;
+    config.bus[0].sections << s; // no name
+
+    const MappingResult mapped = mapToDevice(config);
+    Configuration blank;
+    blank.clear();
+    mapFromDevice(mapped.tables, blank, nullptr);
+    RT_REQUIRE(!blank.bus[0].sections.isEmpty());
+    std::printf("  unnamed section comes back as : %s\n",
+                qPrintable(blank.bus[0].sections.first().name));
+    CHECK(blank.bus[0].sections.first().name == QStringLiteral("Receive 0x640"));
+}
+
+static void testALongNameClipsToTheLabelAndDoesNotSplitACodepoint()
+{
+    // 17 bytes + NUL. The name dialogs do not enforce this yet, so the mapper is
+    // the backstop - and it must not cut a multi-byte codepoint in half, which
+    // would come back as U+FFFD rather than as a shorter name.
+    Configuration config;
+    config.clear();
+    config.bus[0].enabled = true;
+
+    CommsSection ascii;
+    ascii.name = QStringLiteral("Engine Broadcast Frame A"); // 24 bytes
+    ascii.device = SectionDevice::ReceiveMessage;
+    ascii.baseAddress = 0x640;
+    ascii.messageLengthBytes = 8;
+    config.bus[0].sections << ascii;
+
+    CommsSection wide;
+    // Six 3-byte codepoints = 18 bytes: one past the budget, and the cut lands
+    // inside the sixth.
+    wide.name = QString::fromUtf8("\xe6\xb8\xa9\xe5\xba\xa6\xe6\xb8\xa9\xe5\xba\xa6\xe6\xb8\xa9\xe5\xba\xa6");
+    wide.device = SectionDevice::ReceiveMessage;
+    wide.baseAddress = 0x641;
+    wide.messageLengthBytes = 8;
+    config.bus[0].sections << wide;
+
+    const MappingResult mapped = mapToDevice(config);
+    Configuration blank;
+    blank.clear();
+    mapFromDevice(mapped.tables, blank, nullptr);
+    RT_REQUIRE(blank.bus[0].sections.size() == 2);
+
+    const QString back = blank.bus[0].sections.at(0).name;
+    std::printf("  24-byte name clipped to      : %s (%d bytes)\n",
+                qPrintable(back), int(back.toUtf8().size()));
+    CHECK(back == QStringLiteral("Engine Broadcast ").trimmed());
+    CHECK(back.toUtf8().size() <= 17);
+
+    const QString wideBack = blank.bus[0].sections.at(1).name;
+    std::printf("  6 wide chars clipped to      : %d codepoints, %d bytes\n",
+                int(wideBack.size()), int(wideBack.toUtf8().size()));
+    CHECK(wideBack.toUtf8().size() <= 17);
+    // Five whole characters, not five and a half: no U+FFFD anywhere.
+    CHECK(!wideBack.contains(QChar(0xFFFD)));
+    CHECK(wideBack.size() == 5);
+}
+
 static void testLiveView()
 {
     Configuration doc;
@@ -7151,6 +7286,9 @@ int main(int argc, char *argv[])
     testDeviceChannelsAlwaysMapped();
     testDeviceChannelTransmitRowSurvivesGet();
     testDisabledBusSectionsSurviveGet();
+    testSectionNamesSurviveAGetIntoABlankDocument();
+    testAnUnnamedSectionStillGetsAGeneratedName();
+    testALongNameClipsToTheLabelAndDoesNotSplitACodepoint();
     testLiveView();
     if (failures == 0)
         std::printf("ALL TESTS PASSED\n");

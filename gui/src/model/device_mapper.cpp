@@ -261,10 +261,13 @@ static QString dataTypeForValueType(quint8 vt)
 // Clip a name to the device label budget without cutting a multi-byte UTF-8
 // codepoint in half. The name dialogs already refuse anything longer; this is
 // the backstop for configurations saved before that limit existed.
-static QByteArray clipToLabel(const QString &name)
+// `budget` because there are now TWO label fields with different sizes: a
+// signal's 32 bytes and a message's 18. The walk-back rule is identical, and
+// duplicating it for the second field is how the two would drift.
+static QByteArray clipToLabel(const QString &name, int budget = MAX_CHANNEL_NAME_BYTES)
 {
     QByteArray utf8 = name.toUtf8();
-    if (utf8.size() > MAX_CHANNEL_NAME_BYTES) {
+    if (utf8.size() > budget) {
         // Walk back ONLY when the cut lands inside a codepoint, i.e. when the
         // first dropped byte is a continuation byte (10xxxxxx). If it is a lead
         // byte or ASCII the cut is already on a boundary and chopping would eat
@@ -273,9 +276,8 @@ static QByteArray clipToLabel(const QString &name)
         // the split codepoint's LEAD byte behind, which is not a shorter name
         // but an invalid string. Same test as config_transfer.cpp's config-name
         // clip; keep the two in step.
-        const bool splitsCodepoint =
-            (quint8(utf8[MAX_CHANNEL_NAME_BYTES]) & 0xC0) == 0x80;
-        utf8.truncate(MAX_CHANNEL_NAME_BYTES);
+        const bool splitsCodepoint = (quint8(utf8[budget]) & 0xC0) == 0x80;
+        utf8.truncate(budget);
         if (splitsCodepoint) {
             while (!utf8.isEmpty() && (quint8(utf8.back()) & 0xC0) == 0x80)
                 utf8.chop(1);
@@ -298,6 +300,50 @@ static void fillLabel(CanSignalConfig &sig, const QString &name)
     std::memcpy(sig.label, utf8.constData(), size_t(utf8.size()));
 }
 
+// The same for a MESSAGE's name, into the narrower field (store v18). Written
+// for every message including a concealed one: the device already holds that
+// message's id, timing and every channel label belonging to it, so withholding
+// the name would cost a Get its names without making the device disclose less.
+// See protocol.h.
+//
+// A section the user never named stores EMPTY rather than the generated
+// "Receive 0x640", so that mapFromDevice can tell "no name" from "a name that
+// happens to look generated" and fall through to its own naming rules — which
+// include the concealing-name rule that must not print an id.
+static void fillMessageLabel(CanMessageConfig &msg, const QString &name)
+{
+    const QByteArray utf8 = clipToLabel(name.trimmed(), MAX_MESSAGE_NAME_BYTES);
+    std::memset(msg.label, 0, sizeof(msg.label));
+    std::memcpy(msg.label, utf8.constData(), size_t(utf8.size()));
+}
+
+// And back. The field is NUL-PADDED rather than NUL-terminated — a name that
+// fills it exactly leaves no terminator — so the length is bounded by the field
+// and handed to fromUtf8 instead of leaving it to look for a zero that need not
+// be there.
+//
+// Empty for a message whose author never named it, which is the answer the
+// caller wants: it separates "the device stored no name" from "a name that
+// happens to look generated", and lets the older rules run untouched in the
+// first case — including the concealing-name rule that must not print a CAN id.
+// The relay table's copy. A separate overload rather than a template because
+// the two records share nothing but the field, and one line of duplication is
+// cheaper to read than a template over two unrelated structs.
+static void fillRelayLabel(RelayConfig &rl, const QString &name)
+{
+    const QByteArray utf8 = clipToLabel(name.trimmed(), MAX_MESSAGE_NAME_BYTES);
+    std::memset(rl.label, 0, sizeof(rl.label));
+    std::memcpy(rl.label, utf8.constData(), size_t(utf8.size()));
+}
+
+static QString nameFromLabel(const char *field, int size)
+{
+    int len = 0;
+    while (len < size && field[len] != '\0')
+        ++len;
+    return QString::fromUtf8(field, len).trimmed();
+}
+
 // The document's handle for a message: its bus and its name, lower-cased. Used
 // by both directions of the condition mapping, so the two cannot disagree about
 // what counts as the same message. Deliberately the same shape as
@@ -305,6 +351,26 @@ static void fillLabel(CanSignalConfig &sig, const QString &name)
 QString messageRefKey(int bus, const QString &name)
 {
     return QStringLiteral("%1/%2").arg(bus).arg(name.trimmed().toLower());
+}
+
+// A section name longer than the device label is CLIPPED, and says so. Silence
+// would be the worst of both worlds: the name survives a Get, but as a
+// different name than the one on screen, and nothing ever mentioned it. The
+// channel budget has warned about exactly this for as long as it has had a
+// label; this is the same warning for the field that just gained one.
+static void noteIfNameClipped(MappingResult &r, int busIdx, const QString &name)
+{
+    const QString trimmed = name.trimmed();
+    const QByteArray clipped = clipToLabel(trimmed, MAX_MESSAGE_NAME_BYTES);
+    if (clipped.size() == trimmed.toUtf8().size())
+        return;
+    r.warnings.append(QStringLiteral(
+        "CAN %1: message name '%2' is longer than the %3-byte device label and "
+        "stores as '%4' - a Get returns the shorter name")
+                          .arg(busIdx + 1)
+                          .arg(trimmed)
+                          .arg(MAX_MESSAGE_NAME_BYTES)
+                          .arg(QString::fromUtf8(clipped)));
 }
 
 MappingResult mapToDevice(const Configuration &config)
@@ -446,6 +512,8 @@ MappingResult mapToDevice(const Configuration &config)
                 // and the honest wire value is "no password" rather than a made-up one.
                 msg.password_slot =
                     quint8(config.commsPasswordSlotFor(section.messageKey));
+                noteIfNameClipped(r, busIdx, section.name);
+                fillMessageLabel(msg, section.name);
                 // Cyclic until the resolve pass below says otherwise. Naming the
                 // sentinel rather than leaning on the zero-init matters: 0 is a
                 // perfectly good condition index, and a message that ended up
@@ -733,6 +801,10 @@ MappingResult mapToDevice(const Configuration &config)
                 rl.src_bus = quint8(busIdx + 1);
                 // Never forward back onto the source bus — mask that bit out.
                 rl.forward_bus_mask = quint8(section.routeBusMask & 0x7 & ~(1 << busIdx));
+                // store v18: a relay is a section in the list like any other,
+                // and its name travels on the same terms as a message's.
+                noteIfNameClipped(r, busIdx, section.name);
+                fillRelayLabel(rl, section.name);
                 r.tables.relays.append(rl);
                 continue;
             }
@@ -762,6 +834,8 @@ MappingResult mapToDevice(const Configuration &config)
             // and the honest wire value is "no password" rather than a made-up one.
             msg.password_slot =
                 quint8(config.commsPasswordSlotFor(section.messageKey));
+            noteIfNameClipped(r, busIdx, section.name);
+            fillMessageLabel(msg, section.name);
             // A receive message has no trigger, and says so rather than leaving
             // the sentinel to the zero-init — see the transmit branch.
             msg.tx_trigger_cond = TX_TRIGGER_COND_NONE;
@@ -1890,6 +1964,12 @@ QString neutralSectionName(const BusConfig &bus, CommsProtection protection)
 void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringList *notes,
                    const QVector<ControlCanPayload> &busSetup)
 {
+    // (bus, row) of every section whose name came off the DEVICE (store v18).
+    // The prior-name pass at the end skips these: the unit carries the name
+    // now, so the document snapshot below is a fallback rather than an
+    // override. Rows are stable because nothing removes a section between the
+    // append that records one and that pass.
+    QSet<QPair<int, int>> deviceNamed;
     // Snapshot the two per-section facts the device does not carry, BEFORE
     // clearContent() throws the sections away: the section's own password and
     // the name the user gave it.
@@ -2137,6 +2217,17 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         // went up — so it keeps its section but casts no vote on the mode.
         if (active)
             config.bus[busIdx].enabled = true;
+        // store v18: the name the author gave this message, if the device has
+        // one. THE DEVICE WINS over the open document's copy, which is what a
+        // Get means — it reads what is on the unit. The prior-name pass below
+        // is what covers everything this does not: a section whose name was
+        // never stored (an older store version, or a message nobody named),
+        // where the document's memory is the only record there is.
+        const QString storedName = nameFromLabel(msg.label, int(sizeof(msg.label)));
+        if (!storedName.isEmpty()) {
+            s.name = storedName;
+            deviceNamed.insert({busIdx, config.bus[busIdx].sections.size()});
+        }
         config.bus[busIdx].sections.append(s);
         msgSection.insert(m, config.bus[busIdx].sections.size() - 1);
     }
@@ -2730,6 +2821,12 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         s.relayBitmask = rl.bitmask;
         s.routeBusMask = rl.forward_bus_mask & 0x7;
         s.name = QStringLiteral("Relay 0x%1").arg(QString::number(rl.address, 16).toUpper());
+        // store v18, same rule as a message's.
+        const QString storedRelayName = nameFromLabel(rl.label, int(sizeof(rl.label)));
+        if (!storedRelayName.isEmpty()) {
+            s.name = storedRelayName;
+            deviceNamed.insert({busIdx, config.bus[busIdx].sections.size()});
+        }
         // An active relay means its bus is running; keep it (and its forward
         // targets) on so the next Send doesn't stop them. A deactivated one
         // says its bus was Off, and must not switch on the very buses whose
@@ -2790,6 +2887,13 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
                 continue;
             }
             s.messageKey = priors[at].messageKey;
+            // NEITHER RULE RUNS ON A SECTION THE DEVICE NAMED (store v18). Both
+            // exist because the name had nowhere to live on the unit, so the
+            // document's memory was the only record; a device that carries the
+            // name has a better one, and letting a stale prior overwrite it
+            // would make a Get show something the unit does not hold.
+            if (deviceNamed.contains({b, row}))
+                continue;
             // An empty prior name would be a section the user never named; the
             // generated one is better than nothing, and falls through to the
             // concealing-name rule below.

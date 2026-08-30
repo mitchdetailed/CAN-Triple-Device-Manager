@@ -6263,7 +6263,12 @@ int main(int argc, char *argv[])
         // retired bytes INSIDE CanMessageConfig in place, so item_size stayed
         // 14, no offset moved, and by itself it would not have needed a bump at
         // all. The WIRE version stays put once more.
-        CHECK(FLASH_STORE_VERSION == 17u);
+        // v18: CanMessageConfig 14 -> 32 and RelayConfig 11 -> 29, both for an
+        // 18-byte NAME. item_size changed on the FIRST table, so every table
+        // behind messages shifts and a v17 image is refused rather than misread
+        // -- v4's hazard again, and the reason this one could not ride along in
+        // place the way triggered transmit did. The WIRE version stays put.
+        CHECK(FLASH_STORE_VERSION == 18u);
         // The configurator carries its own copy so a Send can check the device
         // before writing to it. This file is the only place that sees both, so
         // it is the only place the two can be held equal.
@@ -6448,7 +6453,7 @@ int main(int argc, char *argv[])
         WRITE_CHUNK_IS_MAXIMAL(ct::WRITE_CHUNK_COUNTERS, ct::CounterConfig);      // 4+15*31 = 469
         WRITE_CHUNK_IS_MAXIMAL(ct::WRITE_CHUNK_TIMERS, ct::TimerConfig);          // 4+24*20 = 484
         WRITE_CHUNK_IS_MAXIMAL(ct::WRITE_CHUNK_CONSTANTS, ct::ConstantConfig);    // 4+70*7  = 494
-        WRITE_CHUNK_IS_MAXIMAL(ct::WRITE_CHUNK_RELAYS, ct::RelayConfig);          // 4+44*11 = 488
+        WRITE_CHUNK_IS_MAXIMAL(ct::WRITE_CHUNK_RELAYS, ct::RelayConfig);          // 4+16*29 = 468
         WRITE_CHUNK_IS_MAXIMAL(ct::WRITE_CHUNK_TABLES_2X16_DEF, ct::Table2x16Def);// 4+7*70  = 494
         WRITE_CHUNK_IS_MAXIMAL(ct::WRITE_CHUNK_TABLES_2X16_OUT, ct::Table2x16Out);// 4+7*64  = 452
         WRITE_CHUNK_IS_MAXIMAL(ct::WRITE_CHUNK_TABLES_8X8_DEF, ct::Table8x8Def);  // 4+6*73  = 442
@@ -6458,7 +6463,8 @@ int main(int argc, char *argv[])
         // Pinned to their literals as well, so a future record-size change has
         // to come back through this line rather than quietly re-deriving.
         CHECK(ct::WRITE_CHUNK_SIGNALS == 7);
-        CHECK(ct::WRITE_CHUNK_MESSAGES == 35); // was 49 at a 10-byte record; v20 made it 14
+        CHECK(ct::WRITE_CHUNK_MESSAGES == 15); // 49 at 10 bytes, 35 at 14; v18 made it 32
+        CHECK(ct::WRITE_CHUNK_RELAYS == 16);   // was 44 at 11 bytes; v18 made it 29
         CHECK(ct::WRITE_CHUNK_TIMERS == 15); // was 24 at a 20-byte record; v12 made it 32
         CHECK(ct::WRITE_CHUNK_TABLES_8X8_DEF == 6);
         CHECK(ct::WRITE_CHUNK_TABLES_8X8_ROW == 15);
