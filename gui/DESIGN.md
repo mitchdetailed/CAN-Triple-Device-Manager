@@ -77,11 +77,14 @@ CONST 0x14/0x15 (v6), WRITE/READ CONFIG_NAME 0x16/0x17, RESET_DEVICE 0x18
 WRITE/READ TABLE2X16_DEF 0x1F/0x20 + TABLE2X16_OUT 0x21/0x22 (v13),
 WRITE/READ INTEG 0x23/0x24 (v16), GET_DEVICE_ID 0x29 + WRITE_CONFIG_BINDING
 0x2A (v18), the access / fleet block: READ/WRITE_ACCESS_KEYS
-0x2B/0x2C, ACCESS_CHALLENGE 0x2D, ACCESS_RESPONSE 0x2E, **READ_FLEET_ID 0x2F**,
-**FLEET_ID_PROVE 0x31**, and **READ_CAN_SETUP 0x30** (see "Reading the bus setup
+0x2B/0x2C, ACCESS_CHALLENGE 0x2D, ACCESS_RESPONSE 0x2E,
+and **READ_CAN_SETUP 0x30** (see "Reading the bus setup
 back"), WRITE/READ DEVICE_CHANNELS 0x32/0x33, and the 8x8 lookup table's four:
 WRITE/READ TABLE8X8_DEF **0x34/0x35** + TABLE8X8_ROW **0x36/0x37**.
-**There is no write for the fleet identity** — it is
+**0x2F and 0x31 are retired ground**: they were READ_FLEET_ID and
+FLEET_ID_PROVE, and the fleet identity they served was replaced by the writable
+firmware licence (0x46-0x4A, "The firmware licence" below). The licence DOES
+have a write. Neither id is reused. The identity that stays fixed is
 compiled into the firmware, so `0x30` (briefly WRITE_UPDATE_ID, during the
 revision where the identity was runtime state) went back into the pool and was
 handed to READ_CAN_SETUP. That reuse is safe in a way the retirements below are
@@ -110,7 +113,7 @@ Compound (multiplexed) messages are v8
 `ControlCanPayload` is v9; compound transmit (Batch/Sequential via
 MSGFLAG_TX_SEQUENTIAL) is v10; the message-relay table is v11; the lookup
 tables are v12, the 1-axis one widened to 2x16 in v13 and the 2-axis one
-replaced by the 8x8; the three per-function access keys and the fleet identity
+replaced by the 8x8; the three per-function access keys, the firmware licence
 block came after those, and the capacity expansion (message, signal and timer
 tables widened, the label back to 32 bytes, the payload cap raised, the 8x8
 replacing the 4x4) is the most recent.
@@ -447,9 +450,12 @@ would print the withheld CAN ID in the sections list.
   (`CMD_MSG_ACCESS_RESPONSE`) is retired and answers `ERR_INVALID_CMD`. The
   `MSGPROT_*` bits are transported for round-trip fidelity **only**. Any other
   serial tool reads a marked message in full and writes over it freely.
-- **A plain `.ct3` contains every field in clear JSON and nothing in it is
-  signed.** A text editor defeats all three tiers. Only Save Secure Config
-  (`.ct3s`) makes the bytes themselves unreadable.
+- **A plain `.ct3` carries the configuration's Message Passwords.** Since
+  format 2 its bytes are sealed, so a text editor no longer defeats the tiers —
+  but whoever holds the file holds the passwords that open its markings, which
+  is right for a configuration you own and wrong for one you ship. Only a
+  `.ct3s` withholds them, and only its markings stay closed on somebody else's
+  machine.
 - **ReadOnly is accident prevention, not security.** The viewer sees every field
   and may remove the section, so remove-and-retype reproduces the message without
   the password. Hidden and Protected differ substantively for the one reason that
@@ -478,44 +484,47 @@ would print the withheld CAN ID in the sections list.
 
 ## The .ct3s container
 
-**File → Save Secure Config…** (`src/model/secure_file.*`). A `.ct3` is indented
-JSON: every CAN ID, bit layout and scaling factor is legible in Notepad, and a
-message marking only stops *this app* from displaying them. That is fine
-for a configuration you own and useless for one you ship to a customer. A `.ct3s`
-is the same document as an opaque binary blob. Open… routes on the file's magic
-rather than its extension, so a `.ct3s` can never be parsed as JSON.
+**File → Secure Configuration Builder…** (`src/model/secure_file.*`,
+`src/ui/secure_builder_dialog.*`). The old contrast — legible JSON versus opaque
+binary — is gone: since format 2 a plain `.ct3` is itself a 128-byte readable
+preamble over the same sealed container (`src/model/config_file.h`), so neither
+file shows a CAN ID to Notepad. What a `.ct3s` adds is the two things a package
+handed to somebody else needs. **Concealment survives the file**: a `.ct3`
+carries the configuration's Message Passwords, so whoever holds it can open its
+markings, while a `.ct3s` does not and a marked message stays closed on the
+customer's machine. And the `.ct3s` carries **the rules for its own
+installation**. Open… routes on the file's magic rather than its extension.
 
-**Two modes, and the difference between them is the whole story.**
+**One mode, and being honest about it is the whole story.** The body is
+encrypted, but the key that decrypts it travels inside the file, obfuscated.
+Anyone with CAN Triple Device Manager can open a `.ct3s`, send it to a device and
+use its channels; nobody can read the protocol detail out of the bytes, and the
+protected messages stay concealed in the UI. This is **obfuscation over
+encryption**. It defeats a hex editor, a text search, a grep for `0x640`, and any
+tool that does not implement this format. It does **not** defeat someone who
+reads this source or disassembles the app: the key is in the file and a
+determined reader will find it.
 
-- **Standard** (`requirePassword = false`) — the body is encrypted, but the key
-  that decrypts it travels inside the file, obfuscated. Anyone with CAN Triple
-  Device Manager can open the file, send it to a device and use its channels;
-  nobody can read the protocol detail out of the bytes, and the protected
-  messages stay concealed in the UI. This is the shipping format: a customer can
-  deploy and update without ever seeing the CAN layout. Be honest about the
-  limit — this is **obfuscation over encryption**. It defeats a hex editor, a
-  text search, a grep for `0x640`, and any tool that does not implement this
-  format. It does **not** defeat someone who reads this source or disassembles
-  the app: the key is in the file and a determined reader will find it. If that
-  reader is in your threat model, use the second mode.
-- **Password-protected** (`requirePassword = true`) — the file key is
-  additionally wrapped under the Edit Protected Comms password, so the file
-  cannot be opened at all without it. There is no recovery: no reset, no back
-  door, no copy held anywhere. A lost password is a lost configuration, and the
-  save dialog says so before the fact.
-
-This is the classic "Hide setup information" / "Require access password for use"
-pairing on a locked comms template, for the same reasons.
+The password-protected mode that used to sit beside it — the file key wrapped
+under the Protected Comms password, so the file would not open at all — was
+removed with format 2. It was the one mode that withheld anything from a reader
+of this source, and it is gone by decision rather than by oversight. What now
+stops a package being *used* where it should not be is the install policy below.
+That is a different guarantee and is not offered as the same one: the policy
+decides which DEVICES will accept the package, not who may read it.
 
 **File layout** — all multi-byte integers LITTLE-ENDIAN.
 
 ```
 Header, 64 bytes, cleartext:
     0   u8[8]  magic          kSecureMagic
-    8   u16    formatVersion  kSecureFormatVersion
-   10   u16    flags          bit 0 = requires password
+    8   u16    formatVersion  kSecureFormatVersion — must EQUAL 2; a v1 file
+                              is refused, not read
+   10   u16    flags          none defined in v2; must be 0 or the file is
+                              refused
    12   u8[16] salt           random; seeds wrapping AND chunk placement
-   28   u32    iterations     PBKDF2 rounds for the password wrap
+   28   u32    iterations     vestigial: written, never read, now that nothing
+                              is derived from a password
    32   u32    carrierLength  bytes of carrier following the header
    36   u32    payloadLength  bytes of sealed payload hidden in the carrier
    40   u8[24] padding        random; ignored on read
@@ -528,9 +537,19 @@ run. In order, the material is:
                                     multiple of 16 in the final chunk)
 ```
 
-The sealed payload's **plaintext** is the four embedded-access-key bytes
-followed by the configuration body, so the key is encrypted and covered by the
-payload's tag along with everything else.
+Both checks above are exact on purpose. `formatVersion` must equal 2 because a
+v1 file is a password-protected package from a format that no longer exists, and
+refusing it by name beats half-reading it. `flags` must be zero because the one
+bit it ever carried was "requires password", and an unused field that is merely
+ignored is a field somebody can flip.
+
+The sealed payload's **plaintext** is four things in order: the four
+embedded-access-key bytes, a `u16` policy length, that many bytes of policy JSON,
+and then the configuration body. The policy sits inside the seal rather than in
+the cleartext header for two reasons, and either alone would settle it: in the
+header it would be readable off a disk, so a package would advertise which
+devices it was built for; and it would be editable, so the rules a package
+carries could be lifted by anyone with a hex editor.
 
 Slot order comes from a Fisher-Yates shuffle of the slot indices driven by the
 placement keystream — `HMAC-SHA256(salt, "ct3s/placement/v1" || u32be(ctr))`,
@@ -543,18 +562,18 @@ neither is asked to do the other's job.
 Wrapping, in the same terms:
 
 - `fileKey` — 32 random bytes, generated per save.
-- `wrapMask` — `HMAC-SHA256(salt, "ct3s/wrap/v1")` XOR
-  `PBKDF2(password, salt, iterations, 32)`, the second term present only when a
-  password is required; `wrapped = fileKey XOR wrapMask`.
+- `wrapMask` — `HMAC-SHA256(salt, "ct3s/wrap/v1")`, and nothing else;
+  `wrapped = fileKey XOR wrapMask`. The password-derived term went with the
+  password mode, so the mask is now always reproducible from the cleartext salt
+  — which is the honest statement of what the wrap is worth.
 - `encKey` / `macKey` — `HMAC-SHA256(fileKey, "ct3s/enc/v1" / "ct3s/mac/v1")`,
   fed to `sealPayload()` / `openPayload()` from `config_lock.h`. The `.ct3s` body
   therefore uses exactly the authenticated encryption (HMAC-SHA256 in counter
   mode, encrypt-then-MAC, PBKDF2 via `QPasswordDigestor` — hence the Qt6::Network
-  link) that the rest of the app already relies on; those primitives are all that
-  survived of the old configuration lock.
+  link) that the rest of the app already relies on.
 - `accessKey` — the 4 big-endian key bytes, prepended to the plaintext before
-  sealing. This is the Edit Protected Comms key, carried so the app can satisfy
-  a **device's** protected-comms gate on the customer's behalf without them ever
+  sealing. This is the Protected Comms key, carried so the app can satisfy a
+  **device's** protected-comms gate on the customer's behalf without them ever
   typing the password.
 
   It began life in a chunk of its own, masked with `HMAC(salt, …)`. That was
@@ -562,271 +581,111 @@ Wrapping, in the same terms:
   offset 12, so the mask hid nothing from anyone holding the source, and nothing
   authenticated the four bytes, so a single flipped bit produced a file that
   opened perfectly and yielded a silently wrong key — surfacing much later as an
-  unexplainable refusal from a device. Folding it into the payload costs
-  nothing, because the key only ever needs to be reachable in exactly the cases
-  the payload is: a standard file opens without a password, and anyone who can
-  open a password-protected one can derive the key themselves.
+  unexplainable refusal from a device. Folding it into the payload costs nothing,
+  because the key only ever needs to be reachable in exactly the cases the
+  payload is, and there is now only one such case.
 
 `SecureSaveOptions::noiseRatio` (0.35) adds carrier beyond what the payload needs,
 so two saves of the same document differ in length as well as in content and a
-file's size says nothing about how much configuration is in it. A truncated,
-tampered or wrong-password file fails at the payload's HMAC tag and is rejected
-whole — nothing is ever half-parsed — and `readSecureFile()`'s `error`
-distinguishes "wrong password" from "damaged file" so the caller can say which.
-`peekSecureFile()` reads the header alone, which is what lets Open… ask for a
-password *before* disturbing the document that is already open; cancelling leaves
-it untouched. Save follows the format the file already has
-(`Configuration::isSecureFile()`), so a secure configuration is never silently
-downgraded to plain JSON, and `saveSecureToFile()` refuses while comms are
-concealed: the body has to be assembled in full to be sealed, and a session that
-cannot see the protected messages must not be the one that rewrites the file
-carrying them.
+file's size says nothing about how much configuration is in it. A truncated or
+tampered file fails at the payload's HMAC tag and is rejected whole, with one
+message — nothing is ever half-parsed, and there is no "wrong password" case left
+to distinguish. `peekSecureFile()` reads the 64 cleartext bytes, which is enough
+to route Open… and to name a version this build cannot accept; the policy and the
+embedded key live in the sealed carrier, so a peek deliberately cannot reach
+them. A package's demands are not readable off a file lying on a disk.
 
-## Fleet identity
+## The firmware licence
 
-**Online → Fleet Identity…** (`src/ui/fleet_identity_dialog.*`). The problem it
-exists for: you ship a customer a device running a configuration whose CAN
-protocol is yours, not theirs. Six months later you need to send them a new one.
-They must be able to install it; they must not be able to read it; and it must not
-install on anything it was not built for. Reading the device's configuration to
-find out is the one thing a locked unit must not do, so the unit carries a small
-block that answers the question on its own.
+**Online → Firmware License Manager…** (`src/ui/firmware_license_dialog.*`,
+`firmware/src/license_store.c`). The problem it exists for: you ship a customer a
+device running a configuration whose CAN protocol is yours, not theirs. They must
+be able to install updates; they must not be able to read them; and an update
+must not install on anything it was not built for.
 
-The dialog's two panels are deliberately **not symmetrical**, and the asymmetry is
-the design: *This Device* is read-only, *This Configuration* is editable. One is a
-statement about a piece of hardware; the other is a statement about which hardware
-a file is allowed to reach.
+This replaces the **fleet identity**, which was compiled into the firmware and
+could only change with a rebuild and a reflash. That made it unforgeable and
+useless for anything issued after manufacture — and a licence is something you
+grant, revise and re-issue. The hardware record that genuinely cannot change now
+lives in the chip's OTP area instead, read by `CMD_GET_DEVICE_INFO` (0x45) and
+shown by **Online → Get Device Info…**: manufacturer, product, hardware version,
+serial number and date, burned once at manufacture. There is deliberately no
+write command to go with that read.
 
-### The device's half is compiled in
+**The record.** Manufacturer (32 B), Model (32 B), Version (8 B), and two
+16-byte derived secrets. It lives in two 2 KB pages of its own in flash bank 1,
+ping-ponged by a sequence number so a power cut mid-write leaves the previous
+licence intact rather than a blank, re-licensable unit, and it survives a Send, a
+Clear and a firmware update because it is nowhere near the configuration store.
 
-A unit's identity lives in `firmware/include/fleet_identity.h` and is fixed when
-the firmware is built. **Nothing writes it at runtime and no host command can
-change it** — there is no `CMD_WRITE_FLEET_ID` and no `writeFleetIdentity()` in
-`device_session`. Re-badging a unit means editing its identity file and flashing
-it. That is what makes the identity worth believing: an attacker cannot send a
-packet to become somebody else, a flash erase cannot lose it, and it cannot
-drift out of step with a configuration that was sent later.
+**Two secrets, and they are not alike.**
 
-Set it in `firmware/identity.local.ini` — a **gitignored** file that a fresh
-checkout does not have. Copy `identity.local.ini.example` to create one:
+- The **FW Updater Password** is the gate. Blank means anyone who connects may
+  rewrite the record; set means the device demands it first. It guards the
+  licence and nothing else.
+- The **Firmware Key** is the claim. It is what a unit proves to show which
+  licence it holds, and it is what a secure package checks before installing.
 
-```ini
-CT_VENDOR_ID=Detailed Motorsp
-CT_MODEL_ID=CAN Triple
-CT_SERIAL_NUMBER=0x00000123
-CT_FLEET_KEY=0xDEADBEEF
-```
+Neither is ever read back — not by this application, not by any command. The
+device stores derived keys, never the passphrases, and answers only challenges.
 
-`firmware/scripts/build_flags.py` runs before every build (`extra_scripts =
-pre:`), reads that file and appends the matching `-DCT_*` defines. **The tracked
-`platformio.ini` carries no identity values at all**, which is the point: real
-values checked in would have every developer's bench board claiming to be a
-shipping product. No file means an **unprovisioned** build; a file that is
-present but malformed is a **hard build error naming the line**, never a
-half-badged unit.
+**On the wire.** `CMD_READ_LICENSE` (0x46) returns the three text fields plus
+flags saying which secrets are set. `CMD_WRITE_LICENSE` (0x47) writes the record,
+gated on the updater password having been proved when one is set.
+`CMD_LICENSE_CHALLENGE` (0x48) issues a nonce and `CMD_LICENSE_RESPONSE` (0x49)
+answers it under either secret. `CMD_LICENSE_KEY_PROVE` (0x4A) runs the other
+way: the HOST supplies the nonce and the device answers under the Firmware Key,
+which is how a package confirms the unit really holds the licence rather than
+merely claiming the name.
 
-**The quoting sharp edge is gone.** The old flow put `-DCT_VENDOR_ID='"Detailed
-Motorsp"'` in `platformio.ini`, because the shell and SCons each got a go at the
-string and a plain `-DCT_VENDOR_ID="Acme"` arrived at the compiler as a bare
-identifier. `identity.local.ini` takes vendor and model as **plain unquoted
-text**, spaces and all — a `"` or `\` in the value is now itself the build error
-— and the script applies the quoting the define needs.
+Those two directions use **different labels** — `CT3/license/auth/v1` for
+host→device, `CT3/license/prove/v1` for device→host — and that domain separation
+is load-bearing rather than tidy. Without it the device would answer
+`HMAC(key, nonce)` for a nonce it had just issued, which is precisely the reply a
+host must produce to authenticate: a cable and no secret would have been enough
+for master-key authority on any licensed unit. The suite performs that attack and
+expects it to fail.
 
-| Field | Identity key | Wire | Set at |
-| --- | --- | --- | --- |
-| Vendor ID | `CT_VENDOR_ID` | 16 bytes, NUL-padded | build |
-| Model ID | `CT_MODEL_ID` | 16 bytes, NUL-padded | build |
-| Serial Number | `CT_SERIAL_NUMBER` | `u32` | build — **per UNIT** |
-| Flags | `CT_FLAGS` | `u16` | build (reserved, 0 — **not** an `identity.local.ini` key) |
-| Fleet Key | `CT_FLEET_KEY` | 4 bytes, **never read back** | build |
-| Config Version | — | `u16` | **runtime**, in the flash header |
+**The Firmware Key is a master key over the access passwords.** A session that
+proves it has every access function open until the next successful save
+(`accessBlocked()` returns false while `g_license_key_proved`). That is
+deliberate and it is a real elevation: it is what lets a package re-provision a
+unit whose customer set passwords nobody present knows. It is stated here, in the
+help and in the release notes for the same reason — an elevation nobody documents
+is a back door.
 
-`CT_FLAGS` is the one macro the identity file will not accept: nothing reads its
-bits yet, and an unknown key is a build error rather than a knob that does
-nothing. Every value has a default, so a build that sets nothing still compiles
-— it just reports itself **unprovisioned**, which is honest, rather than
-silently claiming to be somebody. `fleet_identity_is_set()` answers false and
-the host stops checking there; a blank unit must never satisfy a policy that
-names a vendor.
+## The install policy
 
-The two strings are **NUL-padded, not NUL-terminated**: all 16 bytes are usable
-characters, so they are compared as counted fields and never with `strcmp`. They
-are 16 *bytes*, not 16 QChars — a name with non-ASCII characters in it runs out of
-room sooner than its length suggests, which is why every writer on the PC side
-goes through `FleetIdentity::clampToWire()` (truncates on a UTF-8 boundary) rather
-than `QString::left()`.
+A `.ct3s` carries a `SecurePackagePolicy` (`src/model/secure_file.h`) sealed
+inside its payload, and **Online → Send Secure Configuration…** enforces it
+before the device is touched. This is what the removed Upload Configuration
+command used to do with a fleet identity, moved into the package itself, where it
+cannot be separated from the configuration it governs.
 
-### The per-unit serial, and what it costs
+The policy holds:
 
-`CT_SERIAL_NUMBER` is the one field that is per-BOARD rather than per-PRODUCT, so
-**a build carries exactly one unit's serial and each board needs its own
-compile-and-upload**. That is the deliberate price of "set it once in
-`identity.local.ini` and forget it": there is no provisioning step, no tool to
-write, no database to keep, and nothing a customer can reflash away — in
-exchange for not being able to flash fifty boards from one binary.
+- Optional matches on the licence's **Manufacturer**, **Model** and **Version**,
+  compared against what the device reports from `CMD_READ_LICENSE`.
+- A **Firmware Key the device must prove** — not optional, and not a string
+  compare. An unlicensed unit therefore takes no packages at all.
+- The **access passwords the install sets** as it lands (Send, Get and the four
+  Protected Comms slots, each as a derived key, or a clear).
+- The **configuration version** the install stamps on the unit.
 
-The alternative is sitting right there and is worth naming rather than pretending
-it does not exist: the STM32's 96-bit unique ID is already readable
-(`CMD_GET_DEVICE_ID`, the v18 device binding) and needs no provisioning at all.
-It is a different thing, though — **silicon chooses that number, not you**, so it
-cannot be the serial on an invoice, cannot be allocated before the board exists,
-and cannot be made to mean anything. The two coexist: the UID is the chip's
-identity and the serial is yours.
+`packageInstallVerdict()` is the decision, extracted as a pure function so a test
+can reach it while the window keeps only the wording. A refusal names the field
+and both values; there is no override, because a rule that can be clicked past is
+a warning wearing a costume, and an installer has no way to tell which is which.
 
-### Config version — the one runtime field, and why it rides SAVE
+The order matters and is fixed: read the licence, decide the verdict, prove the
+key read-only, map the configuration, confirm with the operator, then prove the
+key as master, write the access keys, take the Send gate and transfer. Nothing is
+written until every question has been answered.
 
-A configuration's version has to move every time a configuration is released.
-Compiling it in would mean a firmware build and a reflash per revision, which is
-precisely the thing the uploader exists to avoid, so this one field stays runtime
-state in the flash header.
-
-It arrives as an **optional 2-byte payload on `CMD_SAVE_TO_FLASH`** (0x0A); an
-empty payload leaves the stored version alone. It rides the commit rather than
-having a command of its own so the two cannot separate — a version that landed
-without its configuration, or a configuration that landed without its version,
-would each make the uploader's "is this update newer?" check lie, in a different
-direction each time. Firmware side it is `engine_set_config_version()` /
-`engine_config_version()`, saved and restored with the image by
-`flash_store_commit()` / `flash_store_validate()`.
-
-Unlike the access keys, the version does **not** survive `CLEAR_CONFIG`: the
-version describes the configuration, and a device with no configuration is running
-revision nothing. Reporting a stale version for tables that are no longer there
-would answer the newer-than question about a config that does not exist.
-
-### What crosses the wire
-
-`CMD_READ_FLEET_ID` (0x2F) answers `FleetIdentityPublic`, **41 bytes** —
-`vendor_id[16]`, `model_id[16]`, `serial_number` u32,
-`config_version` u16, `flags` u16, `key_present` u8. The fleet key is absent by
-design; `key_present` says only that there is one. (It was 45 while a fourth
-4-byte identifier sat between the serial and the version — see the Upload
-Configuration rules for why that field went. The size is worth stating exactly,
-because the host validates the reply by length and a stale 45 here would send
-someone hunting for four bytes the device never sends.)
-
-`CMD_FLEET_ID_PROVE` (0x31) is the one exchange that runs the other way: the
-**host** sends a 16-byte challenge and the **device** answers
-HMAC-SHA256(fleet key, challenge). Reading the identity says what a device
-*claims* to be; the challenge says it actually holds the fleet secret, which is
-what stops a look-alike collecting an update meant for someone else's fleet.
-
-Both are answerable **unconditionally**, by design: a locked-down unit still has
-to be able to say "is this update for me?", and the block carries no protocol
-detail — two opaque strings, two opaque numbers and a key nobody can read.
-
-### The configuration's half
-
-The document carries a `FleetIdentity` (which fleet this file is *for*) and an
-`UploadPolicy` (how strictly a device must match), both in
-`src/model/access_keys.h`. `sameFleetAs()` compares vendor and model
-**exactly** — they are identifiers, not display names, so case and spacing matter.
-Version and serial are deliberately not part of it: matching is the "is this my
-fleet" question, version is the "is this a step forward" question and serial is
-the "is this the right car" question, and they are asked separately so a customer
-cannot be walked backwards onto a configuration whose problems are already known.
-
-`FleetIdentityDialog::copyFromDevice()` fills the document's identity from the
-connected unit, so building an update for a device in front of you does not mean
-retyping its vendor and model and getting one character wrong.
-
-The fleet key never appears in a plain `.ct3`. `FleetIdentity::toJson()` takes
-`includeFleetKey` explicitly at every call site and only the encrypted `.ct3s`
-body passes `true`, because putting a fleet secret into legible JSON that people
-mail around would give away the attestation itself.
-
-## Upload Configuration
-
-**Online → Upload Configuration…** (`src/ui/upload_dialog.*`). Send Configuration
-is the engineer's command: it asks few questions and assumes you know what is on
-the bench. This is the one you hand to a dealer, an installer, or a customer. It
-opens a `.ct3s`, reads the unit in front of it, and refuses to install anything
-the package was not built for.
-
-Every rule's verdict is shown **before anything is written**, because the
-failure this exists to prevent is silent: a configuration that installs cleanly on
-the wrong product and misbehaves a week later on a track.
-
-| Rule | Compares | If it does not hold |
-| --- | --- | --- |
-| Vendor ID | exact match against the package | refuses |
-| Model ID | exact match against the package | refuses |
-| Serial Number | must be in the package's allow-list, when it pins one | refuses |
-| Fleet Key | the device must **prove** it, not merely claim the identity | refuses |
-| Config Version | whether installing this would move the unit **backwards** | warns |
-
-There was a **Series** rule here once, comparing an opaque 32-bit id that said
-which configuration line a unit belonged to *within* a model. It is gone rather
-than renamed, along with the series id and series key everywhere else in the
-project: Model ID is a sixteen-character string set by the same build flag at the
-same moment, so "CAN Triple TD" tells two configuration lines apart better than a
-hex number nobody can read off a screen — and it sat one row above Serial Number,
-one letter away from it, which is the last thing a rule table wants. The cost,
-stated so it is a decision and not a surprise: two lines sharing an identical
-Model ID can no longer be distinguished. Give them distinct model names.
-
-Each rule is an `UploadRule` — name, what the package wants, what the device says,
-and `Pass` / `Warn` / `Fail` / `NotChecked`. Kept as data rather than rendered on
-the spot so the Send path can apply the same rules without drawing the dialog;
-`UploadDialog::evaluate()` is static and shared, so the two can never disagree
-about what counts as a match. `NotChecked` means there was nothing to compare — an
-unprovisioned unit or an unprovisioned package — and is normal on a bench unit.
-`UploadVerdict::deviceReadable` is false when there is no connection or the
-firmware is too old to answer, and carries the reason in `problem` — which is a
-different thing from a rule failing, and is reported as such rather than as a
-refusal the operator might try to argue with.
-
-**Only a `Fail` blocks an upload** — that is the whole of
-`UploadVerdict::hasBlockingFailure()`, and there is no override for one. A rule
-that can be clicked past is a warning wearing a costume, and an installer handed
-this dialog has no way to judge which is which.
-
-**The version rule therefore warns and never refuses**, which is the same
-conclusion reached from the other direction. Reinstalling the revision a unit
-already runs is the single most common thing anyone does with an update package —
-a replaced unit, a reload after a clear — and equal counts as fine for exactly
-that reason. Deliberately going back to an older revision is also a normal act,
-performed by someone who has decided the newer one was worse. Neither is an
-error, so neither can be allowed to block; only "you are about to go backwards"
-is worth remarking on, the warning says it once, and the upload proceeds. A
-package whose `configVersion` is 0 makes no ordering claim at all and the rule
-sits out, because a prompt that appears on every unnumbered configuration and is
-always waved through only teaches people to click past the one that matters.
-
-The two policy switches — `requireFleetKey` and `warnOnOlderVersion`, both on by
-default — are **package-author decisions made in Fleet Identity when the file is
-built**, not bench-time overrides. That distinction is the point: the person who
-knows whether backdating is worth remarking on, or whether a fleet even has a key,
-is the person who built the package, not the installer holding it.
-`allowedSerials` empty means any serial in the fleet; a populated list is how a
-one-off replacement configuration is stopped from installing on the rest of a
-customer's cars.
-
-**None of these rules read a byte of the device's configuration.** That is the
-point: a locked-down unit can be checked completely without being opened, which is
-what lets a customer take updates for a protected config they cannot read.
-
-**What it is not** — stated here rather than left to be discovered:
-
-- The **fleet key is shared across a fleet**, so one dumped unit compromises
-  attestation for every unit built with it, and there is no revocation short of a
-  new key and a reflash. It is in the binary: anyone who can read a unit's flash
-  — or the `.bin` you ship — has it. The backstop is STM32G4 readout protection, a
-  device programming decision rather than a code one.
-- A **serial is public**. It narrows *which* unit an update reaches; it is not a
-  second secret, and any host that can ask a device for its identity learns it.
-- **This is not a signature and it is not DRM.** It stops the wrong file reaching
-  the wrong product and stops a look-alike collecting someone else's update.
-  Nothing in it prevents someone who already holds the package from doing as they
-  like with their own tooling.
-
-The nearest neighbour worth distinguishing is the **v18 UID binding**, which pins
-a configuration to one chip by its silicon serial. That is a different mechanism
-answering a different question: binding says "only this chip may run this image",
-where the fleet identity says "this device is one of ours, and this package was
-built for it". Serial pinning in an `UploadPolicy` sits between the two — it
-narrows the install by a number *you* chose, and unlike the UID binding it is a
-check the host performs, not one the device enforces on itself.
+Passwords a package sets land atomically with the configuration, which closes a
+documented trap: access keys live in the write-once header, so a password set
+through Set Access Passwords on an already-configured unit only ever lasted until
+the next power cycle. A package install re-commits that header anyway.
 
 ## Send Secure Configuration
 
@@ -835,14 +694,13 @@ directly under Send Configuration in the menu because it is the same verb with a
 different subject. It reads a `.ct3s` and installs it **without ever putting its
 contents on screen**.
 
-The gap it fills is one the other two commands leave open. Send Configuration
-sends the document you are looking at. Upload Configuration *loads* a package into
-the document and then sends that. Both leave the configuration sitting in the
-application afterwards, which is exactly right when the configuration is yours and
-exactly wrong when it is not: hand either to a dealer and "install this update"
-quietly becomes "and here is the CAN protocol, have a browse". The whole `.ct3s`
-arrangement exists so a customer can deploy a configuration they are not entitled
-to read, and it would be undone by the app opening the file for them.
+The gap it fills is one Send Configuration leaves open. That command sends the
+document you are looking at and leaves it sitting in the application afterwards,
+which is exactly right when the configuration is yours and exactly wrong when it
+is not: hand it to a dealer and "install this update" quietly becomes "and here
+is the CAN protocol, have a browse". The whole `.ct3s` arrangement exists so a
+customer can deploy a configuration they are not entitled to read, and it would
+be undone by the app opening the file for them.
 
 **Nothing about the package reaches the document, and nothing reaches the screen.**
 The file is decoded into a `Configuration` declared inside the function, used only
@@ -894,8 +752,8 @@ the application. What makes a package genuinely unreadable is saving it with
 "Require access password for use" — and then it cannot be installed here without
 that password either, which is the trade its author made.
 
-- **File**: New, Open…, Save, Save As…, **Save Secure Config…** (the binary
-  `.ct3s`), Check Channels (live validation report with unused-channel cleanup),
+- **File**: New, Open…, Save, Save As…, **Secure Configuration Builder…**
+  (packages a `.ct3` as a `.ct3s`), Check Channels (live validation report with unused-channel cleanup),
   Config Summary… (Channel Summary Report via
   `src/model/config_report.*` — usage analysis incl. incomplete/unused channels,
   print / PDF / text export), Reveal / Conceal Protected Communications,
@@ -1312,10 +1170,10 @@ that password either, which is the trade its author made.
   and exports them as a Vector ASCII `.asc` log via "Save to File…" — classic
   frames as standard lines, CAN FD frames as Vector `CANFD` lines carrying
   real BRS and ESI), Load Device Config from Flash, Clear Device Config, Device
-  Status, **Upload Configuration…**, **Set Access Passwords…** and **Fleet
-  Identity…**. All three need a connection: the uploader has a device to check
-  against, the access keys live in the device rather than in the document, and
-  half of the Fleet Identity dialog is read out of the unit in front of it.
+  Status, **Get Device Info…**, **Set Access Passwords…** and **Firmware
+  License Manager…**. All three need a connection: the OTP record is read out of
+  the unit in front of them, the access keys live in the device rather than in
+  the document, and the licence is written to the device itself.
   Send and Get each prove the matching access password first via
   `MainWindow::ensureDeviceAccess()`, which for Edit Protected Comms tries the
   key the session already holds — typed earlier, or carried inside a `.ct3s` —
@@ -1846,12 +1704,11 @@ CANTripleDeviceManager/
                               primitives both of those build on)
   src/ui/                     main_window + the dialogs listed above,
                               bit_layout_table (the Frame Layout bit map)
-  firmware/include/           fleet_identity.h — the build-time identity. What
-                              you actually edit per unit is
-                              firmware/identity.local.ini (gitignored; copy
-                              identity.local.ini.example), which
-                              scripts/build_flags.py turns into the -DCT_*
-                              defines.
+  firmware/include/           protocol.h and flash_store.h — the wire and
+                              store contract the app mirrors in wire_structs.h;
+                              license_store.h — the licence record's layout.
+                              The licence is written over the wire, so there is
+                              nothing to edit per unit at build time.
 ```
 
 Send Configuration: GET_STATUS → CLEAR_CONFIG → chunked writes (msg/sig/math/
