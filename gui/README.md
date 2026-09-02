@@ -16,7 +16,7 @@ the repository's **Releases** page. The manual is browsable under `docs/` in
 the published repository, and ships inside the program as Help → Contents (F1).
 
 Capacities: **500 messages** (receive or transmit, mixed freely), **1000
-channels** (a shared pool), 100 math channels, 100 conditions, 50 up/down
+channels** (a shared pool), 100 math channels, 200 conditions, 50 up/down
 counters, **50 timers**, 100 constants, 32 message relays, 20 Transmit CRC8
 rules, 8 integrators, and
 8 lookup tables of each kind — 2x16 (1 axis, 16 sites) and **8x8** (2 axes,
@@ -58,18 +58,20 @@ rules, 8 integrators, and
 - **Select Channel** — searchable list of the document's user-created
   channels with any-order word-prefix matching ("temp eng oil" finds
   Engine Oil Temp); create and edit channels via New…/Edit….
-- **Calculations** — Math Channels, Conditions, **Timers**, **Up / Down
-  Counters**, **Constants**, and **Tables** grid editors, each mapping onto the
-  matching firmware table. A constant is a custom channel carrying a fixed value
-  the firmware writes every evaluation pass. **Tables** are value lookups —
+- **Calculations** — Math Channels, User Conditions, **Timers**, **Up / Down
+  Counters**, **Integrators**, **Constants**, **Tables** and **Device Script**
+  editors, each mapping onto the matching firmware table. A constant is a custom
+  channel carrying a fixed value the firmware writes every evaluation pass; an
+  integrator accumulates a rate over time; a Device Script is code the device
+  itself runs each evaluation pass. **Tables** are value lookups —
   8× 2x16 (one axis, up to 16 sites) and 8× **8x8**
   (X + Y axes, up to 8 sites each, 64 cells) — with each axis Interpolated or
   Discrete (centered); the looked-up value drives a generated output channel.
 - **Online** — Send Configuration (F5, chunked + read-back verified, applies
   bus rates via CONTROL_CAN), **Send Secure Configuration…**, Get Configuration,
   Monitor Channels (F3, live value stream), CAN Viewer (raw
-  frame monitor + frame injection), flash save/load, device status, **Get Device
-  Info…**, **Firmware License Manager…** and **Set Access
+  frame monitor + frame injection), Reset Device, Device Status…, **Get Device
+  Info…**, Update Firmware…, **Firmware License Manager…** and **Set Access
   Passwords…**. Get also reads the buses' modes, rates
   and termination back off the device via `CMD_READ_CAN_SETUP`, so the document
   reflects what the buses are actually running, not an assumption.
@@ -216,9 +218,12 @@ application links.
   **`*.ct3s`** (File → Secure Configuration Builder…) when the CAN protocol
   inside them is not for the reader to see — same document, concealment that
   survives the file, plus the policy deciding which devices may install it.
-  Open… picks the reader from the file's contents, not its extension. The device
-  reloads its saved config from flash at every power-up; the PC file remains the
-  editable master.
+  Save As offers a third format, **`*.json`** — named in the dropdown as
+  readable and not encrypted — for diffing in version control or handing to
+  another tool; it is never a default, and a Save on a `.ct3` or `.ct3s` never
+  turns into one. Open… picks the reader from the file's contents, not its
+  extension. The device reloads its saved config from flash at every power-up;
+  the PC file remains the editable master.
 
 ## Licence
 
@@ -229,6 +234,6 @@ built from source in the private tree, prebuilt in the public one — and those
 objects are © Minton Performance, all rights reserved. The shipped binaries
 bundle Qt 6 and the MinGW runtime, so the third-party paperwork lives under
 [`installer/`](installer/): `THIRD-PARTY-NOTICES.txt` (what is bundled, under
-which licence, and where its sources are), `LICENSE.LGPLv3.txt` and
-`GCC-RUNTIME-EXCEPTION.txt`. The `deploy` target stages all of it into the
+which licence, and where its sources are), `LICENSE.LGPLv3.txt`,
+`LICENSE.GPLv3.txt` and `GCC-RUNTIME-EXCEPTION.txt`. The `deploy` target stages all of it into the
 payload, so the zip and the installer cannot ship without it.
