@@ -24,26 +24,32 @@ dash-manager layout and navigation.
   the cap now answers to the device's 1 KB `rxBuffer`, which is what a frame
   larger than the buffer would be lapped by. The two moved together, and must
   keep moving together. One command in flight (stop-and-wait), timeout
-  250 ms (1500 ms for flash ops), ~5 retries, then a 1.2 s quiet period
-  (firmware auto-recovers UART faults on its 1 Hz tick).
+  250 ms (**4000 ms** for flash ops — sized on CLEAR_CONFIG, which erases the
+  whole 128 KB region before it ACKs and measures about 1.43 s), 5 retries,
+  after which the command fails and the queue moves on immediately. There is no
+  quiet period: the firmware auto-recovers UART faults on its own 1 Hz tick,
+  which the host does not wait for.
 - Responses: `0x80` ACK (payload = 3 bytes `[ERR_OK, req_crc_hi, req_crc_lo]`),
   `0x81` NACK (payload = `[error, req_crc_hi, req_crc_lo]`, does **not** echo the
   command), data responses **echo the request cmd**; the two trailing bytes echo
   the CRC16 of the request being answered, big-endian, which is what lets a host
   tell an answer to THIS command from a late answer to the last one; range reads echo `start,count`, which the GUI checks to
-  reject stale duplicates from retries. Streams `0x82` (monitor, 76 B) and
-  `0x83` (value stream) are always on, but **current firmware emits them
-  unframed** (FIRMWARE-NOTES #7) — the GUI's framed stream demux activates
-  once the firmware routes them through its packet framing.
-- The firmware interleaves ASCII printf debug on the same UART **without**
-  framing; any inter-delimiter chunk failing COBS/CRC/0x55 checks is silently
-  discarded.
-- Write chunk sizes at the 496-byte cap: messages 49/frame (4 + 49×10 = 494),
-  signals 7 (4 + 7×64 = 452), math 20, conditions 14, timers 24, 8x8
-  definitions 6 (4 + 6×73 = 442), 8x8 grid rows 15 (4 + 15×32 = 484). Read
-  chunk sizes are bounded by the **unchanged** 2030-byte device→host cap:
-  messages ≤200, signals ≤**31** (4 + 31×64 = 1988; 32 would be 2052),
-  math ≤84, cond ≤50, timers ≤50, 8x8 defs ≤8, 8x8 rows ≤32 per request.
+  reject stale duplicates from retries. Streams `0x82` (monitor, payload sized to
+  the frame it carries) and `0x83` (value stream) are always on and are **framed
+  like every other reply** — `serial_proto_send_frame()` sends all three — so the
+  GUI's framed stream demux is live rather than waiting on the firmware.
+- ASCII debug text is framed too, as `CMD_LOG` `0x90`, so nothing on this UART is
+  unframed any more. Any inter-delimiter chunk failing COBS/CRC/0x55 checks is
+  still silently discarded, which is what makes the link tolerate line noise.
+- Write chunk sizes at the 496-byte cap: messages **15**/frame
+  (4 + 15×32 = 484), signals 7 (4 + 7×64 = 452), math 20, conditions **7**
+  (4 + 7×62 = 438), timers **15**, relays 16, 8x8 definitions 6
+  (4 + 6×73 = 442), 8x8 grid rows 15 (4 + 15×32 = 484). Read chunk sizes are
+  bounded by the **unchanged** 2030-byte device→host cap: messages ≤**50**
+  (4 + 50×32 = 1604 — the cap allows 63, but 50 divides MAX_MESSAGES exactly ten
+  ways), signals ≤**31** (4 + 31×64 = 1988; 32 would be 2052), math ≤84,
+  cond ≤**32** (4 + 32×62 = 1988; 33 would be 2050), timers ≤50, 8x8 defs ≤8,
+  8x8 rows ≤32 per request.
   Every one of these was recomputed from its record size when the cap rose —
   scaling the old numbers would have been wrong for signals in particular,
   whose record grew 48 → 64 at the same time. (`wire_structs.h` WRITE_CHUNK_* /
@@ -53,25 +59,39 @@ dash-manager layout and navigation.
   requires, and nothing else would ever report it.)
 - Table capacities, declared in both `protocol.h` and `wire_structs.h` and
   asserted equal in `test_firmware_link`: messages **500** (see the 9-bit
-  ceiling in §3), signals **1000**, math 100, conditions **250**, counters 50,
+  ceiling in §3), signals **1000**, math 100, conditions **200**, counters 50,
   timers **50**, constants 100, relays 32, 2x16 tables 8, 8x8 tables **8**
   (and therefore 64 grid-row records — table `t` owns rows `t*8 .. t*8+7`),
-  integrators 8. Together they are 126,368 B of the 131,072 B (128 KB) config
-  region; `CFG_TOTAL` in `flash_store.c` is generated from `FLASH_TABLE_LIST`
+  integrators 8, transmit-CRC8 rules 20, and 384 script chunks of 64 B. That is
+  the whole of `FLASH_TABLE_LIST`, fifteen tables; together with the 256-byte
+  header they are 129,888 B of the 131,072 B (128 KB) config region, leaving
+  **1,184 B**; `CFG_TOTAL` in `flash_store.c` is generated from `FLASH_TABLE_LIST`
   and `_Static_assert`ed against the region size, so that total is derived
   rather than quoted.
-- **Conditions went 100 → 250**, and that is where most of the layout's slack
-  went: `ConditionConfig` is 35 B, `PAD8(35)` is 40, so the table costs
-  10,000 B where it cost 4,000 and only **4,704 B** of the region are left.
-  What caps the next raise is not flash, though — it is the shared channel
-  pool. Every condition owns an output slot, so 250 of them claim up to 250 of
-  the 1000 signal slots, and another 250 signals would cost 16,000 B against
-  4,704 spare.
+- **Conditions went 100 → 250, and then back to 200** — one of the two
+  capacities here ever reduced, and the only one that paid for growth in its own
+  table; `MAX_SCRIPT_CHUNKS` 512 → 384 below is the other, and it paid for
+  someone else's. `ConditionConfig` is
+  62 B, `PAD8(62)` is 64, so the table costs 12,800 B where 250 of the older
+  56-byte records cost 14,000: dropping 250 → 200 is what paid for the per-side
+  "for" qualifier, and it came in 1,200 B under what it replaced. The margin,
+  not the conditions table, is the budget story — store v18's message label cost
+  8,000 B (500 slots going 16 → 32) plus 512 for the relay label, 8,512 in all,
+  and `MAX_SCRIPT_CHUNKS` 512 → 384 returned 8,192 of it. The remaining 320 B
+  came out of the margin, which is how it went 1,504 → 1,184 B. What caps a
+  raise back up is not flash anyway: every condition owns an output slot, so 200
+  of them claim up to 200 of the 1000 signal slots, and 250 would claim a
+  quarter of the signal table for boolean outputs alone.
+  (`flash_store.c`'s `CFG_TOTAL` comment is the source for these figures, and it
+  says outright that where it and the `_Static_assert` disagree, the assert is
+  right. The prose block above `#define MAX_CONDITIONS` in `protocol.h` still
+  tells the old 250 story — take the number from the define.)
 
 Commands (see `../include/protocol.h`): GET_STATUS 0x01, WRITE/READ
 MSG 0x02/0x03, SIG 0x04/0x05, MATH 0x06/0x07, COND 0x08/0x09,
 SAVE_TO_FLASH 0x0A (payload **optional**: two bytes carrying the configuration's
-version number — see "Fleet identity"), LOAD_FROM_FLASH 0x0B, CLEAR_CONFIG 0x0C,
+version number — see "The install policy", and READ_CONFIG_VERSION 0x4B reads it
+back), CLEAR_CONFIG 0x0C,
 CONTROL_CAN 0x0D, INJECT_CAN_FRAME 0x0E (71 B payload),
 STREAM_VALUES 0x0F, WRITE/READ COUNTER 0x10/0x11, TIMER 0x12/0x13,
 CONST 0x14/0x15 (v6), WRITE/READ CONFIG_NAME 0x16/0x17, RESET_DEVICE 0x18
@@ -82,8 +102,24 @@ WRITE/READ INTEG 0x23/0x24 (v16), GET_DEVICE_ID 0x29 + WRITE_CONFIG_BINDING
 0x2B/0x2C, ACCESS_CHALLENGE 0x2D, ACCESS_RESPONSE 0x2E,
 and **READ_CAN_SETUP 0x30** (see "Reading the bus setup
 back"), WRITE/READ DEVICE_CHANNELS 0x32/0x33, and the 8x8 lookup table's four:
-WRITE/READ TABLE8X8_DEF **0x34/0x35** + TABLE8X8_ROW **0x36/0x37**.
-**0x2F and 0x31 are retired ground**: they were READ_FLEET_ID and
+WRITE/READ TABLE8X8_DEF **0x34/0x35** + TABLE8X8_ROW **0x36/0x37**, the
+firmware update block FW_UPDATE_BEGIN/DATA/END/STATUS/ABORT **0x38-0x3C**, the
+device script's WRITE/READ SCRIPT **0x3D/0x3E** + SCRIPT_STATUS **0x3F**,
+WRITE/READ CRC8 **0x41/0x42**, WRITE/READ MSG_PASSWORDS **0x43/0x44** (the
+configuration's four Message Passwords, which unlike the access keys are read
+back on purpose), GET_DEVICE_INFO **0x45** (88 raw OTP bytes), the licence block
+READ/WRITE_LICENSE **0x46/0x47** + LICENSE_CHALLENGE **0x48** +
+LICENSE_RESPONSE **0x49** + LICENSE_KEY_PROVE **0x4A**, and READ_CONFIG_VERSION
+**0x4B**. Replies are ACK **0x80**, NACK **0x81**, MONITOR_STREAM **0x82**,
+VALUE_STREAM **0x83** and LOG **0x90**.
+
+**0x0B is retired**: it was LOAD_FROM_FLASH, which reloaded a stored BACKUP
+image over the live tables, and the flash-resident single-copy store removed the
+backup copy it read from. The boot path still loads the store; no wire command
+re-runs it. **0x40 is retired** too — it was the per-message access response,
+and it must keep answering ERR_INVALID_CMD rather than ERR_LOCKED, because a
+shipped 2.2.x Manager sends it before every Send and reads ERR_INVALID_CMD as
+"this message has no key" and walks past. **0x2F and 0x31 are retired ground**: they were READ_FLEET_ID and
 FLEET_ID_PROVE, and the fleet identity they served was replaced by the writable
 firmware licence (0x46-0x4A, "The firmware licence" below). The licence DOES
 have a write, and the identity that genuinely cannot change moved into OTP
@@ -94,9 +130,19 @@ READ_CAN_SETUP. That reuse is safe in a way the retirements below are
 not: this is protocol v1 and nothing is deployed, so no host anywhere holds an
 older meaning for it. A command gated behind an access password the
 session has not proved NACKs **ERR_LOCKED 0x07**; which password is implied by
-what was asked (a read trips Get, a write trips Send, a protected-comms
-operation trips Edit Protected Comms), so the host can name the right one in its
-prompt without the device having to say which key it tripped over.
+what was asked — a read trips Get; a write, a clear and a commit trip Send — so
+the host can name the right one in its prompt without the device having to say
+which key it tripped over. On the configuration path there are two: Protected
+Comms gates no read, no write, no clear and no commit, so a host that prompts for
+it on an ERR_LOCKED from one of those is asking for the wrong password. It gates
+exactly one command, its own: `CMD_WRITE_ACCESS_KEYS` calls
+`accessBlocked(request.function)` on the key being *written* — the one call site
+in the firmware that takes a host-supplied function rather than a literal Send or
+Get — so changing or clearing an already-set Protected Comms password that this
+session has not proved NACKs ERR_LOCKED, and there Protected Comms is precisely
+the right prompt. (The prose above `#define ACCESS_FN_EDIT_COMMS` in `protocol.h`
+still says it never appears in an `accessBlocked()` call. Take it from the
+handler.)
 **0x1B/0x1C are retired** — they were the v12 2x8 table, and because the v13
 definition record is also 70 bytes, reusing them would let a v12 host's record
 pass the length check and be misread; a version mismatch now fails cleanly on
@@ -177,22 +223,33 @@ mismatch between the two numbers is the point rather than an oversight.
 
 ## 2. UI inventory (mirrors Dash Manager; field lists verified on-screen)
 
-- **Main window** — menu bar `File · Connections · Calculations · Functions ·
-  Online · Tools · Help`; toolbar; central splash (logo + device art
-  placeholder); connection selector bottom-left; status bar with link state.
+- **Main window** — menu bar `File · Connections · Calculations · Online ·
+  Tools · Help`, six menus and no toolbar; a central placeholder of two labels
+  (a "CAN Triple / DEVICE MANAGER" title over a grey hint naming Communications,
+  Send Configuration (F5) and Monitor Channels (F3)); status bar with the
+  document name, a protected-messages lock indicator (hidden unless the document
+  carries a comms password) and the link state.
   Editing menus disabled until a configuration document is open (offline-first
   document model; explicit Send/Get to move it to/from the device).
 ## Set Access Passwords
 
 **Online → Set Access Passwords…** (`src/model/access_keys.*`,
-`src/ui/access_passwords_dialog.*`) — three independent passwords, laid out like
-the same screen in Dash Manager: a list of protected functions, a Set… button,
-and a tick against the ones that carry a password.
+`src/ui/access_passwords_dialog.*`) — three protected functions across **six
+rows**, because Protected Comms has four slots and one unit can accept
+configurations sealed under any of them (several vendors on one device). Send and
+Get are single-slot. Laid out like the same screen in Dash Manager: a list of
+protected functions, a Set… button, and a tick against the ones that carry a
+password.
 
 - **Send a Configuration** — the device refuses a Send without it.
 - **Get a Configuration** — the device refuses a Get without it.
-- **Edit Protected Comms** — reveals and edits messages marked "Protect
-  Communication", both in this app and on the device.
+- **Protected Comms** — the device-confirmed half of a Protect Communication
+  marking. On its own it reveals and edits nothing: a marked message is opened by
+  its own Message Password, and this is what a connected unit must confirm before
+  a configuration containing such messages will be sent to it. It gates no
+  configuration traffic — no read, write, clear or commit is refused on it. The
+  one command it does gate is its own: changing or clearing a Protected Comms
+  password requires the current one proved, exactly as Send and Get do.
 
 They live **in the device**, not in the file, which is why the dialog sits under
 Online and needs a connection; what it shows is read back from the unit every
@@ -229,8 +286,20 @@ is a password that silently reads as no password at all.
 random bytes and the host answers `CMD_ACCESS_RESPONSE` (0x2E) with the function
 index plus HMAC-SHA256(the 4 key bytes, challenge). A serial capture is worth
 nothing on the next connection, and a wrong guess costs a full round trip.
-`CMD_READ_ACCESS_KEYS` (0x2B) answers only a bitmask of *which* passwords are
-set — the keys are write-only and nothing ever reads one back off the wire.
+`CMD_READ_ACCESS_KEYS` (0x2B) answers two bytes: byte 0 a bitmask of *which*
+functions are protected, byte 1 (v17) a bitmask of which of the four Protected
+Comms slots are in use, so a host that predates the second byte reads byte 0 and
+sees what it always saw. The keys themselves are write-only and nothing ever
+reads one back off the wire.
+
+**One exception to all of this, and it is deliberate.** A session that proves the
+unit's Firmware Key (`CMD_LICENSE_RESPONSE`, 0x49) sets `g_license_key_proved`,
+and `accessBlocked()` then answers false for every function — reads included —
+until the next successful `SAVE_TO_FLASH`. That is what lets a secure package
+re-provision a unit whose customer set passwords nobody present knows. It is the
+manufacturer's master key over all three, and it is written down here rather than
+left to be discovered.
+
 Setting, changing or clearing one (`CMD_WRITE_ACCESS_KEYS`, 0x2C) requires the
 current one to have been proved first, otherwise "set a new password" would be
 the way past not knowing the old. The same is true document-side:
@@ -734,17 +803,18 @@ errors there were and not one word of what they were, because every mapper error
 names a row. The line being held is between a file the app declines to show and a
 file the app shows in pieces.
 
-**The rules are the uploader's, and so is the answer to a failure.**
-`UploadDialog::evaluate()` runs here too, before the Send password is asked for and
-before a single record goes out — a package that does not belong on this unit must
-never get as far as partially overwriting it. A `Fail` refuses outright, with each
-failure on its own line naming its field: *this package was not built for this
-device* is true and useless to the person holding the laptop, where *Vendor ID
-incorrect — this package is for "Acme", the device reports "Other"* tells them
-whether they picked up the wrong file or the wrong unit, which is the only thing
-they can act on. Warnings are appended to the confirmation and got on with. This is
-a deployment command rather than an engineer's, so unlike Send Configuration there
-is no "anyway".
+**The rules are the package's, and so is the answer to a failure.**
+`packageInstallVerdict()` runs on the sealed policy against the licence read off
+the unit, before the Send password is asked for and before a single record goes
+out — a package that does not belong on this unit must never get as far as
+partially overwriting it. A failure refuses outright, with each mismatch on its
+own line naming its field: *this package was not built for this device* is true
+and useless to the person holding the laptop, where *Manufacturer: package wants
+"Acme", device says "Other"* tells them whether they picked up the wrong file or
+the wrong unit, which is the only thing they can act on. There is no warning
+tier — `InstallVerdict` carries `noPolicy`, `deviceUnlicensed` and `mismatches`,
+and any one of them is fatal. This is a deployment command rather than an
+engineer's, so unlike Send Configuration there is no "anyway".
 
 A plain `.ct3` chosen here is refused by name rather than quietly sent.
 `Configuration::peekFile()` reads the header first, and a file that is not sealed
@@ -1363,20 +1433,26 @@ first. `#define MAX_MESSAGES` in `protocol.h` says so at the definition. A trans
 `period_ms`; its channel rows are packed (physical → raw via the inverse of the
 same scaling) and the frame is composed and sent on schedule. A transmit
 signal's value slot is the channel's canonical slot, encoded in the signal's
-`unit_type`/`unit_val` as "source index + 1", so a channel received in one
-message can be re-transmitted in another.
+`tx_source` field as "source index + 1" (0 = its own slot), so a channel received
+in one message can be re-transmitted in another.
 
 **Triggered transmit:** a transmit message carries `tx_trigger_cond` (the index
 of the condition whose boolean output gates it; `TX_TRIGGER_COND_NONE` = 0xFFFF
 when unset, so a Get cannot invent condition 0 out of an empty field) and
-`tx_trigger_flags` (`TXTRIG_ENABLED` 0x01, `TXTRIG_RESET_ON_TX` 0x02). Both were
+`tx_trigger_flags` (`TXTRIG_ENABLED` 0x01; bit 0x02 was `TXTRIG_RESET_ON_TX`,
+retired before it ever shipped and removed rather than reserved). Both were
 taken **in place** from three of the four bytes of the retired per-message key,
-so `CanMessageConfig` is still **14 bytes**, `PAD8(14)` is still 16, no table
-offset moved, `CFG_TOTAL` is unchanged, every chunk constant stands, and the
-feature cost **zero config flash**. `PROTOCOL_VERSION` stays 1 for the same
-reason: the record is the same size, so an older host's write still satisfies
-the length check — and it writes zeros there, which decode to "cyclic", exactly
-the behaviour it intended. The flags need a byte of their own because
+so triggered transmit itself cost **zero config flash**: at the time
+`CanMessageConfig` stayed 14 bytes, no table offset moved and every chunk
+constant stood. The record has grown since — store v18 appended the 18-byte
+message label, so it is **32 bytes** today, `PAD8(32)` is 32, and the message
+table went 8,000 → 16,000 B with the script region paying for it.
+`PROTOCOL_VERSION` still stays 1, but no longer for that reason: the record is
+NOT the same size any more, and a host built against the 14-byte record fails the
+length check outright rather than being misread — which is the store version's
+job, not the protocol's. What triggered transmit relied on at the time was that
+an older host's write still satisfied the length check and wrote zeros into the
+trigger bytes, which decode to "cyclic", exactly the behaviour it intended. The flags need a byte of their own because
 `CanMessageConfig.flags` has none free: 0x01–0x20 are the `MSGFLAG_*` set and
 0x40/0x80 are the `MSGPROT_*` level, whose values are pinned.
 
@@ -1400,23 +1476,7 @@ reference as "no gate" would put frames on a customer's wire precisely when the
 configuration says it does not know whether they belong there; silence is the
 recoverable failure.
 
-`TXTRIG_RESET_ON_TX` turns that into one frame per rising edge, and it needed
-the engine's **first and only per-condition runtime state**:
-`g_cond_consumed[MAX_CONDITIONS]` (250 B, not persisted, cleared by
-`resetRuntime`). Conditions were purely combinational, which is what lets
-`executeConditions` run from both the tick and the receive path without caring
-how often, and the latch does not change that — it is memory of the
-*transmission*, not of the expression, and it only ever forces the published
-value down. It exists because a plain zero-write into the value slot would be
-overwritten within milliseconds by the next `executeConditions`. A consumed
-condition publishes 0 even while its expression holds and re-arms the instant
-the expression goes false; clearing on `!met` rather than on a timer is what
-makes this an edge trigger and not a rate limiter, and nothing has to agree on a
-duration. The latch is set only after `composeAndTransmit` **accepted** the
-frame, so a full outgoing ring costs one transmission rather than the whole
-edge, and a power cycle re-arms everything — the alternative is a unit that
-boots refusing to send because of an edge it consumed before it was last
-switched off.
+Bit 0x02 was `TXTRIG_RESET_ON_TX`, which would have turned that into one frame per rising edge. It was **retired before it ever shipped** and removed rather than reserved, because nothing in the field had seen it: it needed per-condition runtime state in the engine, and the same behaviour falls out of a Set/Reset User Condition — set on Message Received, reset on Message Transmitted — which costs the engine nothing it did not already have.
 
 **Receive timeout defaults (v4):** a receive message reuses its otherwise-unused
 `period_ms` field as a receive timeout in milliseconds ("Receive Timeout" +
@@ -1490,7 +1550,7 @@ see it. Adding the table bumped the protocol and flash-image versions to 6.
 **Flash-resident config (v7, firmware-internal):** the firmware runs its config
 tables directly out of flash instead of a RAM copy, reclaiming ~40 KB of RAM
 (use fell from ~62% to ~32%). The bank-2 region — 48 KB with a 64-byte header
-when this landed, **96 KB with a 256-byte header** today — holds that header
+when this landed, **128 KB with a 256-byte header** today — holds that header
 then fixed, 8-byte-padded record slots per table; each `WRITE_*` programs its
 records in place, `SAVE` commits the header (per-table counts + bus setup + a
 CRC over the header and every live record) which marks the image valid, and
@@ -1627,9 +1687,11 @@ already the DOCUMENT row — one whole table, one line in the Tables dialog — 
 `Table8x8GridRow`. `test_firmware_link` asserts the pair byte for byte, which is
 where the two names are reconciled.
 
-Flash: the region is **96 KB** (`FLASH_STORE_CAPACITY` 98304 — kept a multiple
-of 4096 so the single-bank 4 KB page-erase arithmetic stays aligned), image
-version **4**, `FLASH_NUM_TABLES` **13** (the 4x4 out, the 8x8's Def and Row in),
+Flash: the region is **128 KB** (`FLASH_STORE_CAPACITY` 131072 — kept a multiple
+of 4096 so the 4 KB page-erase arithmetic stays aligned; it went 52 → 96 KB at the
+capacity revision and 96 → 128 KB at flash map v2, for the script table), store
+version **18**, `FLASH_NUM_TABLES` **15** (the 4x4 out; the 8x8's Def and Row, the
+script chunk table and the transmit-CRC8 rules in),
 `MAX_PADDED_RECORD` still 112 (the 8x8 Def pads to 80, a row to 32; the retired
 4x4's 112 was the peak and nothing has replaced it). `.ct3` files save the
 1-axis table under a `tables2x16` key and still load the older `tables2x8` key,
@@ -1637,8 +1699,10 @@ and save the 2-axis table under `tables8x8` while still loading `tables4x4`.
 
 **Message relay (v11):** a new **Message Type** in Communications Setup
 (alongside Receive/Transmit Message) — a masked-ID gateway rule stored in its own
-device table (`ENGINE_TABLE_RELAYS`, `RelayConfig` = 11 bytes: address, bitmask,
-flags, `src_bus`, `forward_bus_mask`; `MAX_RELAYS` 32; commands
+device table (`ENGINE_TABLE_RELAYS`, `RelayConfig` = **29 bytes**: address,
+bitmask, flags, `src_bus`, `forward_bus_mask`, plus the rule's 18-byte name —
+a relay is a section in the host's list like any other, so a Get returns its name
+rather than inventing one; `MAX_RELAYS` 32; commands
 `WRITE/READ_RELAY_CFG` 0x19/0x1A). Unlike a message, a relay carries no channels:
 the firmware runs `engine_process_relays()` on **every** received frame,
 independent of the message table, and forwards the whole frame to the rule's
