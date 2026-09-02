@@ -10,8 +10,10 @@ USB cable.
 
 ## Download
 
-**[⬇ Download the latest installer](https://github.com/mitchdetailed/CAN-Triple-Device-Manager/releases/latest)**
-— Windows 10/11, 64-bit.
+**[⬇ Download the latest installer](https://github.com/mitchdetailed/CAN-Triple-Device-Manager/releases/latest/download/CANTripleDeviceManager-Setup_Windows_x64.exe)**
+— Windows 10/11, 64-bit. That link always fetches the current release; the
+[releases page](https://github.com/mitchdetailed/CAN-Triple-Device-Manager/releases)
+has the notes for each one, and the earlier installers.
 
 One Setup installs everything:
 
