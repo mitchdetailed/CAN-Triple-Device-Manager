@@ -6,7 +6,7 @@ navigation for communications, messages, and channels.
 
 Talks to the device over the ST-Link virtual COM port (USART1, PB6/PB7,
 7,372,800 baud — ST-Link **V3** required for that rate). Built and released
-together with the **firmware in [`firmware/`](firmware/README.md)**: one
+together with the **firmware in [`firmware/`](../firmware/README.md)**: one
 repository, one wire format, one release.
 
 **Installing rather than building?** The Windows installer — application,
@@ -66,11 +66,11 @@ rules, 8 integrators, and
   (X + Y axes, up to 8 sites each, 64 cells) — with each axis Interpolated or
   Discrete (centered); the looked-up value drives a generated output channel.
 - **Online** — Send Configuration (F5, chunked + read-back verified, applies
-  bus rates via CONTROL_CAN), **Send Secure Configuration…**, **Upload
-  Configuration…**, Get / Verify Configuration,
+  bus rates via CONTROL_CAN), **Send Secure Configuration…**, Get Configuration,
   Monitor Channels (F3, live value stream), CAN Viewer (raw
-  frame monitor + frame injection), flash save/load, device status, **Set Access
-  Passwords…** and **Fleet Identity…**. Get also reads the buses' modes, rates
+  frame monitor + frame injection), flash save/load, device status, **Get Device
+  Info…**, **Firmware License Manager…** and **Set Access
+  Passwords…**. Get also reads the buses' modes, rates
   and termination back off the device via `CMD_READ_CAN_SETUP`, so the document
   reflects what the buses are actually running, not an assumption.
 - **Online → Set Access Passwords…** — function passwords held
@@ -99,41 +99,38 @@ rules, 8 integrators, and
   enforces none of them, and a plain `.ct3` — scrambled though it now is —
   carries its own key, so only a `.ct3s` keeps a marking closed on somebody
   else's machine.
-- **Online → Fleet Identity…** — who a unit is (Vendor / Model / Serial Number /
-  plus a fleet key it proves it holds) and which fleet a configuration
-  is *for*. The device half is **read-only here on purpose: a unit's identity is
-  compiled into its firmware**, set in `firmware/identity.local.ini` at build
-  time — plain `CT_VENDOR_ID=Acme`, `CT_SERIAL_NUMBER=0x00000123` and the rest of
-  the `CT_*` keys documented in `firmware/include/fleet_identity.h`. That file is
-  gitignored and does not exist in a fresh checkout: copy
-  `identity.local.ini.example` to create it, and `firmware/scripts/build_flags.py`
-  turns it into the compiler's `-D` defines before every build (strings go in
-  unquoted — the old `'"…"'` shell-quoting dance is the script's problem now).
-  Nothing on the wire can change it, so re-badging a unit means building and
-  flashing it, and a flash erase cannot lose it. The serial number is per unit,
-  so each board gets its own build. The one runtime field is Config Version,
-  which travels with each save to flash.
-- **Online → Upload Configuration…** — the command you hand a dealer or a
-  customer. It opens a `.ct3s`, reads the unit in front of it and refuses to
-  install a package the device does not match: vendor, model, an optional
-  serial allow-list, and a fleet key the device must **prove**. Config Version
-  only **warns**, and only when the install would move the unit backwards —
-  rolling back to a revision you know is good is a deliberate act, not a mistake.
-  Every rule's verdict is shown before a byte is written, and none of them read
-  the device's configuration — which is exactly what lets a
-  customer take updates for a protected config they cannot read. There is no
-  override for a failing rule: one that can be clicked past is a warning wearing
-  a costume, and an installer has no way to tell which is which.
+- **Online → Firmware License Manager…** — the licence a unit carries: Firmware
+  Manufacturer, Model and Version, plus two secrets that are not alike. The **FW
+  Updater Password** is the gate: blank means anyone who connects may rewrite the
+  record, set means the device demands it first. The **Firmware Key** is the
+  claim: it is what a unit proves to show which licence it holds, and what a
+  secure package checks before it will install. The key is also a master key over
+  the access passwords, so a package proving it can re-provision a unit whose
+  customer has locked it — a real elevation, said plainly because it is one. The
+  record lives in the device's own flash pages, survives a Send, a Clear and a
+  firmware update, and neither secret is ever read back, by this application or
+  any command. This replaces **Fleet Identity**, which was compiled into the
+  firmware and could only change with a rebuild and a reflash — unforgeable, and
+  useless for anything issued after manufacture.
+- **Online → Get Device Info…** — the manufacturing record burned into the
+  STM32's one-time-programmable area: manufacturer, product, hardware version,
+  serial number and date. It is the one thing on the device that cannot change,
+  which is why there is deliberately **no write command** to go with the read —
+  burning it is a manufacturing step. An unburned part reads as Unknown
+  throughout, and so does a read that faults, rather than resetting the unit.
 - **Online → Send Secure Configuration…** — installs a `.ct3s` on the connected
   device **without ever opening it**. Send Configuration sends the document on
-  screen and Upload Configuration loads the package into it first; both leave the
-  configuration in the app afterwards, so handing either to a dealer turns
+  screen and leaves it in the app afterwards, so handing that to a dealer turns
   "install this update" into "and here is the CAN protocol, have a browse". This
   one decodes the package into a throwaway Configuration, maps it, sends it, and
   discards it — your own open document is untouched, and nothing about the
   package is displayed, down to a mapping failure reporting how many errors there
-  were rather than what they were. It applies the uploader's rules and refuses on
-  a failure, since a deployment command has no "anyway".
+  were rather than what they were. The package's policy is enforced **before the
+  device is touched**: the licence fields it names must match, its Firmware Key
+  must be *proved* by the unit, and an unlicensed device takes no package at all.
+  A refusal names the field and both values. There is no override for a failing
+  rule — one that can be clicked past is a warning wearing a costume, and an
+  installer has no way to tell which is which.
 - **File → Check Channels** — full validation report on the current in-memory
   configuration (no save required — the header states exactly what was checked
   and when); the firmware validates almost nothing, so the GUI enforces the
@@ -144,21 +141,27 @@ rules, 8 integrators, and
   Generates/From and Uses/For tables with the DBC extraction detail, compound
   Id[n] groups, calculations), incomplete channels, unused channels — with
   Print, Save PDF, and Save Text.
-- **File → Save Secure Config…** — writes the document as a `.ct3s`, which
-  keeps Hidden and Protected messages concealed in the copy the customer opens,
-  so they can deploy and update a configuration without ever reading its CAN
-  layout. A plain `.ct3` is binary too, but confers no concealment.
-  Optionally wrapped under the
-  Protected Comms password, in which case the file will not open without it and
-  there is no recovery. See `DESIGN.md` for the container format and an honest
-  account of what each mode does and does not defeat.
+- **File → Secure Configuration Builder…** — packages a `.ct3` as a `.ct3s`,
+  which keeps Hidden and Protected messages concealed in the copy the customer
+  opens, so they can deploy and update a configuration without ever reading its
+  CAN layout. A plain `.ct3` is binary too, but confers no concealment. The
+  package also carries the rules for its own installation: optional matches on
+  the licence's Manufacturer, Model and Version, a **Firmware Key the device
+  must prove** — mandatory, so an unlicensed unit takes nothing — the access
+  passwords the install sets as it lands, and the configuration version it
+  stamps on the unit. See `DESIGN.md` for the container format and an honest
+  account of what it does and does not defeat.
 
 ## Build
 
-**The firmware sources are required.** The application embeds the device's own
-image validator and script VM by compiling a handful of C files straight out of
-the firmware tree — that is what makes the configurator run the *device's* code
-rather than a re-implementation. CMake finds that tree in either place:
+**The firmware sources are not needed to build this.** The application embeds
+the device's own image validator and script VM — that is what makes the
+configurator run the *device's* code rather than a re-implementation — and the
+five C files behind them are the `ct_device_core` library, which the published
+repository carries **prebuilt** as `firmware/lib/libct_device_core.a`. That is
+what lets those implementations stay closed while a public clone still builds
+as-is; in the private tree the same target builds from source instead. Either
+way CMake finds the firmware tree in one of two places:
 
 - `../firmware` — the layout of the published repository
   ([CAN-Triple-Device-Manager](https://github.com/mitchdetailed/CAN-Triple-Device-Manager)),
@@ -174,7 +177,6 @@ cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=C:/Qt/6.7.2/mingw_64 `
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++ -DCMAKE_C_COMPILER=gcc
 cmake --build build
 build\test_roundtrip.exe       # protocol/mapper self-tests
-build\test_firmware_link.exe   # GUI stack against the real firmware core
 build\CANTripleDeviceManager.exe
 ```
 
@@ -191,13 +193,17 @@ cmake --build build --target installer   # dist/CANTripleDeviceManager-<version>
                                          # (needs Inno Setup 6; ISCC found automatically)
 ```
 
-> The test suite compiles the firmware's engine/serial/flash/identity sources
-> out of the same firmware tree the application uses, so everything above —
-> application and tests alike — needs it present. In the published repository
-> it always is.
+> Two of the test executables — `test_firmware_link` and `test_preserve` —
+> compile the firmware's engine, serial and flash sources directly rather than
+> linking the library, so CMake builds them only where those sources exist,
+> which is the private tree. A public checkout says so on the configure line and
+> skips them. Everything else — the application, its tools and every other test
+> — builds from what the repository carries.
 
-Firmware: `pio run` (and `pio run -t upload`) inside `firmware/` — see
-[firmware/README.md](firmware/README.md).
+Firmware: closed source, and not built from this repository. It travels as the
+binaries in [`firmware/`](../firmware/README.md) — the `.ctf` the installer
+carries and flashes, the bootloader, and the prebuilt device-core library the
+application links.
 
 ## Documents
 
@@ -207,17 +213,16 @@ Firmware: `pio run` (and `pio run -t upload`) inside `firmware/` — see
   suggested fixes.
 - Configurations are saved as **`*.ct3`** — a short readable header giving the
   format, schema and writing version, then an encrypted binary body — or as
-  **`*.ct3s`** (File → Save Secure Config…) when the CAN protocol inside them is
-  not for the reader to see — same document, concealment that survives the file,
-  optionally unopenable without the
-  Edit Protected Comms password. Open… picks the reader from the file's contents,
-  not its extension. With the firmware in `firmware/` the device reloads its
-  saved config from flash at every power-up; the PC file remains the editable
-  master.
+  **`*.ct3s`** (File → Secure Configuration Builder…) when the CAN protocol
+  inside them is not for the reader to see — same document, concealment that
+  survives the file, plus the policy deciding which devices may install it.
+  Open… picks the reader from the file's contents, not its extension. The device
+  reloads its saved config from flash at every power-up; the PC file remains the
+  editable master.
 
 ## Licence
 
-MIT — the full text is [COPYING](COPYING) at the repository root. The device
+MIT — the full text is [COPYING](COPYING), beside this file. The device
 firmware and bootloader are NOT open source: the app links their desktop-side
 portion (the image validator and script VM) as the `ct_device_core` library —
 built from source in the private tree, prebuilt in the public one — and those
