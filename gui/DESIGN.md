@@ -26,9 +26,11 @@ dash-manager layout and navigation.
   keep moving together. One command in flight (stop-and-wait), timeout
   250 ms (1500 ms for flash ops), ~5 retries, then a 1.2 s quiet period
   (firmware auto-recovers UART faults on its 1 Hz tick).
-- Responses: `0x80` ACK (payload = 1 byte `0x00`), `0x81` NACK (payload =
-  1 error byte, does **not** echo the command), data responses **echo the
-  request cmd**; range reads echo `start,count`, which the GUI checks to
+- Responses: `0x80` ACK (payload = 3 bytes `[ERR_OK, req_crc_hi, req_crc_lo]`),
+  `0x81` NACK (payload = `[error, req_crc_hi, req_crc_lo]`, does **not** echo the
+  command), data responses **echo the request cmd**; the two trailing bytes echo
+  the CRC16 of the request being answered, big-endian, which is what lets a host
+  tell an answer to THIS command from a late answer to the last one; range reads echo `start,count`, which the GUI checks to
   reject stale duplicates from retries. Streams `0x82` (monitor, 76 B) and
   `0x83` (value stream) are always on, but **current firmware emits them
   unframed** (FIRMWARE-NOTES #7) — the GUI's framed stream demux activates
@@ -84,10 +86,11 @@ WRITE/READ TABLE8X8_DEF **0x34/0x35** + TABLE8X8_ROW **0x36/0x37**.
 **0x2F and 0x31 are retired ground**: they were READ_FLEET_ID and
 FLEET_ID_PROVE, and the fleet identity they served was replaced by the writable
 firmware licence (0x46-0x4A, "The firmware licence" below). The licence DOES
-have a write. Neither id is reused. The identity that stays fixed is
-compiled into the firmware, so `0x30` (briefly WRITE_UPDATE_ID, during the
-revision where the identity was runtime state) went back into the pool and was
-handed to READ_CAN_SETUP. That reuse is safe in a way the retirements below are
+have a write, and the identity that genuinely cannot change moved into OTP
+instead (`CMD_GET_DEVICE_INFO`, 0x45) — nothing is compiled in any more. Neither
+id is reused. `0x30` — briefly WRITE_UPDATE_ID, during the revision where the
+identity was runtime state — went back into the pool and was handed to
+READ_CAN_SETUP. That reuse is safe in a way the retirements below are
 not: this is protocol v1 and nothing is deployed, so no host anywhere holds an
 older meaning for it. A command gated behind an access password the
 session has not proved NACKs **ERR_LOCKED 0x07**; which password is implied by
@@ -113,8 +116,8 @@ Compound (multiplexed) messages are v8
 `ControlCanPayload` is v9; compound transmit (Batch/Sequential via
 MSGFLAG_TX_SEQUENTIAL) is v10; the message-relay table is v11; the lookup
 tables are v12, the 1-axis one widened to 2x16 in v13 and the 2-axis one
-replaced by the 8x8; the three per-function access keys, the firmware licence
-block came after those, and the capacity expansion (message, signal and timer
+replaced by the 8x8; the three per-function access keys and the firmware
+licence block came after those, and the capacity expansion (message, signal and timer
 tables widened, the label back to 32 bytes, the payload cap raised, the 8x8
 replacing the 4x4) is the most recent.
 Known firmware gaps are collected in `FIRMWARE-NOTES.md`.
@@ -137,19 +140,21 @@ The two numbers have not stayed together since, and that asymmetry is the
 point. `PROTOCOL_VERSION` is **still 1** — the length check
 (`4 + count*item_size`) is what makes a version mismatch fail cleanly, so the
 wire number buys nothing a record size does not. A stored *layout*, on the
-other hand, really does move, and `FLASH_STORE_VERSION` is **10**: most
-recently for `MAX_CONDITIONS` 100 → 250, which shifts every table below the
-conditions and would otherwise have a v9 image misread record-for-record
+other hand, really does move, and `FLASH_STORE_VERSION` is **18**: most
+recently for `CanMessageConfig` 14 → 32 B, the message label. Messages are the
+first table in the region, so that shifts every table below them and would
+otherwise have a v17 image misread record-for-record
 before its CRC ever ran. The GUI's `EXPECTED_STORE_VERSION` is the same
 number, and Send Configuration checks it against the unit **before it writes
 anything**, so a mismatch is named up front rather than discovered as a
 part-written device.
 
 **The `.ct3` FILE schema was deliberately NOT reset with it.**
-`kConfigSchemaVersion` keeps counting — it is **17**, the schema in which a
-transmit section can name the User Condition that triggers it
-(`transmitCondition` / `resetConditionOnTransmit`) — and files written at 2
-through 16 are on people's disks right now. 17 is additive, and the bump is
+`kConfigSchemaVersion` keeps counting — it is **20** (17 let a transmit section
+name the User Condition that triggers it, 18 made a User Condition Momentary or
+Set/Reset, 19 added `clampToRange`, 20 gave a timer's Start and Stop full
+comparison rows) — and files written at 2 through 19 are on people's disks right
+now. Each bump is additive, and the bump is
 mandatory for the familiar reason: `"cyclic": false` has been a legal, inert
 value in every file since the beginning, so an older Manager reads a Triggered
 section as a perfectly ordinary message, finds nothing missing, and sends one
@@ -450,12 +455,12 @@ would print the withheld CAN ID in the sections list.
   (`CMD_MSG_ACCESS_RESPONSE`) is retired and answers `ERR_INVALID_CMD`. The
   `MSGPROT_*` bits are transported for round-trip fidelity **only**. Any other
   serial tool reads a marked message in full and writes over it freely.
-- **A plain `.ct3` carries the configuration's Message Passwords.** Since
-  format 2 its bytes are sealed, so a text editor no longer defeats the tiers —
-  but whoever holds the file holds the passwords that open its markings, which
-  is right for a configuration you own and wrong for one you ship. Only a
-  `.ct3s` withholds them, and only its markings stay closed on somebody else's
-  machine.
+- **Both formats carry the same key material, and neither carries a password.**
+  A `.ct3` and a `.ct3s` are written from one `buildBody()`, so a marked section
+  travels with its tier and its `messageKey` — the DERIVED four bytes — in
+  either. Since format 2 both are sealed, so a text editor no longer defeats the
+  tiers. What conceals a marked message is this application's rule, applied to
+  both formats alike, not something a `.ct3s` withholds and a `.ct3` gives away.
 - **ReadOnly is accident prevention, not security.** The viewer sees every field
   and may remove the section, so remove-and-retype reproduces the message without
   the password. Hidden and Protected differ substantively for the one reason that
@@ -488,12 +493,13 @@ would print the withheld CAN ID in the sections list.
 `src/ui/secure_builder_dialog.*`). The old contrast — legible JSON versus opaque
 binary — is gone: since format 2 a plain `.ct3` is itself a 128-byte readable
 preamble over the same sealed container (`src/model/config_file.h`), so neither
-file shows a CAN ID to Notepad. What a `.ct3s` adds is the two things a package
-handed to somebody else needs. **Concealment survives the file**: a `.ct3`
-carries the configuration's Message Passwords, so whoever holds it can open its
-markings, while a `.ct3s` does not and a marked message stays closed on the
-customer's machine. And the `.ct3s` carries **the rules for its own
-installation**. Open… routes on the file's magic rather than its extension.
+file shows a CAN ID to Notepad, and both carry the same key material — one
+`buildBody()` writes either. What a `.ct3s` adds is the two things a package
+handed to somebody else needs. **The Protected Comms key travels with it**: a
+`.ct3s` can carry the four-byte Protected Comms key, so the customer's copy
+satisfies a device's protected-comms gate without them ever typing the password.
+And it carries **the rules for its own installation**. Open… routes on the
+file's magic rather than its extension.
 
 **One mode, and being honest about it is the whole story.** The body is
 encrypted, but the key that decrypts it travels inside the file, obfuscated.
@@ -569,8 +575,10 @@ Wrapping, in the same terms:
 - `encKey` / `macKey` — `HMAC-SHA256(fileKey, "ct3s/enc/v1" / "ct3s/mac/v1")`,
   fed to `sealPayload()` / `openPayload()` from `config_lock.h`. The `.ct3s` body
   therefore uses exactly the authenticated encryption (HMAC-SHA256 in counter
-  mode, encrypt-then-MAC, PBKDF2 via `QPasswordDigestor` — hence the Qt6::Network
-  link) that the rest of the app already relies on.
+  mode, encrypt-then-MAC) that the rest of the app already relies on. No PBKDF2
+  is involved in sealing or opening a `.ct3s` — nothing here is derived from a
+  password any more; Qt6::Network is still linked for `QPasswordDigestor`, which
+  the access-key derivation uses.
 - `accessKey` — the 4 big-endian key bytes, prepended to the plaintext before
   sealing. This is the Protected Comms key, carried so the app can satisfy a
   **device's** protected-comms gate on the customer's behalf without them ever
@@ -585,12 +593,16 @@ Wrapping, in the same terms:
   because the key only ever needs to be reachable in exactly the cases the
   payload is, and there is now only one such case.
 
-`SecureSaveOptions::noiseRatio` (0.35) adds carrier beyond what the payload needs,
-so two saves of the same document differ in length as well as in content and a
-file's size says nothing about how much configuration is in it. A truncated or
-tampered file fails at the payload's HMAC tag and is rejected whole, with one
-message — nothing is ever half-parsed, and there is no "wrong password" case left
-to distinguish. `peekSecureFile()` reads the 64 cleartext bytes, which is enough
+`SecureSaveOptions::noiseRatio` (0.35, clamped to 0..8) sizes the noise as a
+fraction of the material chunks, under a floor of `kMinNoiseChunks` (6) — a
+fraction of very little is still very little. That much is deterministic; what
+makes two saves of the same document differ in LENGTH is the random spread added
+on top of the floor, so a file's size says nothing about how much configuration
+is in it. A tampered file fails at the payload's HMAC tag; a truncated one is
+caught earlier, because every length in the cleartext header is tested against
+the buffer actually held before a byte of it is indexed. Either way the file is
+rejected whole — nothing is ever half-parsed, and there is no "wrong password"
+case left to distinguish. `peekSecureFile()` reads the 64 cleartext bytes, which is enough
 to route Open… and to name a version this build cannot accept; the policy and the
 embedded key live in the sealed carrier, so a peek deliberately cannot reach
 them. A package's demands are not readable off a file lying on a disk.
@@ -621,8 +633,13 @@ Clear and a firmware update because it is nowhere near the configuration store.
 **Two secrets, and they are not alike.**
 
 - The **FW Updater Password** is the gate. Blank means anyone who connects may
-  rewrite the record; set means the device demands it first. It guards the
-  licence and nothing else.
+  rewrite the record; set means the device demands a licence proof first. It
+  guards the licence and nothing else. Note what satisfies it: `g_license_proved`
+  is set by a correct answer under EITHER secret, so a host holding the Firmware
+  Key can rewrite the record too. The comment beside the check in
+  `serial_proto.c` says the opposite — that the Firmware Key deliberately does
+  not gate this — so the code and its own commentary disagree, and the code is
+  what runs.
 - The **Firmware Key** is the claim. It is what a unit proves to show which
   licence it holds, and it is what a secure package checks before installing.
 
@@ -631,7 +648,8 @@ device stores derived keys, never the passphrases, and answers only challenges.
 
 **On the wire.** `CMD_READ_LICENSE` (0x46) returns the three text fields plus
 flags saying which secrets are set. `CMD_WRITE_LICENSE` (0x47) writes the record,
-gated on the updater password having been proved when one is set.
+gated — when an updater password is set — on a licence proof having been given in
+this session, by either secret.
 `CMD_LICENSE_CHALLENGE` (0x48) issues a nonce and `CMD_LICENSE_RESPONSE` (0x49)
 answers it under either secret. `CMD_LICENSE_KEY_PROVE` (0x4A) runs the other
 way: the HOST supplies the nonce and the device answers under the Firmware Key,
@@ -678,8 +696,9 @@ and both values; there is no override, because a rule that can be clicked past i
 a warning wearing a costume, and an installer has no way to tell which is which.
 
 The order matters and is fixed: read the licence, decide the verdict, prove the
-key read-only, map the configuration, confirm with the operator, then prove the
-key as master, write the access keys, take the Send gate and transfer. Nothing is
+key read-only, map the configuration, confirm with the operator, then — only
+when the package actually sets passwords — prove the key as master and write the
+access keys, and finally take the Send gate and transfer. Nothing is
 written until every question has been answered.
 
 Passwords a package sets land atomically with the configuration, which closes a
@@ -748,9 +767,12 @@ rather than installed on faith.
 **The honest boundary**, so nobody mistakes this for more than it is: the bytes are
 decrypted in this process, because they have to be to be sent at all. This
 withholds them from the UI; it does not withhold them from someone instrumenting
-the application. What makes a package genuinely unreadable is saving it with
-"Require access password for use" — and then it cannot be installed here without
-that password either, which is the trade its author made.
+the application. There is no longer a stronger setting to reach for: the
+password-protected mode that once made a package genuinely unreadable went with
+format 2, and nothing replaced it, because a package that cannot be opened here
+cannot be installed here either. What a package controls now is not who may read
+it but which DEVICES will accept it — the install policy — and that is a
+different guarantee, offered as itself.
 
 - **File**: New, Open…, Save, Save As…, **Secure Configuration Builder…**
   (packages a `.ct3` as a `.ct3s`), Check Channels (live validation report with unused-channel cleanup),
@@ -1171,9 +1193,11 @@ that password either, which is the trade its author made.
   frames as standard lines, CAN FD frames as Vector `CANFD` lines carrying
   real BRS and ESI), Load Device Config from Flash, Clear Device Config, Device
   Status, **Get Device Info…**, **Set Access Passwords…** and **Firmware
-  License Manager…**. All three need a connection: the OTP record is read out of
-  the unit in front of them, the access keys live in the device rather than in
-  the document, and the licence is written to the device itself.
+  License Manager…**. The first two need a connection: the OTP record is read
+  out of the unit in front of them, and the access keys live in the device rather
+  than in the document. The Firmware License Manager opens without one and says
+  so — composing a licence is desk work, and connecting is Apply's first step
+  rather than a toll on opening the dialog.
   Send and Get each prove the matching access password first via
   `MainWindow::ensureDeviceAccess()`, which for Edit Protected Comms tries the
   key the session already holds — typed earlier, or carried inside a `.ct3s` —
