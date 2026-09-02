@@ -109,14 +109,20 @@
 #include <QByteArray>
 #include <QString>
 
+#include <QJsonObject>
+
 #include "access_keys.h"
 
 namespace ct {
 
 constexpr int kSecureHeaderBytes = 64;
 constexpr int kSecureMagicBytes = 8;
-constexpr quint16 kSecureFormatVersion = 1;
-constexpr quint16 kSecureFlagRequiresPassword = 0x0001;
+// v2 dropped the password-protected mode. A v1 file is REFUSED rather than
+// read: the mode is gone, so a file that depends on it could not be opened
+// anyway, and half-reading one would mean carrying the wrapping code forever to
+// service files nobody is making. Packages are rebuilt from their .ct3, which is
+// where the configuration actually lives.
+constexpr quint16 kSecureFormatVersion = 2;
 constexpr int kSecureFileKeyBytes = 32;
 constexpr int kSecureChunkBytes = 16;
 
@@ -124,20 +130,155 @@ constexpr int kSecureChunkBytes = 16;
 // announces itself as "CT3SECURE" in a hex dump invites the next question.
 extern const unsigned char kSecureMagic[kSecureMagicBytes];
 
+// WHAT A PACKAGE DEMANDS OF THE UNIT IT IS INSTALLED ON, and what it changes
+// there. Built by the Secure Configuration Builder, sealed inside the .ct3s
+// alongside the configuration, and enforced by Send Secure Configuration before
+// a single record is written.
+//
+// This is the upload policy, rebuilt on the firmware licence. The one it
+// replaces compared a document's fleet block against an identity compiled into
+// the firmware; that identity is gone, and a licence is a better anchor anyway
+// because it can be issued and revised after the board was built.
+//
+// ---------------------------------------------------------------------------
+// THE KEY IS NOT OPTIONAL. Every package names a Firmware Key and every target
+// must prove it. The three string matches are each optional — a package may
+// decline to care about the model, say — but the key always applies, so an
+// unlicensed unit takes no packages at all. The provisioning order that follows
+// from this is deliberate: flash the firmware, issue a licence over serial with
+// the Firmware License Manager, and only then can packages be installed. There
+// is no deadlock in that, because issuing a licence needs no package.
+//
+// The key is stored DERIVED, never as the passphrase, and it is checked by
+// challenge — the host picks a nonce, the device answers under the key it
+// holds, and the two answers are compared. Nothing that travels reveals it.
+//
+// ---------------------------------------------------------------------------
+// The password updates are the other half: a package may set the device's Send,
+// Get and Protected Comms passwords as it installs. That reverses an older rule
+// which said access passwords must never be a side effect of a Send, and the
+// reversal is deliberate for two reasons.
+//
+// The first is that it is the only moment it reliably WORKS. Access keys live in
+// the config store's write-once header, so a password set on an already
+// configured unit survives only until the next power cycle — the documented
+// "set the password, THEN send a configuration" trap. An install erases and
+// re-commits that header anyway, so passwords applied here land atomically with
+// the configuration.
+//
+// The second is that the Firmware Key authorises it. A package proving the key
+// holds the manufacturer's secret, and the device lets it overwrite passwords it
+// does not know (see license_store.h). Without that a package could only ever
+// provision a blank unit.
+//
+// Each field is OPTIONAL and empty means "leave this one alone", which is what
+// the Builder's checkboxes select. A field that is present but empty means
+// REMOVE that password.
+struct SecurePackagePolicy
+{
+    // Optional string matches against the device's licence. Empty = not checked.
+    QString matchManufacturer;
+    QString matchModel;
+    QString matchVersion;
+
+    // The revision this package stamps on the unit when it installs, read back
+    // by Device Status. 0 means unversioned. Lives here because a PACKAGE is
+    // the deployable revision — it used to be a document field, edited in a
+    // dialog that no longer exists, and a bench Send has no business
+    // renumbering a unit.
+    quint16 configVersion = 0;
+
+    // The derived Firmware Key, kLicenseKeyBytes long. MANDATORY: a policy
+    // whose key is missing or the wrong length is not installable, and
+    // isValid() is what every writer and reader checks.
+    QByteArray key;
+
+    // Device passwords to apply on install, AS DERIVED KEYS — never as the
+    // passphrases. The device only ever needs the 4-byte PBKDF2 key, so that is
+    // all a package carries; the phrase somebody typed into the Builder is
+    // derived on the spot and discarded. This matters because the .ct3s key
+    // travels in the file obfuscated: anyone reading this source can open any
+    // package, and a package holding typed passwords would hand them every
+    // passphrase a manufacturer ever used, reuse and all. A derived key opens
+    // one function on one fleet and nothing else. Found in review.
+    //
+    // set* = false leaves that password alone. set* = true with kNoAccessKey
+    // CLEARS it — safe as a sentinel because deriveAccessKey() never folds a
+    // real phrase to zero. Send and Get are one each; the four Protected Comms
+    // slots are separate because the device keys them that way.
+    bool setSend = false;
+    AccessKey sendKey = kNoAccessKey;
+    bool setGet = false;
+    AccessKey getKey = kNoAccessKey;
+    bool setCommsSlot[4] = {false, false, false, false};
+    AccessKey commsSlotKey[4] = {kNoAccessKey, kNoAccessKey, kNoAccessKey, kNoAccessKey};
+
+    bool isValid() const { return key.size() == kLicenseKeyBytes; }
+    bool changesPasswords() const
+    {
+        return setSend || setGet || setCommsSlot[0] || setCommsSlot[1] || setCommsSlot[2]
+               || setCommsSlot[3];
+    }
+
+    QJsonObject toJson() const;
+    static SecurePackagePolicy fromJson(const QJsonObject &o);
+};
+
+// THE INSTALL VERDICT, as a decision rather than as dialogs.
+//
+// Everything Send Secure Configuration can decide WITHOUT a round trip lives
+// here, where a test can reach it. It used to live inline in the window, which
+// made it the one gate in the install path with no test — the same shape that
+// let the licence-key oracle ship, and the same shape protectedSendVerdict was
+// extracted to fix. The window keeps only the wording.
+//
+// What this does NOT cover is the key proof, which is a round trip and the
+// caller's next step — taken only when this verdict is ok(). The order is
+// load-bearing: a package refused here never touches the device at all.
+struct InstallMismatch
+{
+    QString field;  // "manufacturer", "model" or "version" — a key for the UI to word
+    QString wanted; // what the package demands
+    QString actual; // what the device reports
+};
+
+struct InstallVerdict
+{
+    // Either an older .ct3s or one whose sealed policy would not parse. Fatal on
+    // its own: "this package makes no demands" is not a thing a package may be.
+    bool noPolicy = false;
+    // The unit's firmware predates licensing and cannot be matched. Fatal on its
+    // own, and deliberately distinct from a mismatch: only one of them is fixed
+    // by updating the firmware.
+    bool deviceUnlicensed = false;
+    // Every optional match that was asked for and did not hold — ALL of them,
+    // not the first, so the person holding the laptop can see whether they have
+    // the wrong file or the wrong unit in one reading.
+    QList<InstallMismatch> mismatches;
+
+    bool ok() const { return !noPolicy && !deviceUnlicensed && mismatches.isEmpty(); }
+};
+
+// `deviceSupported` is LicenseState::supported; the three strings are the
+// device's licence fields (empty when it holds none). Passed as values rather
+// than as a LicenseState because that type lives beside the serial link, and a
+// decision over strings should not drag QSerialPort into the test that pins it.
+InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy, bool deviceSupported,
+                                     const QString &deviceManufacturer,
+                                     const QString &deviceModel, const QString &deviceVersion);
+
 // What "Save Secure Config" was asked for.
 struct SecureSaveOptions
 {
-    // Wrap the file key under `password` as well, so the file cannot be opened
-    // without it. Off by default: the common case is a config a customer must
-    // be able to deploy but not read.
-    bool requirePassword = false;
-    // The Protected Comms password. Required when requirePassword is set;
-    // otherwise unused.
-    QString password;
     // The 4-byte Protected Comms key carried in the file, so this app can
     // satisfy a device's protected-comms gate on the customer's behalf without
     // them ever typing the password. kNoAccessKey when there is none.
     AccessKey embeddedCommsKey = kNoAccessKey;
+    // The package policy, sealed inside the file with the configuration. An
+    // invalid one (no key) writes no policy at all, which is what every caller
+    // that is not the Builder does — a plain .ct3 has no policy and neither does
+    // a comms template.
+    SecurePackagePolicy policy;
     // Extra noise beyond what the payload needs, as a fraction of payload size.
     // Non-zero so two saves of the same document differ in length as well as
     // content, and a file's size says nothing about how much configuration is
@@ -148,8 +289,11 @@ struct SecureSaveOptions
 // What a .ct3s says about itself before it is opened.
 struct SecureFileInfo
 {
-    bool requiresPassword = false;
     quint16 formatVersion = 0;
+    // Only filled by readSecureFile, like the embedded key below: the policy is
+    // sealed, so peeking cannot reach it. That is the point — a package's
+    // demands are not readable off a file lying on a disk.
+    SecurePackagePolicy policy;
     // Only filled by readSecureFile — peeking cannot reach it, because it lives
     // in the carrier rather than the header.
     AccessKey embeddedCommsKey = kNoAccessKey;
@@ -177,14 +321,14 @@ bool writeSecureFile(const QString &path, const QByteArray &plainBody,
 // writeSecureFile and readSecureFile are thin wrappers over these two.
 bool sealSecureBlob(const QByteArray &plainBody, const SecureSaveOptions &options,
                     QByteArray *blobOut, QString *error = nullptr);
-bool openSecureBlob(const QByteArray &blob, const QString &password, QByteArray *plainBody,
+bool openSecureBlob(const QByteArray &blob, QByteArray *plainBody,
                     SecureFileInfo *info, QString *error = nullptr);
 
 // Recover the body. `password` is ignored unless the file requires one, and a
 // wrong one fails the payload's integrity check rather than yielding garbage —
 // so `error` distinguishes "wrong password" from "damaged file" for the caller
 // to say which. `plainBody` is only written on success.
-bool readSecureFile(const QString &path, const QString &password, QByteArray *plainBody,
+bool readSecureFile(const QString &path, QByteArray *plainBody,
                     SecureFileInfo *info, QString *error = nullptr);
 
 } // namespace ct

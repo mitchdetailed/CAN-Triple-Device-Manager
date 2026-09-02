@@ -9,17 +9,18 @@
 <h1>Configuration Files (.ct3)</h1>
 
 <p>One document — one configuration file. The document holds everything:
-buses, messages, channels, calculations, the fleet identity and the upload
-policy. There are three on-disk formats: two binary, and one you can read.</p>
+buses, messages, channels and calculations. There are three on-disk formats:
+two binary, and one you can read.</p>
 
 <table>
 <tr><th>Format</th><th>Written by</th><th>What it is</th></tr>
 <tr><td><b>.ct3</b></td><td>File → Save / Save As…</td>
 <td>A short readable header — the format, the schema and the version that wrote
 it — followed by the document as an encrypted binary body.</td></tr>
-<tr><td><b>.ct3s</b></td><td>File → Save Secure Config…</td>
+<tr><td><b>.ct3s</b></td><td>File → Secure Configuration Builder…</td>
 <td>The same container with no readable header, plus the two things a .ct3 does
-not have: concealment that survives the file, and an optional password.</td></tr>
+not have: concealment that survives the file, and an install policy naming the
+devices it may be sent to.</td></tr>
 <tr><td><b>.json</b></td><td>File → Save As… → <b>JSON</b></td>
 <td>The whole configuration as indented, readable JSON. Never a default — you
 have to pick it — see <a href="#json">Saving as JSON</a>.</td></tr>
@@ -41,9 +42,9 @@ described to a customer as one. The key that unscrambles a .ct3 travels inside
 the .ct3, so it defeats Notepad, a text search and any tool that does not
 implement the format — and it does not defeat somebody determined to pull the
 format apart. If a configuration genuinely must not be read, use
-<b>Save Secure Config…</b> with <b>Require access password for use</b>, which
-is the only thing here that cannot be opened without a secret the file does not
-contain.</p>
+the <b>Secure Configuration Builder</b>, which conceals the protocol detail and
+adds an install policy — though be clear about what that buys: a package is no
+harder to READ, it is harder to USE anywhere it was not built for.</p>
 
 <p class="warn">A .ct3 still confers no concealment. Marking a message
 <b>Read Only</b>, <b>Hidden</b> or <b>Protect Communication</b> stops <i>this
@@ -106,7 +107,7 @@ first so it is what you get without touching it. A name typed without an
 extension takes the format the dropdown is showing; an extension you type
 yourself wins over the dropdown, so typing "setup.json" saves JSON however the
 list is set.</li>
-<li><b>Save Secure Config…</b> always writes a .ct3s (its file dialog offers
+<li>The <b>Secure Configuration Builder</b> always writes a .ct3s (its file dialog offers
 only "CAN Triple Secure Configurations (*.ct3s)"), and appends ".ct3s" to an
 extensionless name.</li>
 </ul>
@@ -144,31 +145,27 @@ history is worth reading, feeding one to a script or a spreadsheet, sending a
 support ticket somebody can inspect without this program, or simply wanting a
 copy that outlives the software.</p>
 
-<h2>Save Secure Config… — the two modes</h2>
+<h2>What a secure package protects</h2>
 
-<p>The Save Secure Config dialog has one decision in it, the <b>Require
-access password for use</b> checkbox:</p>
+<p>The body is encrypted, but the key that decrypts it travels inside the file,
+obfuscated. Anyone with CAN Triple Device Manager can open the package, send it
+to a matching device and use its channels; nobody can read the protocol detail
+out of the bytes with a hex editor or a text search, and the protected messages
+stay concealed in the interface.</p>
 
-<ul>
-<li><b>Unchecked (standard)</b> — the body is encrypted, but the key that
-decrypts it travels inside the file, obfuscated. Anyone with CAN Triple
-Device Manager can open the file, send it to a device and use its channels;
-nobody can read the protocol detail out of the bytes with a hex editor or
-text search, and the protected messages stay concealed in the UI. This is
-the shipping format for customers.</li>
-<li><b>Checked</b> — the file key is additionally wrapped under the
-document's Protected Comms password, so the file cannot be opened at
-all without it.</li>
-</ul>
+<p class="warn">Be clear about the limit: this is obfuscation over encryption. It
+defeats a hex editor, a text search and any tool that does not implement the
+format. It does not defeat someone who reads this application's source. An
+earlier release offered a mode that wrapped the file key under a passphrase and
+genuinely withheld it; that mode has been removed, and files written in it can no
+longer be opened — rebuild them from their <code>.ct3</code>.</p>
 
-<p class="warn">With "Require access password for use" there is no recovery
-— no reset, no back door, no copy held anywhere. A lost password is a lost
-configuration. The dialog says so before you save; take it literally.</p>
-
-<p>A document that has no Protected Comms password yet can set one
-directly in this dialog (Password / Confirm fields). A document that already
-carries one is instead asked to confirm the existing password, since the
-saved file will require it.</p>
+<p>What a package does have instead is an <b>install policy</b>, sealed inside it
+alongside the configuration: the manufacturer, model and version it demands of a
+device, and a Firmware Key the device must prove. That stops a package being
+<i>used</i> where it should not be, which is a different guarantee from being
+unreadable and must not be mistaken for it. See
+<a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</p>
 
 <h2>Version compatibility</h2>
 
@@ -200,10 +197,10 @@ again. See <a href="troubleshooting.html">Troubleshooting</a>.</p>
 <h2>What the file carries besides the configuration</h2>
 
 <ul>
-<li>The <b>fleet identity and upload policy</b> — which fleet the file is
-for and how strictly a device must match before
-Upload Configuration will install it. See
-<a href="fleet-identity.html">Fleet Identity &amp; Access Keys</a>.</li>
+<li>For a <code>.ct3s</code>, the <b>install policy</b> — which devices the
+package may be sent to and which passwords it sets when it arrives. A plain
+<code>.ct3</code> carries none. See
+<a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</li>
 <li>An <b>access verifier</b> for the Protected Comms password, so the
 program can check a typed password offline. It cannot be turned back into
 the key that opens hardware, so a file lying around leaks nothing
@@ -222,8 +219,7 @@ without much thought, which is the other half of the reason.</li>
 </ul>
 
 <p>To install a .ct3s on a device without ever displaying its contents, use
-<b>Online&nbsp;→&nbsp;Send Secure Configuration…</b> or
-<b>Online&nbsp;→&nbsp;Upload Configuration…</b> — see
+<b>Online&nbsp;→&nbsp;Send Secure Configuration…</b> — see
 <a href="online.html">Online: Send, Get &amp; Flash</a>.</p>
 
 <p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>

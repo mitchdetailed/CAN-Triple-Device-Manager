@@ -32,7 +32,7 @@ private:
     void onOpen();
     bool onSave();
     bool onSaveAs();
-    bool onSaveSecureConfig();
+    void onSecureBuilder();
     void onCheckChannels();
     void onConfigSummary();
     void onRevealProtectedComms();
@@ -69,8 +69,6 @@ private:
     // after a password is proved. allowUnlockRetry is false on that second run,
     // so a device that is still refusing cannot put the prompt in a loop.
     void runGetTransfer(bool allowUnlockRetry);
-    void onVerifyConfiguration();
-    void runVerifyTransfer(bool allowUnlockRetry);
     // Offered when a read comes back ERR_LOCKED: names Get Configuration, which
     // is the only function a 2.3.0 unit refuses a table read for, and proves it
     // (then Protected Comms too, silently, for a unit still running the
@@ -87,14 +85,13 @@ private:
     void onCanViewer();
     void onResetDevice();
     void onDeviceStatus();
-    void onLockToDevice();
+    void onGetDeviceInfo();
     void onUpdateFirmware();
     // Open the manual at one page — context help for dialogs that emit
     // helpRequested(). See HelpWindow::showPage.
     void showHelpPage(const QString &pageFileName);
     void onSetAccessPasswords();
-    void onFleetIdentity();
-    void onUploadConfiguration();
+    void onFirmwareLicense();
 
     // Tools / Help
     void onChannelEditor();

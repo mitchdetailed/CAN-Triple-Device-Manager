@@ -210,6 +210,42 @@ QByteArray accessResponse(AccessKey key, const QByteArray &challenge)
                                             QCryptographicHash::Sha256);
 }
 
+QByteArray deriveLicenseKey(const QString &passphrase)
+{
+    if (passphrase.isEmpty())
+        return {};
+    // Its own salt, so a phrase reused between a licence and an access password
+    // does not produce two related secrets. See the note in the header.
+    static const char kLicenseSalt[] = "CANTriple/license/v1";
+    const QByteArray salt(kLicenseSalt, int(sizeof(kLicenseSalt) - 1));
+    // toUtf8(), not a local encoding: the same phrase typed under a different
+    // locale has to reach the same bytes or a licence stops verifying when the
+    // laptop changes.
+    return QPasswordDigestor::deriveKeyPbkdf2(QCryptographicHash::Sha256, passphrase.toUtf8(),
+                                              salt, kAccessKeyIterations, kLicenseKeyBytes);
+}
+
+namespace {
+QByteArray licenseMac(const char *label, const QByteArray &key, const QByteArray &challenge)
+{
+    if (key.size() != kLicenseKeyBytes || challenge.size() != kAccessChallengeBytes)
+        return {};
+    QByteArray msg(label);
+    msg.append(challenge);
+    return QMessageAuthenticationCode::hash(msg, key, QCryptographicHash::Sha256);
+}
+} // namespace
+
+QByteArray licenseAuthResponse(const QByteArray &key, const QByteArray &challenge)
+{
+    return licenseMac(kLicenseAuthLabel, key, challenge);
+}
+
+QByteArray licenseProveExpected(const QByteArray &key, const QByteArray &challenge)
+{
+    return licenseMac(kLicenseProveLabel, key, challenge);
+}
+
 AccessKey AccessKeySet::key(AccessFunction fn) const
 {
     return validFunction(fn) ? keys[int(fn)] : kNoAccessKey;
@@ -379,150 +415,5 @@ AccessVerifierSet AccessVerifierSet::fromJson(const QJsonObject &o)
     return set;
 }
 
-QString FleetIdentity::clampToWire(const QString &text, int maxBytes)
-{
-    if (maxBytes <= 0 || text.isEmpty())
-        return {};
-
-    const QByteArray utf8 = text.toUtf8();
-    if (utf8.size() <= maxBytes)
-        return text;
-
-    // QString::left() is the bug this function exists to prevent, and it is an
-    // easy one to write: left() counts QChars while the wire counts BYTES.
-    // "Motörsport Elektronik" is 21 QChars and 22 UTF-8 bytes, so left(16)
-    // yields something that still does not fit a 16-byte field, and whoever
-    // finally copies it into the fixed-width buffer truncates mid-character —
-    // leaving a lead byte with its continuation bytes lopped off. The device
-    // stores those bytes verbatim and hands them back on CMD_READ_FLEET_ID, so
-    // the damage is permanent and shows up as a mojibake vendor name months
-    // later.
-    //
-    // Cutting in the UTF-8 encoding is therefore the only correct place to cut.
-    // Take maxBytes, then walk backwards off any continuation byte (10xxxxxx)
-    // until we reach the lead byte of the character that straddles the limit,
-    // and drop that character whole.
-    int cut = maxBytes;
-    while (cut > 0 && (quint8(utf8.at(cut)) & 0xC0) == 0x80)
-        --cut;
-
-    // Whole code points, not whole grapheme clusters — a combining accent can
-    // still be separated from the letter it modifies. That is a deliberate
-    // limit rather than an oversight: these two fields are machine identifiers
-    // compared byte for byte, never prose, and getting clusters right would
-    // mean dragging in text segmentation for a case that cannot arise in a
-    // sensible vendor or model code.
-    return QString::fromUtf8(utf8.left(cut));
-}
-
-bool FleetIdentity::sameFleetAs(const FleetIdentity &other) const
-{
-    // An unset identity matches nothing — including another unset one. Two blank
-    // devices are not "the same fleet"; they are two devices nobody has told
-    // anything about, and treating that as a match would wave every update
-    // through on unprovisioned hardware.
-    if (!isSet() || !other.isSet())
-        return false;
-    // Exact string comparison, deliberately: vendorId and modelId are
-    // identifiers that cross the wire as raw bytes, not display names, so
-    // "ACME" and "acme " are two different fleets and folding them together
-    // here would let a config install on hardware it was never built for.
-    // serialNumber and configVersion are absent on purpose — one is the
-    // targeting question and the other the ordering question, and UploadPolicy
-    // asks those separately.
-    return vendorId == other.vendorId && modelId == other.modelId;
-}
-
-QJsonObject FleetIdentity::toJson(bool includeFleetKey) const
-{
-    QJsonObject o;
-    // Clamped on the way out, so a file can never carry more than the wire can.
-    // Anything longer would only be silently cut later, and a value that
-    // survives a save/load round trip unchanged is worth more than preserving
-    // characters no device will ever see.
-    o["vendorId"] = clampToWire(vendorId, kFleetVendorIdBytes);
-    o["modelId"] = clampToWire(modelId, kFleetModelIdBytes);
-    // qint64 rather than int: these are opaque 32-bit numbers chosen by whoever
-    // builds the fleet, and one above 2^31 would come back negative through the
-    // int overload.
-    o["serialNumber"] = qint64(serialNumber);
-    o["configVersion"] = int(configVersion);
-    o["flags"] = int(flags);
-    // The flag is honoured strictly: when it is false the key does not appear
-    // under this or any other name. A plain .ct3 is legible text that people
-    // mail around, and one careless `true` here would put the fleet secret in
-    // every copy of it.
-    if (includeFleetKey && fleetKey != kNoAccessKey)
-        o["fleetKey"] = QString::fromLatin1(accessKeyBytes(fleetKey).toBase64());
-    return o;
-}
-
-FleetIdentity FleetIdentity::fromJson(const QJsonObject &o)
-{
-    FleetIdentity id;
-    // Clamped on the way in as well. toJson() cannot write an over-long field,
-    // but a hand-edited .ct3 can, and every consumer downstream assumes the
-    // string already fits the wire. Enforcing it here means there is exactly
-    // one definition of "too long" instead of one per reader.
-    id.vendorId = clampToWire(o["vendorId"].toString(), kFleetVendorIdBytes);
-    id.modelId = clampToWire(o["modelId"].toString(), kFleetModelIdBytes);
-    id.serialNumber = quint32(o["serialNumber"].toInteger());
-    id.configVersion = quint16(o["configVersion"].toInteger());
-    id.flags = quint16(o["flags"].toInteger());
-    // Absent in a plain .ct3 by design, so its absence is normal rather than an
-    // error: the identity is still usable for the vendor/model check,
-    // and only the device's attestation goes unverified without it.
-    id.fleetKey = accessKeyFromBytes(QByteArray::fromBase64(o["fleetKey"].toString().toLatin1()));
-    return id;
-}
-
-bool UploadPolicy::allowsSerial(quint32 serial) const
-{
-    // An empty list means "any serial in the fleet", which is the common case: a
-    // configuration is normally written for a model, not for one car. The list
-    // only exists for the one-off — a replacement config cut for a single
-    // vehicle — and once it is non-empty it is exhaustive, so a serial that is
-    // not named is refused even if everything else about the device matches.
-    if (allowedSerials.isEmpty())
-        return true;
-    return allowedSerials.contains(serial);
-}
-
-QJsonObject UploadPolicy::toJson() const
-{
-    QJsonObject o;
-    QJsonArray serials;
-    for (quint32 serial : allowedSerials)
-        serials.append(qint64(serial)); // qint64 for the same reason as serialNumber
-    // Written even when empty, and the two flags are written even when they hold
-    // their defaults. Omitting a `false` would let fromJson's default-to-true
-    // read it back as `true`, quietly re-arming a check the user turned off.
-    o["allowedSerials"] = serials;
-    o["requireFleetKey"] = requireFleetKey;
-    o["warnOnOlderVersion"] = warnOnOlderVersion;
-    return o;
-}
-
-UploadPolicy UploadPolicy::fromJson(const QJsonObject &o)
-{
-    UploadPolicy policy;
-    const QJsonArray serials = o["allowedSerials"].toArray();
-    policy.allowedSerials.reserve(serials.size());
-    for (const auto &v : serials) {
-        // Non-numeric entries are dropped rather than coerced. toInteger() would
-        // turn a string or a null into 0, and 0 is the serial an unprovisioned
-        // device reports — so a single typo in a hand-edited file would add
-        // "and any blank unit" to an allow-list written to exclude exactly that.
-        if (v.isDouble())
-            policy.allowedSerials.append(quint32(v.toInteger()));
-    }
-    // Default TRUE when absent. Both flags exist to refuse an upload, so a file
-    // that predates them, or one where the key was deleted by hand, must land on
-    // the strict reading — an older file quietly becoming permissive is the one
-    // failure mode a security default cannot have.
-    policy.requireFleetKey = o["requireFleetKey"].toBool(true);
-    policy.warnOnOlderVersion = o["warnOnOlderVersion"].toBool(true);
-    return policy;
-}
 
 } // namespace ct

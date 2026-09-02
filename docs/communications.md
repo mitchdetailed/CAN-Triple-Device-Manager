@@ -92,10 +92,10 @@ Templates are files, so they can be emailed, kept in version control, or handed 
 
 **It goes only to a unit that holds the same Protected Comms password.** Before sending, the Device Manager asks the connected unit to confirm the password the configuration carries. If the unit agrees, the send proceeds normally. If it does not, nothing is sent and the reason is named:
 - **The unit has no Protected Comms password set.** No password is not the same password. Set one on the unit to match the configuration's, under **Online → Set Access Passwords…** — any of the unit's four Protected Comms slots will do.
-- **The configuration carries no Protected Comms password of its own** — there is nothing to match against. Give it one with **File → Save Secure Config…**, or remove the markings.
+- **The configuration carries no Protected Comms password of its own** — there is nothing to match against. Give it one with **File → Secure Configuration Builder…**, or remove the markings.
 - **The two disagree.** This is the case the rule exists for.
 
-> **Note:** The unit holds up to **four** Protected Comms passwords — [Set Access Passwords](fleet-identity.md) shows them as Slot 1 to Slot 4 — and confirming *any* of them satisfies this check. Four slots are what let one device accept sealed configurations from more than one supplier without any of them sharing a password.
+> **Note:** The unit holds up to **four** Protected Comms passwords — [Set Access Passwords](licensing.md) shows them as Slot 1 to Slot 4 — and confirming *any* of them satisfies this check. Four slots are what let one device accept sealed configurations from more than one supplier without any of them sharing a password.
 
 You are not asked to type the password at this point, and that is deliberate: being able to supply a unit's password would let anyone who knows it send a configuration that was never sealed with it, which is the substitution the marking is there to prevent. The password has to be *in* the configuration, which is what saving it as a secure file does.
 
@@ -122,7 +122,7 @@ The program keeps two folders of its own, beside the program itself:
 <tr><td><code>Communications Templates</code></td><td>Templates (*.ct3t). Both
 <b>Save…</b> and <b>Load…</b> start here.</td></tr>
 <tr><td><code>Configurations</code></td><td>Configurations (*.ct3, *.ct3s).
-<b>File → Open</b>, <b>Save As</b> and <b>Save Secure Config</b>
+<b>File → Open</b>, <b>Save As</b> and the <b>Secure Configuration Builder</b>
 start here when the document has no file of its own yet.</td></tr>
 </table>
 
@@ -211,7 +211,7 @@ What you can still do with such a message, at *every* level: **remove** it, whic
 
 ### What these levels actually are
 
-> **Warning:** **All three are conventions of this application.** Nothing on the device enforces any of them. A CAN Triple hands its full message table to anything that speaks its protocol and accepts a write over any record, so any other serial tool reads a marked message in full and overwrites it freely. A plain `.ct3` is scrambled rather than legible, which stops a text editor reading a marking straight out of it — but the key to a .ct3 travels inside the .ct3, and opening one in this program gives back every marked message in full. The marking that survives being handed to somebody else is **File &gt; Save Secure Config…** (`.ct3s`). If a protocol must stay secret from a determined reader, do not ship it to them.
+> **Warning:** **All three are conventions of this application.** Nothing on the device enforces any of them. A CAN Triple hands its full message table to anything that speaks its protocol and accepts a write over any record, so any other serial tool reads a marked message in full and overwrites it freely. A plain `.ct3` is scrambled rather than legible, which stops a text editor reading a marking straight out of it — but the key to a .ct3 travels inside the .ct3, and opening one in this program gives back every marked message in full. The marking that survives being handed to somebody else is **File &gt; Secure Configuration Builder…** (`.ct3s`). If a protocol must stay secret from a determined reader, do not ship it to them.
 
 > **Warning:** **Read Only is accident prevention, not security.** The viewer sees every field of the message and may remove it, so removing it and retyping what they read reproduces the message without the password. Treat it as a guard rail against an accidental edit and nothing more.
 

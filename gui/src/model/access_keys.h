@@ -130,6 +130,49 @@ AccessKey accessKeyFromBytes(const QByteArray &bytes); // kNoAccessKey if not 4 
 // accidentally send a well-formed response for no key.
 QByteArray accessResponse(AccessKey key, const QByteArray &challenge);
 
+// ---------------------------------------------------------------------------
+// The firmware licence key
+//
+// The same PBKDF2 construction as an access key, and deliberately WIDER: 16
+// bytes rather than 4. The access key is four bytes because that is what the
+// device's flash header can spare, and access_keys.h says plainly that four
+// bytes is the floor the design sits on. The licence lives in its own page with
+// two kilobytes to spend, so there was no reason to inherit the constraint —
+// and a licence key is the one secret here that gates re-badging a unit.
+//
+// A DIFFERENT SALT from the access keys, so the same passphrase typed in both
+// places produces unrelated keys. Sharing a salt would mean a licence key
+// recovered from a dumped page also opened the Send password on every unit
+// where somebody reused the phrase.
+//
+// Fixed salt for the same reason the access key's is fixed: one passphrase must
+// produce one key on every machine, or a licence issued in one office cannot be
+// applied from another.
+constexpr int kLicenseKeyBytes = 16;
+
+// Empty passphrase -> empty result, which every caller reads as "no key". Never
+// a well-formed key, so clearing cannot accidentally set.
+QByteArray deriveLicenseKey(const QString &passphrase);
+
+// The two directions a licence secret is used in, and they are NOT the same
+// computation. Each MACs its own label ahead of the nonce:
+//
+//   licenseAuthResponse   host proves a secret TO the device (CMD_LICENSE_RESPONSE)
+//   licenseProveExpected  what the device must answer TO the host (CMD_LICENSE_KEY_PROVE)
+//
+// Kept separate because without the labels the device was a signing oracle for
+// its own challenge — it would answer HMAC(key, N) for any host-chosen N,
+// including the N it had just issued. The labels must match the firmware's
+// LICENSE_AUTH_LABEL / LICENSE_PROVE_LABEL byte for byte; test_firmware_link
+// asserts that they do.
+//
+// Empty on a bad key or a malformed challenge, so a caller holding nothing
+// cannot put a plausible answer on the wire.
+constexpr char kLicenseAuthLabel[] = "CT3/license/auth/v1";
+constexpr char kLicenseProveLabel[] = "CT3/license/prove/v1";
+QByteArray licenseAuthResponse(const QByteArray &key, const QByteArray &challenge);
+QByteArray licenseProveExpected(const QByteArray &key, const QByteArray &challenge);
+
 // Which keys a session is holding. Lives in memory only — never written to a
 // file, never persisted between runs.
 struct AccessKeySet
@@ -185,89 +228,29 @@ struct AccessVerifierSet
     static AccessVerifierSet fromJson(const QJsonObject &o);
 };
 
-constexpr int kFleetVendorIdBytes = 16;
-constexpr int kFleetModelIdBytes = 16;
-
-// Who a unit is. Mirrors the firmware's FleetIdentityPublic; see protocol.h.
-//
-// Five of these six fields are COMPILED INTO the firmware
-// (firmware/include/fleet_identity.h) and cannot be changed over the wire —
-// re-badging a unit means building and flashing it. Only configVersion is
-// runtime state, because it has to move every time a configuration is released.
-//
-// fleetKey is the one secret and is never read back off a device: a device
-// PROVES it by answering a challenge.
-//
-// The two strings are at most 16 BYTES each, not 16 QChars — they cross the wire
-// as fixed 16-byte NUL-padded fields, so a name with non-ASCII characters in it
-// runs out of room sooner than its length suggests. clampToWire() is what every
-// writer must use rather than QString::left().
-struct FleetIdentity
-{
-    QString vendorId;                   // <= kFleetVendorIdBytes UTF-8 bytes
-    QString modelId;                    // <= kFleetModelIdBytes UTF-8 bytes
-    quint32 serialNumber = 0;
-    quint16 configVersion = 0;
-    quint16 flags = 0;
-    AccessKey fleetKey = kNoAccessKey; // 0 = none set
-
-    // An identity that names nothing matches nothing, and is what an
-    // unprovisioned unit reports. Note serialNumber is NOT part of this: a
-    // serial on its own says nothing about which fleet a unit belongs to.
-    bool isSet() const { return !vendorId.isEmpty() || !modelId.isEmpty(); }
-    // Same fleet? Vendor and model compare exactly — they are identifiers, not
-    // display names, so case and spacing matter.
-    // Version and serial are deliberately NOT compared — those are the ordering
-    // and targeting questions, asked separately.
-    bool sameFleetAs(const FleetIdentity &other) const;
-
-    // Truncate to what the wire can carry, on a UTF-8 byte boundary so a
-    // multi-byte character is never cut in half.
-    static QString clampToWire(const QString &text, int maxBytes);
-
-    // `includeFleetKey` is explicit at every call site on purpose. A .ct3s
-    // body is encrypted and may carry the key, so the app can verify a device's
-    // attestation without an operator typing it. A plain .ct3 is legible text
-    // and must NEVER carry it — passing true there would put the fleet secret
-    // in a file people mail around.
-    QJsonObject toJson(bool includeFleetKey) const;
-    static FleetIdentity fromJson(const QJsonObject &o);
-};
+// FleetIdentity is GONE — vendor, model, serial, a config version and a key,
+// held by a configuration to say which hardware it was for. Its device-side
+// half was compiled into the firmware and was replaced by the writable licence
+// (device_session.h, LicenseState) and the OTP hardware record (DeviceInfo);
+// its file-side half was replaced by SecurePackagePolicy (secure_file.h),
+// sealed into the .ct3s rather than written into a plain .ct3. The
+// configuration version outlived it and now belongs to the PACKAGE, where a
+// release actually happens. Old files keep their "fleetIdentity" object and it
+// is simply never read.
 
 // What a configuration demands of a device before it will install on it. This
 // is the uploader's rulebook, and it travels inside the configuration so a
 // .ct3s handed to a customer carries its own restrictions.
 //
-// Vendor and model are matched from the configuration's own FleetIdentity —
-// there is no way to require a vendor other than the one the config is for, and
-// making that separately settable would only create a way to get it wrong. What
-// IS separately settable is how narrowly the serial is pinned.
-struct UploadPolicy
-{
-    // Empty = any serial in the fleet. Otherwise the device's serial must be
-    // one of these, which is how a one-off replacement config is stopped from
-    // installing on the rest of a customer's cars.
-    QList<quint32> allowedSerials;
-    // Require the device to PROVE the fleet key rather than merely claim the
-    // identity. On by default: without it the whole block is four strings a
-    // look-alike can echo back.
-    bool requireFleetKey = true;
-    // WARN when the device is already running a NEWER revision than the package
-    // — i.e. this install would move it backwards. On by default.
-    //
-    // A warning, not a refusal, and the distinction is deliberate. Reinstalling
-    // the same revision is routine (a unit was replaced, a config was reloaded
-    // after a clear), and deliberately going back to an older one is a normal
-    // thing to do when the newer one turned out worse. Neither is an error, so
-    // neither blocks. Only "you are about to go backwards" is worth saying, and
-    // saying it once is enough.
-    bool warnOnOlderVersion = true;
-
-    bool pinsSerial() const { return !allowedSerials.isEmpty(); }
-    bool allowsSerial(quint32 serial) const;
-
-    QJsonObject toJson() const;
-    static UploadPolicy fromJson(const QJsonObject &o);
-};
+// UploadPolicy is GONE. It named which devices a .ct3 could be installed on — a
+// serial allow-list, a require-the-fleet-key flag, a downgrade warning — and
+// every one of those was read by Upload Configuration, which no longer exists.
+//
+// The same job is done by SecurePackagePolicy (secure_file.h), and better: it
+// lives sealed inside the .ct3s rather than in a plain .ct3 anyone could edit,
+// it matches against the writable firmware licence rather than an identity
+// compiled into the binary, and its key is PROVED by challenge rather than
+// claimed. Files written before the removal keep their "uploadPolicy" object
+// and it is simply never read.
 
 } // namespace ct

@@ -30,7 +30,7 @@
                 </section>
                 <section title="Order &amp; Timing of Operations" ref="pages/engine.html"/>
                 <section title="Online: Send, Get &amp; Flash" ref="pages/online.html">
-                    <section title="Fleet Identity &amp; Access Keys" ref="pages/fleet-identity.html"/>
+                    <section title="Firmware Licensing &amp; Access Keys" ref="pages/licensing.html"/>
                     <section title="Updating Firmware" ref="pages/firmware-update.html"/>
                 </section>
                 <section title="Lua Scripting" ref="pages/scripting.html"/>
@@ -244,7 +244,6 @@
             <!-- Online -->
             <keyword name="Send Configuration" ref="pages/online.html"/>
             <keyword name="Get Configuration" ref="pages/online.html"/>
-            <keyword name="Verify Configuration" ref="pages/online.html"/>
             <keyword name="Save to Flash" ref="pages/online.html"/>
             <!-- The dedicated clear command is gone (wiping is File > New +
                  Send), but "clear" is still what someone types to find out
@@ -253,6 +252,17 @@
             <keyword name="wiping a device" ref="pages/online.html"/>
             <keyword name="Reset Device" ref="pages/online.html"/>
             <keyword name="Device Status" ref="pages/online.html"/>
+            <!-- The OTP manufacturing record. Indexed under the words somebody
+                 actually arrives with: they are holding a board and want to know
+                 what it is, so "serial number" and "date of manufacture" matter
+                 more than the menu item's own name. -->
+            <keyword name="Get Device Info" ref="pages/online.html#device-info"/>
+            <keyword name="Device Info" ref="pages/online.html#device-info"/>
+            <keyword name="hardware serial number" ref="pages/online.html#device-info"/>
+            <keyword name="hardware version" ref="pages/online.html#device-info"/>
+            <keyword name="date of manufacture" ref="pages/online.html#device-info"/>
+            <keyword name="manufacturer" ref="pages/online.html#device-info"/>
+            <keyword name="OTP" ref="pages/online.html#device-info"/>
             <keyword name="flash" ref="pages/online.html"/>
 
             <!-- Firmware update. "firmware update" also appears under
@@ -301,11 +311,15 @@
             <keyword name="Lua subset" ref="pages/device-scripts.html"/>
 
             <!-- Fleet identity / access control -->
-            <keyword name="Fleet Identity" ref="pages/fleet-identity.html"/>
-            <keyword name="access keys" ref="pages/fleet-identity.html"/>
-            <keyword name="Set Access Passwords" ref="pages/fleet-identity.html"/>
-            <keyword name="Upload Configuration" ref="pages/fleet-identity.html"/>
-            <keyword name="provisioning" ref="pages/fleet-identity.html"/>
+            <keyword name="Firmware License Manager" ref="pages/licensing.html"/>
+            <keyword name="firmware licence" ref="pages/licensing.html"/>
+            <keyword name="Firmware Key" ref="pages/licensing.html"/>
+            <keyword name="FW Updater Password" ref="pages/licensing.html"/>
+            <keyword name="Secure Configuration Builder" ref="pages/licensing.html"/>
+            <keyword name="secure package" ref="pages/licensing.html"/>
+            <keyword name="access keys" ref="pages/licensing.html"/>
+            <keyword name="Set Access Passwords" ref="pages/licensing.html"/>
+            <keyword name="provisioning" ref="pages/licensing.html"/>
 
             <!-- Validation -->
             <keyword name="validation" ref="pages/validation-report.html"/>
@@ -317,7 +331,7 @@
             <keyword name=".ct3" ref="pages/files.html"/>
             <keyword name=".ct3s" ref="pages/files.html"/>
             <keyword name="secure configuration" ref="pages/files.html"/>
-            <keyword name="Save Secure Config" ref="pages/files.html"/>
+            <keyword name="ct3s" ref="pages/files.html"/>
 
             <!-- Troubleshooting -->
             <keyword name="Troubleshooting" ref="pages/troubleshooting.html"/>
@@ -360,7 +374,7 @@
             <file>pages/scripting.html</file>
             <file>pages/online.html</file>
             <file>pages/firmware-update.html</file>
-            <file>pages/fleet-identity.html</file>
+            <file>pages/licensing.html</file>
             <file>pages/validation-report.html</file>
             <file>pages/license.html</file>
         </files>

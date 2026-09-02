@@ -1233,8 +1233,6 @@ void Configuration::clear()
     // emits is seen by observers with the document already fully empty rather
     // than half-cleared.
     m_accessVerifiers.clear();
-    m_fleetIdentity = FleetIdentity{};
-    m_uploadPolicy = UploadPolicy{};
     m_commsKey = kNoAccessKey;
     // The four document-wide Message Passwords are key material too, and
     // loadBody() is the ONLY other writer of this array - so without this a
@@ -1245,8 +1243,6 @@ void Configuration::clear()
     // slots). See device_mapper.cpp's adoption loop.
     for (AccessKey &pw : m_commsPasswords)
         pw = kNoAccessKey;
-    m_lockedDeviceUid.clear();
-    m_deviceLockKey = kNoAccessKey;
     m_commsRevealed = false;
     m_sectionGrants.clear();
     m_format = FileFormat::Sealed;
@@ -1535,6 +1531,8 @@ bool Configuration::setCommsPassword(const QString &password)
     // all. The file becomes unopenable with either, which is not a state anyone
     // can recover from.
     //
+    // (v2 removed the container's password mode, so there is no mode flag left
+    // to preserve here.)
     // requirePassword is deliberately NOT touched: it says which of the two
     // container modes the file is in, and that is the Save Secure Config
     // dialog's decision, not a side effect of changing a password.
@@ -1552,13 +1550,7 @@ bool Configuration::setCommsPassword(const QString &password)
         m_accessVerifiers.setVerifier(AccessFunction::EditProtectedComms, AccessVerifier{});
         m_commsKey = kNoAccessKey;
         m_commsRevealed = false;
-        // Nothing left to wrap under and no key worth embedding. If the document
-        // came from a password-protected .ct3s, the next Save now fails in
-        // writeSecureFile — asked to require a password it has not been given —
-        // and that is the right way round: silently re-saving it in the
-        // key-travels-in-the-file mode would hand back a weaker file under the
-        // same name, with nothing on screen to say the requirement had gone.
-        m_secureOptions.password.clear();
+        // No key worth embedding once the password is gone.
         m_secureOptions.embeddedCommsKey = kNoAccessKey;
         setDirty();
         return true;
@@ -1566,58 +1558,12 @@ bool Configuration::setCommsPassword(const QString &password)
     m_accessVerifiers.setVerifier(AccessFunction::EditProtectedComms,
                                   AccessVerifier::make(password));
     m_commsKey = deriveAccessKey(password);
-    // Only kept when the file's key is actually wrapped under it, matching what
-    // loadFromFile stores and for the same reason: holding cleartext for a mode
-    // that never reads it is a liability rather than a convenience.
-    m_secureOptions.password = m_secureOptions.requirePassword ? password : QString();
     m_secureOptions.embeddedCommsKey = m_commsKey;
     // Whoever just set the password holds it; making them type it back to see
     // their own messages would be theatre.
     m_commsRevealed = true;
     setDirty();
     return true;
-}
-
-void Configuration::setFleetIdentity(const FleetIdentity &id)
-{
-    m_fleetIdentity = id;
-    setDirty();
-}
-
-void Configuration::setUploadPolicy(const UploadPolicy &policy)
-{
-    m_uploadPolicy = policy;
-    setDirty();
-}
-
-void Configuration::setDeviceLock(const QString &uid, AccessKey key)
-{
-    // Normalised on the way in — upper case, no separators — so a UID pasted
-    // from Device Status, typed by hand, or copied out of an email all compare
-    // equal. mayBeSentTo() then needs no cleverness.
-    QString clean;
-    for (const QChar &c : uid)
-        if (c.isLetterOrNumber())
-            clean += c.toUpper();
-    m_lockedDeviceUid = clean;
-    m_deviceLockKey = clean.isEmpty() ? kNoAccessKey : key;
-    setDirty();
-}
-
-bool Configuration::mayBeSentTo(const QString &uid) const
-{
-    if (m_lockedDeviceUid.isEmpty())
-        return true; // not locked: goes anywhere
-    QString clean;
-    for (const QChar &c : uid)
-        if (c.isLetterOrNumber())
-            clean += c.toUpper();
-    // An empty uid means the device could not tell us who it is — firmware too
-    // old for the identity command. A locked configuration must NOT be sent to
-    // a unit that cannot be identified: "I do not know" is not "it matches".
-    if (clean.isEmpty())
-        return false;
-    return clean == m_lockedDeviceUid;
 }
 
 // Document schema version. Bumped to 2 for the DBC-style comms rows; to 3 when
@@ -1899,12 +1845,13 @@ bool Configuration::peekFile(const QString &path, FilePeek *out, QString *error)
         if (!peekSecureFile(path, &info, error))
             return false;
         peek.secure = true;
-        peek.requiresPassword = info.requiresPassword;
+        // A .ct3s never requires a password now — the mode is gone. The flag
+        // stays on FilePeek for the pre-v8 .ct3 case below, which is a different
+        // format and a different password.
         // Whether a .ct3s carries a comms verifier is not knowable from its
         // header — the verifiers live in the sealed body, which is where they
         // belong. False is the honest answer and it costs nothing: a standard
-        // .ct3s opens without a password and stays concealed either way, and a
-        // password-protected one is already covered by requiresPassword.
+        // .ct3s opens without a password and stays concealed either way.
         peek.commsProtected = false;
     } else if (isBinaryConfigFile(path)) {
         // FORMAT 2. Neither secure nor password-bearing: a .ct3 has never had a
@@ -1967,7 +1914,10 @@ bool Configuration::loadFromFile(const QString &path, QString *error, const QStr
     if (ct::isSecureFile(path)) {
         QByteArray plain;
         SecureFileInfo info;
-        if (!readSecureFile(path, password, &plain, &info, error))
+        // No password: v2 of the container has no mode that takes one. The
+        // `password` this function was given is for the pre-v8 .ct3 below and
+        // for revealing protected comms on load, never for opening a .ct3s.
+        if (!readSecureFile(path, &plain, &info, error))
             return false;
         const QJsonDocument bodyDoc = QJsonDocument::fromJson(plain);
         plain.fill('\0'); // the recovered body is the secret the container exists for
@@ -2005,12 +1955,12 @@ bool Configuration::loadFromFile(const QString &path, QString *error, const QStr
             return false;
         }
         secure = true;
-        secureOptions.requirePassword = info.requiresPassword;
-        // Kept so a plain Save can rewrite the file the way it was found. Only
-        // for a file that required one — otherwise a speculative password the
-        // user typed for a standard .ct3s would silently start requiring itself.
-        secureOptions.password = info.requiresPassword ? password : QString();
         secureOptions.embeddedCommsKey = info.embeddedCommsKey;
+        // The package's install policy, carried on the document so
+        // Send Secure Configuration can enforce it. Rides in secureOptions
+        // rather than as a member of its own because it is a property of the
+        // FILE, and a document that was never a package simply has none.
+        secureOptions.policy = info.policy;
         embeddedKey = info.embeddedCommsKey;
     } else if (isBinaryConfigFile(path)) {
         // FORMAT 2 — the sealed .ct3. What comes out of the container is the
@@ -2219,61 +2169,31 @@ void Configuration::loadBody(const QJsonObject &root, int fileVersion)
         }
     }
 
-    // v9. "fleetIdentity" is the current block. "updateIdentity" is what v8
-    // called it, and it is read here as a DELIBERATELY PARTIAL migration.
-    //
-    // The two blocks disagree about what a vendor and a model ARE. v8 stored
-    // both as opaque 32-bit numbers; a fleet identity names them as text,
-    // because text is what the firmware now compiles in and what the wire now
-    // carries as two 16-byte NUL-padded fields. There is no function from
-    // 0x4D4F5445 to a name — the number was whatever the fleet builder typed
-    // into a spin box — so the two old ids are dropped on the floor and
-    // vendorId/modelId come through empty for the user to fill in.
-    //
-    // Inventing something legible out of the digits would be worse than an empty
-    // field, and that is the whole argument. An empty field is visibly
-    // unfinished: the fleet identity dialog shows it blank and the uploader
-    // refuses to match anything against it, so the user is stopped at the one
-    // moment they can still say what the vendor is called. A plausible-looking
-    // "0x4D4F5445" or "VENDOR-1296651333" would sail through both and then fail
-    // to match a real device, which presents as hardware being wrong rather than
-    // as a migration that could not finish.
-    //
-    // configVersion and flags carry across unchanged; they meant the same
-    // thing in both blocks. The old seriesId is dropped with the block that
-    // defined it — there is no field left for it to land in. The old fleetKey goes with the ids rather than
-    // surviving alone — a configuration that can no longer name its fleet cannot
-    // target one either, so holding on to the secret would keep the only part of
-    // the block that is dangerous to keep and useless without the rest.
-    if (root.contains(QStringLiteral("fleetIdentity"))) {
-        m_fleetIdentity = FleetIdentity::fromJson(root["fleetIdentity"].toObject());
-    } else {
-        const QJsonObject legacy = root[QStringLiteral("updateIdentity")].toObject();
-        m_fleetIdentity = FleetIdentity{};
-        // toInteger() rather than toInt(): these are opaque 32-bit numbers and
-        // one above 2^31 comes back negative through the int overload.
-        m_fleetIdentity.configVersion = quint16(legacy["configVersion"].toInteger());
-        m_fleetIdentity.flags = quint16(legacy["flags"].toInteger());
-    }
+    // "fleetIdentity" (v9) and "updateIdentity" (v8) are READ BY NOTHING. They
+    // named which hardware a file was for, and that decision moved out of the
+    // document: a package's policy is sealed into the .ct3s (SecurePackagePolicy)
+    // and the configuration version it stamps travels with the package. An old
+    // file keeps whichever block it had and loads without it.
     // Absent in every pre-v9 file, and UploadPolicy's own defaults are the strict
     // pair — prove the fleet key, refuse a downgrade. That is the right
     // direction for a silent default to fail in: an old configuration arrives
     // demanding MORE of a device than it ever did, which an operator can see in
     // the uploader and deliberately relax, rather than less, which nobody would
     // notice until it had installed somewhere it should not have.
-    m_uploadPolicy = UploadPolicy::fromJson(root[QStringLiteral("uploadPolicy")].toObject());
+    // "uploadPolicy" is READ BY NOTHING — see the note where UploadPolicy used to
+    // be declared. An older file keeps its object; it is never looked at.
 
-    // Absent for every configuration written before this existed, and for every
-    // unlocked one since — which loads as "not locked", the honest default. Read
-    // through setDeviceLock's normaliser so a hand-edited file with spaces or
-    // lower case in the UID still matches the device.
-    m_lockedDeviceUid.clear();
-    m_deviceLockKey = kNoAccessKey;
-    if (root.contains(QStringLiteral("deviceLock"))) {
-        const QJsonObject lock = root[QStringLiteral("deviceLock")].toObject();
-        setDeviceLock(lock[QStringLiteral("uid")].toString(),
-                      AccessKey(lock[QStringLiteral("key")].toString().toULongLong()));
-    }
+    // "deviceLock" is READ BY NOTHING. The per-file device lock was removed: it
+    // was the only guard against sending a configuration to the wrong unit, and
+    // it failed at that in the cases that mattered — absent from both
+    // dealer-facing send paths, and discarded by File > New before a Get, since
+    // the lock never travelled to the device and so could never be recovered
+    // from one. The chip binding (bound_uid, written by the Send dialog) is
+    // unaffected and still stops a copied image RUNNING on another board.
+    //
+    // A file written before the removal keeps its "deviceLock" object and simply
+    // loads without it. Left unread rather than migrated: there is nowhere to
+    // migrate it to, and stripping it on save would rewrite files for no gain.
 
     // Every User Condition output is boolean, including in files written before
     // that was true. LAST in this function on purpose: it reads conditionRows
@@ -2288,40 +2208,10 @@ void Configuration::loadBody(const QJsonObject &root, int fileVersion)
 
 namespace {
 
-// The .ct3s body: everything buildBody() writes, plus the one field buildBody()
-// is structurally incapable of writing.
-//
-// FleetIdentity::fleetKey is the fleet secret — the thing a device proves it
-// holds before it will accept an update. buildBody() passes `false` to
-// FleetIdentity::toJson as a literal, so no caller, present or future, can talk
-// it into emitting the key. Only this function can, and the only place it is
-// called is saveSecureToFile.
-//
-// THE ORIGINAL REASON WAS "a plain .ct3 is a text file people mail to each
-// other", AND THAT REASON IS GONE: as of format 2 a .ct3 is the same sealed
-// container a .ct3s is. The behaviour is kept anyway, on the two reasons that
-// survive, and they are weaker than the one they replace — worth saying so
-// rather than pretending the argument is as strong as it was.
-//
-//   - A .ct3 is scrambled, not secret. Its key travels inside it, exactly as a
-//     standard .ct3s's does, so neither is a vault; but a .ct3s is produced by
-//     a deliberate act through a dialog that says what it carries, and a .ct3
-//     is what gets attached to an email without much thought. The fleet's only
-//     secret belongs in the file somebody had to mean to create.
-//   - Nothing needs it there. A .ct3 is a working file; the fleet key matters
-//     when a configuration is handed to somebody who must deploy it, which is
-//     what a .ct3s is for.
-//
-// If that ever stops being convincing, the change is to call this from
-// saveToFile as well — not to loosen buildBody(). A bool parameter on
-// buildBody() was rejected on purpose: it would put the fleet secret one
-// mistyped argument away from every file the program writes, and that is a
-// mistake worth making impossible rather than merely unlikely.
-QJsonObject withFleetKey(QJsonObject body, const FleetIdentity &identity)
-{
-    body[QStringLiteral("fleetIdentity")] = identity.toJson(true);
-    return body;
-}
+// (withFleetKey, which added the fleet secret to a .ct3s body and nowhere
+// else, went with the fleet identity. A .ct3s carries its policy in the sealed
+// payload prefix instead — see secure_file.cpp — so the body a .ct3s seals is
+// now exactly what buildBody() produces.)
 
 } // namespace
 
@@ -2407,25 +2297,11 @@ QJsonObject Configuration::buildBody() const
             slotKeys.append(double(commsPassword(s)));
         root["messagePasswords"] = slotKeys;
     }
-    // false, and not negotiable at this call site — see withFleetKey.
-    root["fleetIdentity"] = m_fleetIdentity.toJson(false);
     // Always written, even when it is the default pair, because the two flags
     // that matter are the ones somebody turned OFF. Omitting a default-looking
     // policy would read back as the default on load, which is the same thing —
     // but only until the defaults change, and then every quietly-omitted policy
     // would silently adopt the new ones.
-    root["uploadPolicy"] = m_uploadPolicy.toJson();
-    // Written only when set, so an unlocked configuration carries no trace of
-    // the feature and a diff between two unlocked files stays clean. The key is
-    // written alongside because it is what lets the person who set the lock move
-    // it later; it is a PBKDF2-derived key, not the password, exactly like the
-    // access keys above — see accessVerifiers.
-    if (!m_lockedDeviceUid.isEmpty()) {
-        QJsonObject lock;
-        lock[QStringLiteral("uid")] = m_lockedDeviceUid;
-        lock[QStringLiteral("key")] = QString::number(m_deviceLockKey);
-        root[QStringLiteral("deviceLock")] = lock;
-    }
     return root;
 }
 
@@ -2589,7 +2465,7 @@ bool Configuration::saveSecureToFile(const QString &path, const SecureSaveOption
     // save that discloses nothing. A concealed section is written with its tier
     // and its messageKey intact and comes back concealed.
 
-    QJsonObject body = withFleetKey(buildBody(), m_fleetIdentity);
+    QJsonObject body = buildBody();
     // The version guard readWrapper applies to a .ct3, carried where a .ct3s can
     // keep it. loadFromFile reads it back out of the recovered body.
     body[QStringLiteral("fileVersion")] = kConfigSchemaVersion;
@@ -2915,9 +2791,9 @@ void Configuration::copyContentTo(Configuration &target) const
     // come back short precisely for the messages the user is looking at.
     target.m_sectionGrants = m_sectionGrants;
     // Still deliberately absent: m_commsKey is live key material a scratch copy
-    // has no use for, and m_fleetIdentity / m_uploadPolicy answer which HARDWARE
-    // a file may reach, which is no part of "which channels exist and what
-    // generates them". In particular the copy never carries the fleet secret
+    // has no use for, and nothing about which hardware a file may reach lives on
+    // the document any more — that is the package's policy. In particular the
+    // copy never carries any secret
     // inside the identity.
 }
 

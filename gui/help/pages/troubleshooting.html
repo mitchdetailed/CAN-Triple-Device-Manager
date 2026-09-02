@@ -86,7 +86,7 @@ Configuration for anything that writes, clears or commits, Get a Configuration
 for anything that reads. Protected Comms never causes this error code: the
 device only confirms that password — it is this program that acts on the
 answer, refusing a send before anything is written. See
-<a href="fleet-identity.html">Fleet Identity &amp; Access Keys</a>.</td></tr>
+<a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 <tr><td>the device refused the image (0x08)</td>
 <td>Raised only by Update Firmware: the unit has no bootloader, the image was
 built for a different product, or the staged image failed its checks. The
@@ -156,7 +156,7 @@ Closing the section editor on a message still marked <b>Hidden</b> or
 <b>Protect Communication</b> re-locks it immediately, whether you pressed OK or
 Cancel: the password opened it once and the box is still ticked. Press
 <b>Edit…</b> again to reopen it.</li>
-<li><b>Upload Configuration refuses a package</b> — the package was built
+<li><b>Send Secure Configuration refuses a package</b> — the package was built
 for a different vendor, model, serial number or fleet. That check has no
 override by design; see <a href="online.html">Online: Send, Get &amp;
 Flash</a>.</li>
@@ -164,7 +164,7 @@ Flash</a>.</li>
 
 <p class="note">For a quick overall picture — firmware protocol version,
 active table counts, device ID, which access passwords are set, and the
-fleet identity — use <b>Online&nbsp;→&nbsp;Device Status…</b> before digging
+firmware licence — use <b>Online&nbsp;→&nbsp;Device Status…</b> before digging
 further.</p>
 
 <p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>

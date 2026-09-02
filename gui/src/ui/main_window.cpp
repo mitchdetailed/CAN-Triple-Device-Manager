@@ -48,13 +48,13 @@
 #include "integrators_dialog.h"
 #include "connection_settings_dialog.h"
 #include "firmware_update_dialog.h"
-#include "fleet_identity_dialog.h"
+#include "firmware_license_dialog.h"
+#include "secure_builder_dialog.h"
 #include "help_window.h"
 #include "lua_console_dialog.h"
 #include "math_dialog.h"
 #include "monitor_channels_dialog.h"
 #include "script_editor_dialog.h"
-#include "upload_dialog.h"
 #include "../scripting/script_compiler.h"   // mapWithScript
 
 namespace ct {
@@ -173,7 +173,12 @@ void MainWindow::buildMenus()
     fileMenu->addAction(tr("&Open…"), QKeySequence::Open, this, &MainWindow::onOpen);
     fileMenu->addAction(tr("&Save"), QKeySequence::Save, this, &MainWindow::onSave);
     fileMenu->addAction(tr("Save &As…"), QKeySequence::SaveAs, this, &MainWindow::onSaveAs);
-    fileMenu->addAction(tr("Save Secure Confi&g…"), this, &MainWindow::onSaveSecureConfig);
+    // Replaces Save Secure Config. That command saved the open document in a
+    // second format; this one takes a configuration as an input, attaches an
+    // install policy to it, and produces a deployable package — which is what
+    // a .ct3s was always for and what the old name never said.
+    fileMenu->addAction(tr("Secure Configuration &Builder…"), this,
+                        &MainWindow::onSecureBuilder);
     fileMenu->addSeparator();
     fileMenu->addAction(tr("Check &Channels"), this, &MainWindow::onCheckChannels);
     fileMenu->addAction(tr("Config S&ummary…"), this, &MainWindow::onConfigSummary);
@@ -239,11 +244,12 @@ void MainWindow::buildMenus()
     onlineMenu->addAction(tr("Send Sec&ure Configuration…"), this,
                           &MainWindow::onSendSecureConfiguration);
     onlineMenu->addAction(tr("&Get Configuration"), this, &MainWindow::onGetConfiguration);
-    onlineMenu->addAction(tr("&Verify Configuration"), this, &MainWindow::onVerifyConfiguration);
     onlineMenu->addSeparator();
     onlineMenu->addAction(tr("&Monitor Channels…"), QKeySequence(Qt::Key_F3), this,
                           &MainWindow::onMonitorChannels);
-    // Mnemonic on the "w": V belongs to Verify Configuration higher up this menu.
+    // Mnemonic on the "w" rather than "V", which is free again now that Verify
+    // Configuration is gone — kept as it is because a shortcut people have
+    // learned is not worth churning for a tidier letter.
     onlineMenu->addAction(tr("CAN Vie&wer…"), QKeySequence(Qt::Key_F4), this,
                           &MainWindow::onCanViewer);
     onlineMenu->addSeparator();
@@ -265,31 +271,29 @@ void MainWindow::buildMenus()
     onlineMenu->addAction(tr("Reset Device"), this, &MainWindow::onResetDevice);
     onlineMenu->addSeparator();
     onlineMenu->addAction(tr("Device Status…"), this, &MainWindow::onDeviceStatus);
-    // Next to Device Status because that is where the Device ID is read and
-    // copied from, and this is the one place it gets pasted.
-    onlineMenu->addAction(tr("Lock Configuration to Device…"), this,
-                          &MainWindow::onLockToDevice);
+    // Beside Device Status because both read the unit rather than the document,
+    // and apart from it because they answer opposite questions — see the note on
+    // onGetDeviceInfo for why the permanent facts do not belong in a report
+    // whose every other line is a snapshot.
+    onlineMenu->addAction(tr("Get Device &Info…"), this, &MainWindow::onGetDeviceInfo);
     // Beside Device Status rather than with the configuration items above: this
     // replaces the firmware, not the configuration, and grouping it with Send /
     // Get would invite exactly the confusion between the two that the warning
     // about the stored-configuration format exists to prevent.
     onlineMenu->addAction(tr("Update Fi&rmware…"), this, &MainWindow::onUpdateFirmware);
     onlineMenu->addSeparator();
-    // Set Access Passwords and Upload Configuration both need a unit on the other
-    // end, which is why they are here rather than under File. Fleet Identity is
-    // half document and half device and could have gone either way; it sits with
-    // them because the only reason to open it is to build something the uploader
-    // will later install.
+    // Set Access Passwords writes into the DEVICE, which is why it is here
+    // rather than under File. The Firmware License Manager beside it is the
+    // same kind of thing — it edits the unit, not the document — and opens
+    // without a connection only because composing a licence is desk work; Apply
+    // is the step that needs hardware.
     //
-    // Upload Configuration goes ABOVE Fleet Identity deliberately. It is the
-    // dealer-facing entry point — what an installer opens with a customer's car
-    // on the ramp — and the only item in this menu that will refuse to program a
-    // device. Send Configuration at the top is the engineer's equivalent of it
-    // and, by design, only warns.
+    // The dealer-facing installer is Send Secure Configuration, at the top of
+    // this menu with the other send commands: it is the one item here that will
+    // refuse to program a device, on the policy sealed into the package.
     onlineMenu->addAction(tr("Set Access &Passwords…"), this, &MainWindow::onSetAccessPasswords);
-    // Upl&oad, not &Upload: U already belongs to "Send Sec&ure Configuration…".
-    onlineMenu->addAction(tr("Upl&oad Configuration…"), this, &MainWindow::onUploadConfiguration);
-    onlineMenu->addAction(tr("&Fleet Identity…"), this, &MainWindow::onFleetIdentity);
+    onlineMenu->addAction(tr("&Firmware License Manager…"), this,
+                          &MainWindow::onFirmwareLicense);
 
     // Tools
     QMenu *toolsMenu = menuBar()->addMenu(tr("&Tools"));
@@ -780,223 +784,14 @@ bool MainWindow::onSaveAs()
     return true;
 }
 
-bool MainWindow::onSaveSecureConfig()
+void MainWindow::onSecureBuilder()
 {
-    const bool hasCommsPassword = m_config.hasCommsPassword();
-
-    QDialog dlg(this);
-    dlg.setWindowTitle(tr("Save Secure Config"));
-    auto *dlgLayout = new QVBoxLayout(&dlg);
-
-    auto *intro = new QLabel(tr("These options apply to how this configuration is stored and "
-                                "shared."), &dlg);
-    intro->setWordWrap(true);
-    dlgLayout->addWidget(intro);
-
-    auto *group = new QGroupBox(tr("Save Options"), &dlg);
-    auto *groupLayout = new QVBoxLayout(group);
-    auto *requireCheck = new QCheckBox(tr("Require access password for use"), group);
-    groupLayout->addWidget(requireCheck);
-
-    // A document with no Protected Comms password can set one right here.
-    //
-    // Offering it here rather than sending you elsewhere is deliberate. The two
-    // places a password can be set are not interchangeable: Online → Set Access
-    // Passwords writes a key into HARDWARE and therefore needs a device on the
-    // bench, while this writes a verifier into the DOCUMENT and needs nothing.
-    // Requiring the former before the latter would make "build a protected
-    // configuration at my desk" impossible, which is the case this whole file
-    // format exists for.
-    //
-    // A document that already carries a password skips these fields and is asked
-    // for the existing one further down — changing it is Set Access Passwords'
-    // job, not a side effect of saving.
-    auto *passwordForm = new QFormLayout;
-    auto *passwordEdit = new QLineEdit(group);
-    passwordEdit->setEchoMode(QLineEdit::Password);
-    auto *confirmEdit = new QLineEdit(group);
-    confirmEdit->setEchoMode(QLineEdit::Password);
-    passwordForm->addRow(tr("Password :"), passwordEdit);
-    passwordForm->addRow(tr("Confirm :"), confirmEdit);
-    groupLayout->addLayout(passwordForm);
-
-    auto *warningLabel = new QLabel(group);
-    warningLabel->setWordWrap(true);
-    warningLabel->setStyleSheet(palette().color(QPalette::Window).lightness() < 128
-                                    ? QStringLiteral("color: #ffa178;")
-                                    : QStringLiteral("color: #c03000;"));
-    groupLayout->addWidget(warningLabel);
-
-    // The honest summary from secure_file.h, said here rather than left to be
-    // discovered: the two modes differ by where the key lives, and that is the
-    // entire difference between "a customer cannot read it" and "nobody can".
-    auto describe = [](bool requirePassword) -> QString {
-        if (requirePassword)
-            return tr("The file key is wrapped under the Protected Comms password, so the "
-                      "file cannot be opened at all without it — not by a customer, not by "
-                      "anyone reading this app's source.\n\n"
-                      "There is no recovery: no reset, no back door, no copy held anywhere. A "
-                      "lost password is a lost configuration.");
-        return tr("The body is encrypted, but the key that decrypts it travels inside the file, "
-                  "obfuscated. Anyone with CAN Triple Device Manager can open this file, send it "
-                  "to a device and use its channels; nobody can read the protocol detail out of "
-                  "the bytes, and the protected messages stay concealed.\n\n"
-                  "Be clear about the limit: this is obfuscation over encryption. It defeats a "
-                  "hex editor, a text search and any tool that does not implement this format. "
-                  "It does not defeat someone who reads this app's source or disassembles it — "
-                  "the key is in the file, and a determined reader will find it.");
-    };
-    auto *explanation = new QLabel(describe(false), group);
-    explanation->setWordWrap(true);
-    explanation->setMinimumWidth(420);
-    groupLayout->addWidget(explanation);
-    dlgLayout->addWidget(group);
-
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    dlgLayout->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-
-    // One place decides what is enabled and what the warning says, so the two
-    // can never describe the dialog differently.
-    const auto refresh = [&] {
-        const bool require = requireCheck->isChecked();
-        const bool needNewPassword = require && !hasCommsPassword;
-        for (QWidget *w : {static_cast<QWidget *>(passwordEdit),
-                           static_cast<QWidget *>(confirmEdit)}) {
-            w->setVisible(!hasCommsPassword);
-            w->setEnabled(needNewPassword);
-        }
-        for (int row = 0; row < passwordForm->rowCount(); ++row) {
-            if (QLayoutItem *item = passwordForm->itemAt(row, QFormLayout::LabelRole)) {
-                if (QWidget *label = item->widget())
-                    label->setVisible(!hasCommsPassword);
-            }
-        }
-        explanation->setText(describe(require));
-
-        // The minimum length, by the same rule as every other password chosen in
-        // this app. Note it is checked BEFORE the match test: telling someone
-        // their two-character password does not match its confirmation, and only
-        // saying it is too short once they have retyped it, is two round trips
-        // for one problem.
-        const QString tooShort = passwordProblem(passwordEdit->text());
-
-        QString warning;
-        if (needNewPassword && passwordEdit->text().isEmpty())
-            warning = tr("Choose the Protected Comms password this file will require.");
-        else if (needNewPassword && !tooShort.isEmpty())
-            warning = tooShort;
-        else if (needNewPassword && passwordEdit->text() != confirmEdit->text())
-            warning = tr("The two passwords do not match.");
-        else if (require)
-            warning = tr("⚠ There is no recovery. Keep a copy of this password somewhere safe.");
-        warningLabel->setText(warning);
-        warningLabel->setVisible(!warning.isEmpty());
-
-        buttons->button(QDialogButtonBox::Ok)
-            ->setEnabled(!needNewPassword
-                         || (!passwordEdit->text().isEmpty() && tooShort.isEmpty()
-                             && passwordEdit->text() == confirmEdit->text()));
-    };
-    connect(requireCheck, &QCheckBox::toggled, &dlg, refresh);
-    for (QLineEdit *e : {passwordEdit, confirmEdit})
-        connect(e, &QLineEdit::textChanged, &dlg, refresh);
-    refresh();
-
-    if (dlg.exec() != QDialog::Accepted)
-        return false;
-
-    SecureSaveOptions options;
-    options.requirePassword = requireCheck->isChecked();
-
-    if (options.requirePassword && hasCommsPassword) {
-        // Revealing a document keeps the derived key and forgets the text it
-        // came from, so wrapping the file key under the password means asking
-        // for it again. Checked against the document's own verifier first: a
-        // typo here would otherwise produce a file whose password nobody knows.
-        const AccessVerifier &verifier =
-            m_config.accessVerifiers().verifier(AccessFunction::EditProtectedComms);
-        for (;;) {
-            bool ok = false;
-            const QString password = QInputDialog::getText(
-                this, tr("Save Secure Config"),
-                tr("Enter the Protected Comms password this file will require:"),
-                QLineEdit::Password, QString(), &ok);
-            if (!ok)
-                return false;
-            if (verifier.verify(password)) {
-                options.password = password;
-                break;
-            }
-            QMessageBox::warning(this, tr("Save Secure Config"),
-                                 tr("That password is not correct."));
-        }
-    }
-
-    QString path = QFileDialog::getSaveFileName(
-        this, tr("Save Secure Config"),
-        startIn(m_config.filePath()), tr(kSecureFileFilter));
-    if (path.isEmpty())
-        return false;
-    if (QFileInfo(path).suffix().isEmpty())
-        path += QStringLiteral(".ct3s");
-
-    // A password typed in the dialog has to be set on the DOCUMENT before the
-    // file is written, because the verifier that ends up inside the file is the
-    // document's own. Skipping it would produce a file wrapped under a password
-    // the document has never heard of — openable, and then immediately unable to
-    // reveal anything.
-    //
-    // What it must NOT do is happen the moment the dialog is accepted, which is
-    // where it used to sit. Everything above this line is still a question the
-    // user can walk away from: they cancel the file browser, or the write fails
-    // on a full disk or a read-only share, and either way they are left holding a
-    // document that has silently acquired a password — one that now conceals its
-    // own protected messages and that nothing on screen said was being set. So
-    // the destination is settled first, and the two values needed to undo the
-    // change are taken before it is made.
-    const AccessKey priorCommsKey = m_config.commsKey();
-    const bool priorDirty = m_config.isDirty();
-    const bool passwordApplied = options.requirePassword && !hasCommsPassword;
-    if (passwordApplied) {
-        if (!m_config.setCommsPassword(passwordEdit->text())) {
-            QMessageBox::warning(this, tr("Save Secure Config"),
-                                 tr("The Protected Comms password could not be applied."));
-            return false;
-        }
-        options.password = passwordEdit->text();
-        updateProtectionState();
-    }
-
-    // The key the file carries so a customer's copy can satisfy a device's
-    // protected-comms gate without them ever typing a password. Read AFTER the
-    // block above, which is what puts a key there in the first place on a
-    // document that had none.
-    options.embeddedCommsKey = m_config.commsKey();
-
-    QString error;
-    if (!m_config.saveSecureToFile(path, options, &error)) {
-        // The file the password was for does not exist, so the document must not
-        // keep it. Clearing drops the verifier and the key together; the key the
-        // session held beforehand is put back afterwards, because it may have
-        // been proved against a device rather than derived from this password and
-        // has nothing to do with the save that just failed. The dirty flag is
-        // restored last so a document that was clean before this attempt does not
-        // start claiming unsaved changes it does not have.
-        if (passwordApplied) {
-            m_config.setCommsPassword(QString());
-            m_config.setCommsKey(priorCommsKey);
-            m_config.setDirty(priorDirty);
-            updateProtectionState();
-            updateWindowTitle();
-        }
-        QMessageBox::warning(this, tr("Save Secure Config"), error);
-        return false;
-    }
-    addRecentFile(path);
-    updateWindowTitle();
-    return true;
+    // Seeded with the open document's path, and only its path: the builder loads
+    // its source from disk. Packaging what happens to be in the editor would let
+    // an unsaved edit reach a customer's device without ever existing in a file
+    // anybody could go back to.
+    SecureBuilderDialog dialog(m_config.filePath(), this);
+    dialog.exec();
 }
 
 void MainWindow::onCheckChannels()
@@ -1217,11 +1012,11 @@ void MainWindow::onDeviceScript()
 
 // Online > Send Secure Configuration… — install a .ct3s without opening it.
 //
-// Send Configuration sends the document you are looking at. Upload Configuration
-// LOADS a package into the document and then sends that. Both leave the contents
-// in the application, which is exactly right when the contents are yours and
-// wrong when they are not: hand either to a dealer and "install this update"
-// quietly becomes "and here is the configuration to browse".
+// Send Configuration sends the document you are looking at, and File > Open
+// followed by Send is how a package gets installed by hand. Both leave the
+// contents in the application, which is exactly right when the contents are
+// yours and wrong when they are not: hand either to a dealer and "install this
+// update" quietly becomes "and here is the configuration to browse".
 //
 // This path never creates a document. The package is decoded into a local
 // Configuration that lives inside this function, is used only to produce the
@@ -1273,36 +1068,100 @@ void MainWindow::onSendSecureConfiguration()
         return;
     }
 
-    // A package saved with "Require access password for use" cannot be decoded
-    // at all without it, so there is nothing to send until it is given. That is
-    // the trade the author made when they chose that mode: total secrecy, and
-    // whoever installs it must hold the password. A package saved WITHOUT it
-    // installs with no password at all, which is the arrangement this command
-    // was built for.
-    QString password;
-    if (peek.requiresPassword) {
-        for (;;) {
-            bool ok = false;
-            password = QInputDialog::getText(
-                this, title,
-                tr("\"%1\" requires its Protected Comms password before it can be "
-                   "installed.\n\nPassword:")
-                    .arg(QFileInfo(path).fileName()),
-                QLineEdit::Password, QString(), &ok);
-            if (!ok)
-                return;
-            Configuration probe;
-            if (probe.loadFromFile(path, nullptr, password))
-                break;
-            QMessageBox::warning(this, title, tr("That password is not correct."));
-        }
-    }
+    // No password prompt here any more: v2 removed the container's
+    // password-protected mode, so a .ct3s always opens. What stops a package
+    // installing on the wrong unit is the licence match, checked against the
+    // device rather than typed by whoever is holding the laptop.
 
     // The package. Scoped to this function on purpose — see the header comment.
     Configuration package;
-    if (!package.loadFromFile(path, &error, password)) {
+    if (!package.loadFromFile(path, &error)) {
         QMessageBox::warning(this, title, error);
         return;
+    }
+
+    // ------------------------------------------------ the install policy
+    //
+    // Decided BEFORE the device is touched: the verdict is pure, the key proof
+    // that follows it is read-only, and nothing that changes device state runs
+    // until the person has said yes further down. The old order wrote the
+    // package's passwords into device RAM and only then asked whether to
+    // install — a No left them changed for the session.
+    //
+    // The decision itself lives in packageInstallVerdict(), where a test can
+    // reach it. This function keeps the wording.
+    const SecurePackagePolicy policy = package.secureOptions().policy;
+
+    device_session::LicenseState deviceLicense;
+    QString licenseError;
+    {
+        BusyScope busy(this);
+        device_session::readLicense(&m_link, &deviceLicense, &licenseError);
+    }
+
+    const InstallVerdict verdict = packageInstallVerdict(
+        policy, deviceLicense.supported, deviceLicense.manufacturer, deviceLicense.model,
+        deviceLicense.firmwareVersion);
+    if (verdict.noPolicy) {
+        QMessageBox::critical(
+            this, title,
+            tr("\"%1\" carries no install policy, so there is no way to tell which devices "
+               "it was built for.\n\nIt has NOT been sent. Rebuild it with "
+               "File → Secure Configuration Builder.")
+                .arg(QFileInfo(path).fileName()));
+        return;
+    }
+    if (verdict.deviceUnlicensed) {
+        QMessageBox::critical(
+            this, title,
+            tr("This unit's firmware cannot report a licence, so it cannot be matched against "
+               "this package.\n\nIt has NOT been sent. Update the unit's firmware."));
+        return;
+    }
+    if (!verdict.ok()) {
+        // Each failure names the field and both values: "this package was not
+        // built for this device" is true and useless to the person holding the
+        // laptop, while "Model: package wants X, device says Y" tells them
+        // whether they picked up the wrong file or the wrong unit.
+        const auto fieldLabel = [this](const QString &field) {
+            if (field == QLatin1String("manufacturer"))
+                return tr("Manufacturer");
+            if (field == QLatin1String("model"))
+                return tr("Model");
+            return tr("Version");
+        };
+        QStringList lines;
+        for (const InstallMismatch &m : verdict.mismatches)
+            lines << tr("%1: package wants \"%2\", device says \"%3\"")
+                         .arg(fieldLabel(m.field), m.wanted, m.actual);
+        QMessageBox::critical(this, title,
+                              tr("This package was not built for the connected device, so it "
+                                 "has NOT been sent.\n\n%1")
+                                  .arg(lines.join(QStringLiteral("\n"))));
+        return;
+    }
+
+    // THE KEY, which is not optional and is not a string compare. The host picks
+    // a nonce and the device answers under the key it holds — so this proves the
+    // unit really carries the licence rather than merely reporting one, and a
+    // look-alike that echoed the right manufacturer and model still fails here.
+    // Read-only: the device's state is unchanged by answering.
+    {
+        bool mismatch = false;
+        QString proveError;
+        bool proved = false;
+        {
+            BusyScope busy(this);
+            proved = device_session::proveLicenseKey(&m_link, policy.key, &proveError, &mismatch);
+        }
+        if (!proved) {
+            QMessageBox::critical(
+                this, title,
+                tr("This unit could not prove the Firmware Key this package requires, so the "
+                   "package has NOT been sent.\n\n%1")
+                    .arg(proveError.isEmpty() ? tr("The device did not answer.") : proveError));
+            return;
+        }
     }
 
     // mapWithScript: a package carrying a script — written as Lua, or retained
@@ -1310,6 +1169,8 @@ void MainWindow::onSendSecureConfiguration()
     // silently stripped, because plain mapToDevice emits no chunks and no chunks
     // means "remove it". A package built from a Get is exactly the document that
     // now carries a retained image, so this is on the common path, not a corner.
+    // Pure, and ahead of the confirmation so a broken package is refused before
+    // anyone is asked to approve installing it.
     const MappingResult mapped = mapWithScript(package);
     if (!mapped.ok()) {
         // The count, and deliberately not the list. Every mapper error names a
@@ -1318,80 +1179,91 @@ void MainWindow::onSendSecureConfiguration()
         QMessageBox::warning(this, title,
                              tr("This package cannot be programmed onto a device: the mapping "
                                 "reports %1 error(s).\n\nIt has to be corrected by whoever "
-                                "built it — open it with its password to see them.")
+                                "built it — open the configuration it was built from to see "
+                                "them.")
                                  .arg(mapped.errors.size()));
         return;
     }
 
-    // The same rules the uploader applies, and the same answer to a failure:
-    // refuse. This is a deployment command, not an engineer's, so there is no
-    // "anyway" — a package that names another vendor has no business on this
-    // unit and whoever is holding the laptop cannot know otherwise.
-    // The fleet identity is checked HERE — before the device is touched, before
-    // the Send password is asked for, and before a single table record goes out.
-    // A package that does not belong on this unit must never get as far as
-    // partially overwriting it.
-    //
-    // Each failure is listed on its own line and names the field it is about.
-    // "This package was not built for this device" is true and useless to the
-    // person holding the laptop; "Error: Vendor ID incorrect — this package is
-    // for "Acme", the device reports "Other"" tells them whether they picked up
-    // the wrong file or the wrong unit, which is the only thing they can act on.
-    const UploadVerdict verdict = UploadDialog::evaluate(&m_link, package);
-
-    // A device that cannot be ASKED is not a device that passed.
-    //
-    // When the identity cannot be read — firmware older than the fleet commands,
-    // or a read that failed — evaluate() returns no rules at all, and "no rules
-    // failed" is trivially true. That is the right answer for Send Configuration,
-    // where the operator owns both ends and an unaskable bench unit must stay
-    // usable. It is the wrong answer here: this command exists to put a sealed
-    // package on the unit it was built for, and an unanswerable unit is precisely
-    // the one nobody can vouch for.
-    //
-    // So the demand comes from the PACKAGE, exactly as it does for a blank field.
-    // A package naming no fleet and pinning no serial asks nothing and installs
-    // anywhere, which is what an unbadged development package should do. One that
-    // names a fleet is refused rather than installed on faith.
-    if (!verdict.deviceReadable) {
-        const bool packageDemandsIdentity =
-            package.fleetIdentity().isSet() || package.uploadPolicy().pinsSerial();
-        if (packageDemandsIdentity) {
-            QMessageBox::critical(
-                this, title,
-                tr("This package is built for a specific fleet, and the connected device "
-                   "cannot confirm it belongs to it — so the package has NOT been sent.\n\n"
-                   "Error: %1")
-                    .arg(verdict.problem));
-            return;
-        }
-    }
-
-    if (verdict.hasBlockingFailure()) {
-        QStringList lines;
-        for (const QString &failure : verdict.failureSummaries())
-            lines << tr("Error: %1").arg(failure);
-        QMessageBox::critical(
-            this, title,
-            tr("This package was not built for the connected device, so it has NOT been "
-               "sent.\n\n%1")
-                .arg(lines.join(QStringLiteral("\n\n"))));
-        return;
-    }
-
+    // THE CONFIRMATION — and everything above it left the device exactly as it
+    // was. Everything below it changes something.
     QString confirm = tr("Install \"%1\" on the connected device?\n\n"
                          "This replaces the device's entire configuration and saves it to "
                          "flash, so it reloads at every power-up.")
                           .arg(QFileInfo(path).fileName());
+    if (policy.changesPasswords())
+        confirm += tr("\n\nThis package also sets the device's access passwords.");
     confirm += tr("\n\nThe package is not opened and its contents are not shown. The "
                   "configuration you have open stays as it is.");
-    const QStringList warnings = verdict.warningSummaries();
-    if (!warnings.isEmpty())
-        confirm += tr("\n\n⚠ %1").arg(warnings.join(QStringLiteral("\n")));
     if (QMessageBox::question(this, title, confirm, QMessageBox::Yes | QMessageBox::No,
                               QMessageBox::No)
         != QMessageBox::Yes)
         return;
+
+    // Password updates need the device to accept writes it would otherwise
+    // refuse, which means proving the key TO the device — the other direction
+    // from the check above, and the grant that makes it a master key.
+    //
+    // Done BEFORE the transfer, and the order is load-bearing: access keys live
+    // in the config store's write-once header, so they have to be in the
+    // device's RAM before the Save-to-Flash that ends the transfer commits that
+    // header. Written afterwards they would sit in RAM uncommitted and vanish at
+    // the next power cycle — the documented trap this whole arrangement exists
+    // to avoid. A CLEAR_CONFIG does not disturb them (engine resetRuntime leaves
+    // the key record alone), so writing them first is safe.
+    if (policy.changesPasswords()) {
+        QString proveError;
+        bool granted = false;
+        {
+            BusyScope busy(this);
+            granted = device_session::proveLicenseSecret(&m_link, policy.key, &proveError);
+        }
+        if (!granted) {
+            QMessageBox::critical(
+                this, title,
+                tr("This package sets device passwords, and the unit would not accept the "
+                   "Firmware Key as authority to do so. Nothing has been sent.\n\n%1")
+                    .arg(proveError.isEmpty() ? tr("The device did not answer.") : proveError));
+            return;
+        }
+
+        QStringList failed;
+        const auto applyOne = [&](bool wanted, AccessKey key, AccessFunction fn, int slot,
+                                  const QString &label) {
+            if (!wanted)
+                return;
+            QString err;
+            // The package carries DERIVED keys, never phrases, so there is
+            // nothing to derive here. kNoAccessKey is the clear sentinel — the
+            // instruction a ticked box with an empty field records.
+            const bool ok = key == kNoAccessKey
+                                ? device_session::clearAccessKey(&m_link, fn, &err, slot)
+                                : device_session::writeAccessKey(&m_link, fn, key, &err, slot);
+            if (!ok)
+                failed << tr("%1 (%2)").arg(label, err.isEmpty() ? tr("refused") : err);
+        };
+        {
+            BusyScope busy(this);
+            applyOne(policy.setSend, policy.sendKey, AccessFunction::SendConfiguration, 1,
+                     tr("Send Configuration"));
+            applyOne(policy.setGet, policy.getKey, AccessFunction::GetConfiguration, 1,
+                     tr("Get Configuration"));
+            for (int i = 0; i < 4; ++i)
+                applyOne(policy.setCommsSlot[i], policy.commsSlotKey[i],
+                         AccessFunction::EditProtectedComms, i + 1,
+                         tr("Protected Comms slot %1").arg(i + 1));
+        }
+        if (!failed.isEmpty()) {
+            // Refused BEFORE the configuration goes out, so the unit is left as
+            // it was rather than carrying a new configuration under passwords
+            // that are half old and half new.
+            QMessageBox::critical(this, title,
+                                  tr("Some of this package's passwords could not be set, so "
+                                     "nothing has been sent.\n\n%1")
+                                      .arg(failed.join(QStringLiteral("\n"))));
+            return;
+        }
+    }
 
     if (!ensureDeviceAccess(AccessFunction::SendConfiguration))
         return;
@@ -1411,9 +1283,10 @@ void MainWindow::onSendSecureConfiguration()
     progress->setWindowTitle(title);
     progress->setWindowModality(Qt::WindowModal);
     progress->setMinimumDuration(0);
+    // The version the package stamps on the unit comes from its policy — the
+    // Builder's "Package version" — not from the document inside it.
     auto *transfer = ConfigTransfer::send(&m_link, mapped.tables, /*verify=*/true, busSetups,
-                                          /*saveToFlash=*/true,
-                                          package.fleetIdentity().configVersion,
+                                          /*saveToFlash=*/true, policy.configVersion,
                                           package.effectiveTitle(), /*resetAfter=*/false, this);
     // The bar moves; the stage text does not. ConfigTransfer's stages read
     // "Sending channels (64/82)", which is a running count of what is in the
@@ -1602,75 +1475,20 @@ void MainWindow::onSendConfiguration()
         }
     }
 
-    // A configuration locked to one unit goes to that unit and nowhere else.
-    // This one is a HARD refusal with no override, unlike the fleet check below:
-    // a fleet identity says which KIND of hardware a file suits and an operator
-    // may reasonably know better, but a device lock names one serial number,
-    // which is somebody stating that this calibration belongs in that vehicle.
-    // An override would make it advice, and advice is not what was asked for.
-    if (m_config.isLockedToDevice()) {
-        device_session::Identity identity;
-        QString idError;
-        {
-            BusyScope busy(this);
-            device_session::readIdentity(&m_link, &identity, &idError);
-        }
-        const QString uid = identity.supported ? identity.uidText() : QString();
-        if (!m_config.mayBeSentTo(uid)) {
-            QMessageBox::warning(
-                this, tr("Send Configuration"),
-                uid.isEmpty()
-                    ? tr("This configuration is locked to device %1, and this unit cannot say "
-                         "which device it is — its firmware is too old to report an ID.\n\n"
-                         "It has not been sent. Update the unit's firmware, or remove the lock "
-                         "in Online → Lock Configuration to Device.")
-                          .arg(m_config.lockedDeviceUid())
-                    : tr("This configuration is locked to a different device.\n\n"
-                         "Locked to:      %1\n"
-                         "Connected unit: %2\n\n"
-                         "It has not been sent. Connect the right unit, or change the lock in "
-                         "Online → Lock Configuration to Device.")
-                          .arg(m_config.lockedDeviceUid(), uid));
-            return;
-        }
-    }
-
-    // Then ask whether this configuration belongs on this unit at all, using the
-    // uploader's own rules so that the two paths can never disagree about what
-    // counts as a match.
+    // NO IDENTITY CHECK HERE ANY MORE. Send used to ask the uploader's rules
+    // whether this configuration belonged on this unit, and warn if not. Those
+    // rules compared a document's fleet block against an identity compiled into
+    // the firmware, and both halves are gone: the compiled identity was replaced
+    // by the writable firmware licence, and the policy is being repositioned onto
+    // the device's own hardware record (Online → Get Device Info) rather than
+    // onto a fleet block in the file.
     //
-    // What they DO disagree about, deliberately, is what a failure means. Here it
-    // is ADVISORY: it is the operator's check, not a lock. A bench board carries
-    // no identity, a development unit is routinely re-loaded with something
-    // older, and a check that cannot be overridden becomes a reason to stop
-    // building identities into the firmware in the first place. So a failing rule
-    // is shown with its reason and a Yes/No defaulting to No, and "nothing to
-    // compare" passes silently.
+    // Deliberately left as nothing rather than half-rewired. A check that
+    // compares against a field nobody sets any more is worse than no check: it
+    // passes everything and reads as though something was verified.
     //
-    // Online → Upload Configuration is the path that REFUSES, and that asymmetry
-    // is the point of having two of them: Send is the engineer's command and this
-    // is their own work coming back at them, while the uploader is handed to a
-    // dealer who has no way to know whether it is safe to continue. So every
-    // failure is a question here, including the ones the uploader would not
-    // budge on.
-    //
-    // Warnings are not questions on either path. A version going backwards is
-    // stated and then got on with — see UploadRule::Warn.
-    const UploadVerdict verdict = UploadDialog::evaluate(&m_link, m_config);
-    const QStringList uploadFailures = verdict.failureSummaries();
-    const QStringList uploadWarnings = verdict.warningSummaries();
-    // deviceReadable gates the whole thing: a unit that cannot be asked has not
-    // failed anything, and its `problem` text is deliberately dropped rather than
-    // shown — old firmware answering nothing is not news to whoever is sending to
-    // it, and the uploader is where that gets spelled out.
-    if (verdict.deviceReadable && !uploadFailures.isEmpty()) {
-        if (QMessageBox::question(this, tr("Send Configuration"),
-                                  tr("%1\n\nSend this configuration to the device anyway?")
-                                      .arg(uploadFailures.join(QStringLiteral("\n"))),
-                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
-            != QMessageBox::Yes)
-            return;
-    }
+    // The device lock above is untouched and still refuses outright — that one
+    // names a chip, not a fleet, and never depended on any of this.
 
     const auto issues = validateConfiguration(m_config);
     const bool hasErrors = std::any_of(issues.begin(), issues.end(), [](const ValidationIssue &i) {
@@ -1736,8 +1554,6 @@ void MainWindow::onSendConfiguration()
     // clicking OK, and it is not worth a question — the operator is looking at
     // the confirmation for this very send, which is exactly where a remark about
     // that send belongs.
-    if (!uploadWarnings.isEmpty())
-        detail += tr("\n\n⚠ %1").arg(uploadWarnings.join(QStringLiteral("\n")));
 
     // A Protected section is unticked by proving Protected Comms AGAINST A
     // DEVICE, so on a unit with no such password set the tier is inert: the
@@ -1895,14 +1711,12 @@ void MainWindow::onSendConfiguration()
     auto *progress = new QProgressDialog(tr("Sending configuration…"), tr("Cancel"), 0, 100, this);
     progress->setWindowModality(Qt::WindowModal);
     progress->setMinimumDuration(0);
-    // The configuration's own revision number rides the Save-to-Flash step, so
-    // the version the device afterwards reports is the version of the tables it
-    // just committed. Passed unconditionally, zero included: a document with no
-    // fleet identity must CLEAR whatever the unit was claiming rather than leave
-    // it describing a configuration that is no longer there.
+    // No configuration version, deliberately. This is the engineer's Send, not
+    // a release: nullopt sends an empty Save-to-Flash payload, which the
+    // firmware reads as "leave the stored version alone". Only a package —
+    // through Send Secure Configuration — stamps a version on a unit.
     auto *transfer = ConfigTransfer::send(&m_link, mapped.tables, /*verify=*/true, busSetups,
-                                          /*saveToFlash=*/true,
-                                          m_config.fleetIdentity().configVersion, configTitle,
+                                          /*saveToFlash=*/true, std::nullopt, configTitle,
                                           resetAfter, this);
     connect(transfer, &ConfigTransfer::progress, progress,
             [progress](int done, int total, const QString &stage) {
@@ -2137,142 +1951,6 @@ void MainWindow::runGetTransfer(bool allowUnlockRetry)
     });
 }
 
-void MainWindow::onVerifyConfiguration()
-{
-    if (!ensureConnected())
-        return;
-    // Verify reads the device's tables back and compares them, so it is a Get in
-    // everything but name and is gated as one.
-    if (!ensureDeviceAccess(AccessFunction::GetConfiguration))
-        return;
-    const MappingResult mapped = mapWithScript(m_config);
-    if (!mapped.ok()) {
-        QMessageBox box(QMessageBox::Warning, tr("Verify Configuration"),
-                        tr("Cannot map the configuration (%1 error(s)).\n\n"
-                           "See Show Details for the full list.")
-                            .arg(mapped.errors.size()),
-                        QMessageBox::Ok, this);
-        box.setDetailedText(mapped.errors.join(QStringLiteral("\n")));
-        box.exec();
-        return;
-    }
-    runVerifyTransfer(/*allowUnlockRetry=*/true);
-}
-
-// The read-and-compare half of onVerifyConfiguration, split out for the same
-// reason as runGetTransfer: so it can be repeated once after a password proof.
-void MainWindow::runVerifyTransfer(bool allowUnlockRetry)
-{
-    const MappingResult mapped = mapWithScript(m_config);
-    auto *progress = new QProgressDialog(tr("Verifying…"), tr("Cancel"), 0, 100, this);
-    progress->setWindowModality(Qt::WindowModal);
-    progress->setMinimumDuration(0);
-    auto *transfer = ConfigTransfer::get(&m_link, this);
-    connect(transfer, &ConfigTransfer::progress, progress,
-            [progress](int done, int total, const QString &stage) {
-                progress->setMaximum(total);
-                progress->setValue(done);
-                progress->setLabelText(stage);
-            });
-    connect(progress, &QProgressDialog::canceled, transfer, &ConfigTransfer::cancel);
-    connect(transfer, &ConfigTransfer::tablesReady, this, [this, mapped](const DeviceTables &device) {
-        auto compare = [](const auto &expected, const auto &actual, int &mismatches) {
-            for (int i = 0; i < expected.size(); ++i) {
-                if (i >= actual.size()
-                    || std::memcmp(&expected[i], &actual[i], sizeof(expected[i])) != 0)
-                    ++mismatches;
-            }
-        };
-        int mismatches = 0;
-        compare(mapped.tables.messages, device.messages, mismatches);
-        compare(mapped.tables.signalConfigs, device.signalConfigs, mismatches);
-        compare(mapped.tables.math, device.math, mismatches);
-        compare(mapped.tables.conditions, device.conditions, mismatches);
-        // The device may hold ACTIVE entries beyond what the document defines
-        // (e.g. leftovers from an older configuration) — those differ too.
-        auto extrasBeyond = [&mismatches](const auto &actual, int from, auto isActive) {
-            for (int i = from; i < actual.size(); ++i)
-                if (isActive(actual[i]))
-                    ++mismatches;
-        };
-        extrasBeyond(device.messages, mapped.tables.messages.size(),
-                     [](const CanMessageConfig &m) { return (m.flags & MSGFLAG_ACTIVE) != 0; });
-        extrasBeyond(device.signalConfigs, mapped.tables.signalConfigs.size(),
-                     [](const CanSignalConfig &s) { return sigIsActive(s) != 0; });
-        extrasBeyond(device.math, mapped.tables.math.size(),
-                     [](const MathConfig &m) { return m.is_active != 0; });
-        extrasBeyond(device.conditions, mapped.tables.conditions.size(),
-                     [](const ConditionConfig &c) { return (c.flags & CONDFLAG_ACTIVE) != 0; });
-        compare(mapped.tables.counters, device.counters, mismatches);
-        extrasBeyond(device.counters, mapped.tables.counters.size(),
-                     [](const CounterConfig &c) { return (c.flags & COUNTERFLAG_ACTIVE) != 0; });
-        compare(mapped.tables.timers, device.timers, mismatches);
-        extrasBeyond(device.timers, mapped.tables.timers.size(),
-                     [](const TimerConfig &t) { return (t.flags & TIMERFLAG_ACTIVE) != 0; });
-        compare(mapped.tables.constants, device.constants, mismatches);
-        extrasBeyond(device.constants, mapped.tables.constants.size(),
-                     [](const ConstantConfig &c) { return c.is_active != 0; });
-        compare(mapped.tables.relays, device.relays, mismatches);
-        extrasBeyond(device.relays, mapped.tables.relays.size(),
-                     [](const RelayConfig &r) { return (r.flags & RELAYFLAG_ACTIVE) != 0; });
-        compare(mapped.tables.tables2x16Def, device.tables2x16Def, mismatches);
-        extrasBeyond(device.tables2x16Def, mapped.tables.tables2x16Def.size(),
-                     [](const Table2x16Def &t) { return (t.flags & TABLEFLAG_ACTIVE) != 0; });
-        // The Out table pairs with Def by index and carries no flags of its
-        // own, so it is compared but gets no extras pass — a leftover pair is
-        // already counted once through its Def's ACTIVE flag.
-        compare(mapped.tables.tables2x16Out, device.tables2x16Out, mismatches);
-        compare(mapped.tables.tables8x8Def, device.tables8x8Def, mismatches);
-        extrasBeyond(device.tables8x8Def, mapped.tables.tables8x8Def.size(),
-                     [](const Table8x8Def &t) { return (t.flags & TABLEFLAG_ACTIVE) != 0; });
-        // Eight Row records per Def, carrying no flags of their own — the same
-        // arrangement as the 2x16's Out table, so the same treatment: compared,
-        // but no extras pass. A leftover table on the device is already counted
-        // once through its Def's ACTIVE flag, and counting its eight orphaned
-        // rows again would report nine differences for one stale table.
-        compare(mapped.tables.tables8x8Row, device.tables8x8Row, mismatches);
-        compare(mapped.tables.integrators, device.integrators, mismatches);
-        extrasBeyond(device.integrators, mapped.tables.integrators.size(),
-                     [](const IntegratorConfig &g) { return (g.flags & INTEGFLAG_ACTIVE) != 0; });
-        compare(mapped.tables.crc8, device.crc8, mismatches);
-        extrasBeyond(device.crc8, mapped.tables.crc8.size(),
-                     [](const Crc8Config &c) { return (c.flags & CRC8FLAG_ACTIVE) != 0; });
-        // Script bytecode. A chunk has no ACTIVE flag — the chunk COUNT is what
-        // says how much script there is — so "the device has more chunks than
-        // the document compiles to" is the extras test, and any surplus chunk is
-        // a difference regardless of what is in it.
-        compare(mapped.tables.scriptChunks, device.scriptChunks, mismatches);
-        mismatches += qMax(0, device.scriptChunks.size() - mapped.tables.scriptChunks.size());
-        if (mismatches == 0)
-            QMessageBox::information(this, tr("Verify Configuration"),
-                                     tr("Device configuration matches the document."));
-        else
-            QMessageBox::warning(this, tr("Verify Configuration"),
-                                 tr("%1 table entries differ from the document. "
-                                    "Use Send Configuration to update the device.")
-                                     .arg(mismatches));
-    });
-    connect(transfer, &ConfigTransfer::finished, this,
-            [this, progress, transfer, allowUnlockRetry](bool ok, const QString &error) {
-        progress->close();
-        progress->deleteLater();
-        if (ok)
-            return;
-        // A failed verify used to say NOTHING: the comparison above only runs on
-        // tablesReady, so a refused read closed the progress dialog and left the
-        // window exactly as it was. Clicking Verify and getting silence reads as
-        // a broken button, and — worse — as a passed check.
-        if (allowUnlockRetry && transfer->failedLocked()
-            && offerProtectedCommsUnlock(tr("Verify Configuration"))) {
-            runVerifyTransfer(/*allowUnlockRetry=*/false);
-            return;
-        }
-        QMessageBox::warning(this, tr("Verify Configuration"),
-                             tr("Could not read the device configuration back, so nothing "
-                                "was verified.\n\n%1").arg(error));
-    });
-}
-
 void MainWindow::onMonitorChannels()
 {
     if (!m_monitorDialog) {
@@ -2422,32 +2100,49 @@ void MainWindow::onDeviceStatus()
         }
     }
 
-    // Who the unit IS. Worth printing beside everything else here precisely
-    // because it is the one thing in this dialog nobody with a serial cable could
-    // have changed: the identity is compiled into the firmware, so re-badging a
-    // unit means building and flashing it. If this line is wrong, the wrong
-    // binary is on the board.
-    device_session::FleetIdentityState fleet;
-    if (device_session::readFleetIdentity(&m_link, &fleet, &sessionError) && fleet.supported) {
-        if (!fleet.identity.isSet()) {
-            text += tr("\n\nFleet identity: none — this firmware was built without one, which "
-                       "is normal for a bench unit and means no update can be matched to it.");
+    // Who the unit is LICENSED to. This was the fleet identity, which was
+    // compiled into the firmware and was therefore the one line in this dialog
+    // nobody with a serial cable could have changed. A licence is writable by
+    // design, so it does not carry that guarantee and must not be read as if it
+    // did — what cannot be rewritten is the hardware record behind
+    // Online \u2192 Get Device Info, burned once into OTP.
+    device_session::LicenseState statusLicense;
+    if (device_session::readLicense(&m_link, &statusLicense, &sessionError)
+        && statusLicense.supported) {
+        const QString dash = QStringLiteral("\u2014");
+        if (statusLicense.blank()) {
+            text += tr("\n\nFirmware licence: none issued.");
         } else {
-            text += tr("\n\nFleet identity: vendor %1, model %2, serial %3")
-                        .arg(fleet.identity.vendorId, fleet.identity.modelId)
-                        .arg(fleet.identity.serialNumber);
-            // The one field of the six that is NOT compiled in. It has to move
-            // every time a configuration is released, so it lives in the flash
-            // header and a Send is what advances it.
-            text += tr("\nConfiguration version on this unit: %1")
-                        .arg(fleet.identity.configVersion);
-            text += fleet.keyPresent
-                        ? tr("\nFleet key: held, so this unit can prove which fleet it "
-                             "belongs to.")
-                        : tr("\nFleet key: none, so this unit can claim an identity but cannot "
-                             "prove it — an uploader set to require proof will refuse it.");
+            text += tr("\n\nFirmware licence: %1 / %2 / %3")
+                        .arg(statusLicense.manufacturer.isEmpty() ? dash
+                                                                  : statusLicense.manufacturer,
+                             statusLicense.model.isEmpty() ? dash : statusLicense.model,
+                             statusLicense.firmwareVersion.isEmpty()
+                                 ? dash
+                                 : statusLicense.firmwareVersion);
         }
+        // The two secrets are reported separately because they mean different
+        // things and only one of them protects anything. A unit can hold a
+        // Firmware Key and still be freely rewritable.
+        text += statusLicense.keySet
+                    ? tr("\nFirmware Key: held, so this unit can prove which licence it "
+                         "holds.")
+                    : tr("\nFirmware Key: none, so this unit can report a licence but cannot "
+                         "prove it.");
+        text += statusLicense.updaterSet
+                    ? tr("\nFW Updater Password: set, so these details cannot be changed "
+                         "without it.")
+                    : tr("\nFW Updater Password: none, so anyone who connects can rewrite "
+                         "these details.");
     }
+
+    // The configuration version: the revision of the configuration THIS unit is
+    // running, stamped by the package that installed it. A plain Send leaves it
+    // alone, so it stays the last release's number rather than becoming zero.
+    device_session::ConfigVersionState configVersion;
+    if (device_session::readConfigVersion(&m_link, &configVersion, &sessionError)
+        && configVersion.supported)
+        text += tr("\n\nConfiguration version on this unit: %1").arg(configVersion.version);
     // Built rather than QMessageBox::information, for the Device ID. It is a
     // 24-character hex string that has to be typed into Lock to Device somewhere
     // else — reading it off the screen and retyping it is exactly the kind of
@@ -2474,107 +2169,124 @@ void MainWindow::onDeviceStatus()
     box.exec();
 }
 
-// Lock this configuration to one unit, or move/remove an existing lock.
+// Online > Get Device Info — the manufacturing record burned into the OTP.
 //
-// The password is what stops the lock being undone by whoever opens the file
-// next: setting one derives a key that a later change has to match. It is
-// stored as a PBKDF2-derived key, never as the password, like every other
-// password in this app.
-void MainWindow::onLockToDevice()
+// Its own dialog rather than four more lines in Device Status, though both read
+// the same unit over the same cable. They answer opposite questions. Device
+// Status says what this device is DOING, and every line of it can differ between
+// two readings a second apart. This says what this device IS, and no line of it
+// can ever change: OTP has no erase, so the record is burned once at manufacture
+// and reads the same on the day the unit is scrapped. Folding the permanent
+// facts into the volatile ones would have made the whole report look like a
+// snapshot — and this is the half somebody quotes in a warranty claim.
+//
+// Not gated by a password, like the Device ID beside it and for the same reason:
+// nothing here describes a configuration. An RMA cannot be conditioned on
+// holding the password of the configuration being returned as faulty.
+void MainWindow::onGetDeviceInfo()
 {
-    const QString title = tr("Lock Configuration to Device");
-
-    // Changing an existing lock costs the password that set it. Asked FIRST, so
-    // nobody types a new UID and only then learns they cannot apply it.
-    if (m_config.isLockedToDevice() && m_config.deviceLockKey() != kNoAccessKey) {
-        bool ok = false;
-        const QString entered = QInputDialog::getText(
-            this, title,
-            tr("This configuration is locked to device %1.\n\n"
-               "Enter the password that set the lock:").arg(m_config.lockedDeviceUid()),
-            QLineEdit::Password, QString(), &ok);
-        if (!ok)
-            return;
-        if (deriveAccessKey(entered) != m_config.deviceLockKey()) {
-            QMessageBox::warning(this, title, tr("That is not the password for this lock."));
-            return;
-        }
-    }
-
-    QDialog dlg(this);
-    dlg.setWindowTitle(title);
-    auto *layout = new QVBoxLayout(&dlg);
-    auto *intro = new QLabel(
-        tr("A locked configuration can only be sent to the one device named here. "
-           "Send Configuration refuses any other unit outright.\n\n"
-           "Leave the Device ID empty to remove the lock."), &dlg);
-    intro->setWordWrap(true);
-    layout->addWidget(intro);
-
-    auto *form = new QFormLayout;
-    auto *uidEdit = new QLineEdit(m_config.lockedDeviceUid(), &dlg);
-    uidEdit->setPlaceholderText(tr("Paste from Online → Device Status"));
-    form->addRow(tr("Device ID:"), uidEdit);
-    auto *passwordEdit = new QLineEdit(&dlg);
-    passwordEdit->setEchoMode(QLineEdit::Password);
-    form->addRow(tr("Password:"), passwordEdit);
-    layout->addLayout(form);
-
-    // Offer the connected unit's own ID, since that is what this is for nine
-    // times in ten and it removes the transcription entirely.
-    if (m_link.isOpen()) {
-        device_session::Identity identity;
-        QString idError;
-        {
-            BusyScope busy(this);
-            device_session::readIdentity(&m_link, &identity, &idError);
-        }
-        if (identity.supported && !identity.uidText().isEmpty()) {
-            auto *useConnected = new QPushButton(
-                tr("Use the connected device (%1)").arg(identity.uidText()), &dlg);
-            const QString uid = identity.uidText();
-            connect(useConnected, &QPushButton::clicked, &dlg,
-                    [uidEdit, uid]() { uidEdit->setText(uid); });
-            layout->addWidget(useConnected);
-        }
-    }
-
-    auto *warn = new QLabel(&dlg);
-    warn->setWordWrap(true);
-    layout->addWidget(warn);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    layout->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-
-    const auto refresh = [&]() {
-        const bool locking = !uidEdit->text().trimmed().isEmpty();
-        const QString why = passwordProblem(passwordEdit->text());
-        QString text;
-        if (locking && !why.isEmpty())
-            text = why;
-        else if (locking && passwordEdit->text().isEmpty())
-            text = tr("Without a password anyone who opens this file can move the lock.");
-        warn->setText(text);
-        warn->setVisible(!text.isEmpty());
-        buttons->button(QDialogButtonBox::Ok)->setEnabled(!locking || why.isEmpty());
-    };
-    connect(uidEdit, &QLineEdit::textChanged, &dlg, refresh);
-    connect(passwordEdit, &QLineEdit::textChanged, &dlg, refresh);
-    refresh();
-
-    if (dlg.exec() != QDialog::Accepted)
+    if (!ensureConnected())
         return;
+    const QString title = tr("Device Info");
 
-    const QString uid = uidEdit->text().trimmed();
-    m_config.setDeviceLock(uid, deriveAccessKey(passwordEdit->text()));
-    updateWindowTitle();
-    QMessageBox::information(
-        this, title,
-        m_config.isLockedToDevice()
-            ? tr("This configuration is now locked to device %1. Save the file to keep the "
-                 "lock.").arg(m_config.lockedDeviceUid())
-            : tr("The device lock has been removed. Save the file to keep the change."));
+    device_session::DeviceInfo info;
+    QString error;
+    bool ok = false;
+    {
+        BusyScope busy(this); // sync round trip on the main thread; block re-entry
+        ok = device_session::readDeviceInfo(&m_link, &info, &error);
+    }
+    if (!ok) {
+        QMessageBox::warning(this, title, error.isEmpty() ? tr("Unexpected response") : error);
+        return;
+    }
+    if (!info.supported) {
+        // The record is in the silicon either way — this firmware just has no
+        // command to hand it over. Worth saying, so nobody concludes the board
+        // was never provisioned and burns a second one over the top of it.
+        QMessageBox::information(
+            this, title,
+            tr("This firmware cannot report a manufacturing record — the command is newer "
+               "than the firmware on this unit.\n\nThe record is in the chip either way. "
+               "Update the unit's firmware to read it."));
+        return;
+    }
+
+    // "Unknown", never a blank. An empty field means that double-word was never
+    // burned, which is a fact about the board rather than an empty string, and
+    // showing nothing would read as a value of nothing.
+    const QString unknown = tr("Unknown");
+    const auto shown = [&unknown](const QString &value) {
+        return value.isEmpty() ? unknown : value;
+    };
+
+    // Plain text in the dialog's own font, like every other report in this
+    // application. An earlier version set the five rows in a monospaced <pre> so
+    // the values lined up in a column; it did line up, and it read as a
+    // different application. Labels are padded no further than one space for the
+    // same reason — space padding only aligns in a fixed-width font, and in a
+    // proportional one it is a ragged gap pretending to be a column.
+    QString text;
+    text += tr("Manufacturer: %1\n").arg(shown(info.manufacturer));
+    text += tr("Product: %1\n").arg(shown(info.product));
+    text += tr("HW Version: %1\n").arg(shown(info.hardwareVersion));
+    text += info.serialKnown ? tr("HW Serial: %1\n").arg(info.serialNumber)
+                             : tr("HW Serial: %1\n").arg(unknown);
+    if (info.dateText.isEmpty())
+        text += tr("Manufactured: %1").arg(unknown);
+    else if (info.date.isValid())
+        text += tr("Manufactured: %1").arg(info.date.toString(QStringLiteral("d MMMM yyyy")));
+    else
+        // Burned, but not as DDMMYYYY. Shown exactly as it stands rather than
+        // coerced into the nearest plausible day: a wrong date presented as a
+        // right one is worse than one that visibly does not parse.
+        text += tr("Manufactured: %1  (not a readable DDMMYYYY date)").arg(info.dateText);
+
+    // The firmware licence, printed whenever the firmware can answer at all —
+    // including when nothing has been issued, which prints "none issued" rather
+    // than nothing. Hiding the section on a blank unit made "no licence" and
+    // "this build does not show licences" look identical, and only one of those
+    // is worth doing anything about.
+    //
+    // NEITHER SECRET IS HERE and neither can be. The device discloses no key and
+    // no password; the most that could be said is whether they exist, and the
+    // Firmware License Manager is where that belongs, beside the fields that
+    // change them.
+    device_session::LicenseState license;
+    QString licenseError;
+    if (device_session::readLicense(&m_link, &license, &licenseError) && license.supported) {
+        if (license.blank()) {
+            text += tr("\n\nFirmware licence: none issued.");
+        } else {
+            text += tr("\n\nFirmware Manufacturer: %1").arg(shown(license.manufacturer));
+            text += tr("\nFirmware Model: %1").arg(shown(license.model));
+            text += tr("\nFirmware Version: %1").arg(shown(license.firmwareVersion));
+        }
+    }
+
+    // A note only when there is something to explain. A burned record speaks for
+    // itself and had a line under it saying the values are permanent, which is
+    // true of every reading and therefore worth saying nowhere — the manual
+    // carries it. An EMPTY record does need a sentence, because five Unknowns
+    // otherwise look like a failed read rather than an unburned part.
+    if (info.blank()) {
+        text += tr("\n\nThis unit's OTP has never been burned, so it cannot say who made it. "
+                   "Nothing is wrong with the device — the record is programmed during "
+                   "manufacture and this part did not receive one.");
+    }
+
+    // Selectable text plus a Copy button, the same pair Device Status offers and
+    // for the same reason: the whole point of this dialog is that its contents
+    // get quoted somewhere else, and retyping a serial number off a screen is
+    // exactly the transcription nobody gets right first time.
+    QMessageBox box(QMessageBox::Information, title, text, QMessageBox::Ok, this);
+    box.setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+    QPushButton *copyAll = box.addButton(tr("Copy"), QMessageBox::ActionRole);
+    connect(copyAll, &QPushButton::clicked, this, [text, copyAll]() {
+        QApplication::clipboard()->setText(text);
+        copyAll->setText(tr("Copied"));
+    });
+    box.exec();
 }
 
 void MainWindow::onSetAccessPasswords()
@@ -2598,38 +2310,51 @@ void MainWindow::onSetAccessPasswords()
 // document instead of retyping them. Building the package a customer's car will
 // be given six months from now is desk work, and demanding hardware for it would
 // be demanding hardware to type two strings.
-void MainWindow::onFleetIdentity()
+// Online > Firmware License Manager. Needs a connection, unlike the Fleet
+// Identity dialog it replaces: that one edited the DOCUMENT and a device was
+// optional, this one edits the DEVICE and there is nothing to show without one.
+//
+// No updateWindowTitle() afterwards either, and its absence is the point. The
+// licence is not part of the document, so writing one does not dirty anything
+// and there is nothing to save.
+void MainWindow::onFirmwareLicense()
 {
-    FleetIdentityDialog dialog(&m_link, &m_config, this);
+    // No ensureConnected() here, deliberately. Composing a licence is desk work
+    // and the dialog opens without hardware; Apply is the step that needs a
+    // unit, so the connect routine is handed to the dialog to call at that
+    // point rather than run as a toll on opening it.
+    FirmwareLicenseDialog dialog(&m_link, [this]() { return ensureConnected(); }, this);
     dialog.exec();
-    updateWindowTitle(); // applying an identity to the document dirties it
 }
 
-// The uploader is online from beginning to end — every rule it shows is a
-// comparison against the unit in front of it — so unlike Fleet Identity there is
-// nothing useful it can do without a link, and it asks for one up front rather
-// than showing a dialog full of blanks.
+// (The paragraphs that used to follow described the uploader, which is gone —
+// see the note above. Set Access Passwords needs a link for the ordinary
+// reason: the passwords live in the device.)
 //
 // No access password is proved here, and that is not an omission. The point of
 // the check half is that it works on a unit which will not open itself: reading
-// the fleet identity and challenging the fleet key are unconditional on the
+// the licence and challenging the Firmware Key are unconditional on the
 // device, so a customer can be told "this update is not for your car" without
 // anyone holding that device's Send or Get password. The dialog's own Upload
 // button asks for what the WRITE needs, at the moment it needs it.
-void MainWindow::onUploadConfiguration()
-{
-    if (!ensureConnected())
-        return;
-    UploadDialog dialog(&m_link, &m_config, this);
-    dialog.exec();
-    // Opening a package inside the uploader replaces the document, so the title
-    // bar, the protected-comms status line and any open monitor are all one step
-    // behind by the time this returns.
-    updateWindowTitle();
-    updateProtectionState();
-    if (m_monitorDialog)
-        m_monitorDialog->rebuild();
-}
+// Upload Configuration is GONE, and this note is where it was.
+//
+// It was the dealer-facing installer: open a package, compare it against the
+// unit in front of you, refuse if it does not belong. Every one of those
+// comparisons came from the fleet identity compiled into the firmware, and that
+// identity was replaced by the writable firmware licence. With the rules gone
+// the dialog was a table with nothing to put in it.
+//
+// What took over the job is Send Secure Configuration, which enforces a policy
+// sealed into the package itself: manufacturer, model and version matches, and a
+// Firmware Key the device must PROVE rather than merely report. That is a
+// stronger check than the one removed \u2014 the old vendor and model comparison was
+// two strings a look-alike could echo back.
+//
+// The one capability that went with it: installing a plain .ct3 from a file
+// without loading it into the editor. File > Open followed by Send does the same
+// thing, and a plain .ct3 conceals nothing anyway, so what was lost is a step
+// rather than a capability.
 
 // ---- Tools / Help ----
 

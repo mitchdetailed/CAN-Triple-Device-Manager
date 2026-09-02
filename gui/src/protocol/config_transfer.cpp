@@ -85,7 +85,7 @@ ConfigTransfer::ConfigTransfer(DeviceLink *link, QObject *parent)
 
 ConfigTransfer *ConfigTransfer::send(DeviceLink *link, const DeviceTables &tables, bool verify,
                                      const QVector<ControlCanPayload> &busSetups,
-                                     bool saveToFlash, quint16 configVersion,
+                                     bool saveToFlash, std::optional<quint16> configVersion,
                                      const QString &configName, bool resetAfter, QObject *parent,
                                      const device_session::AccessState &deviceAccess)
 {
@@ -126,8 +126,8 @@ void ConfigTransfer::cancel()
 
 void ConfigTransfer::buildSendSteps(const DeviceTables &tables, bool verify,
                                     const QVector<ControlCanPayload> &busSetups, bool saveToFlash,
-                                    quint16 configVersion, const QString &configName,
-                                    bool resetAfter)
+                                    std::optional<quint16> configVersion,
+                                    const QString &configName, bool resetAfter)
 {
     Step ping;
     ping.cmd = CMD_GET_STATUS;
@@ -359,15 +359,17 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &tables, bool verify,
     // are you running?" would be a confident lie. Riding the commit, the two
     // become the same flash write.
     //
-    // Sent unconditionally, including zero. The protocol allows an empty payload
-    // meaning "leave the stored version alone", but this path never wants that:
-    // whatever is being committed IS the configuration now, so an unversioned
-    // one must clear a stale number rather than inherit it.
+    // Two bytes when the caller has a version to stamp — a package installing
+    // — and an EMPTY payload otherwise, which the firmware reads as "leave the
+    // stored version alone". The split is the point: a package is a release and
+    // says so, a bench Send is not and must not renumber the unit.
     if (saveToFlash) {
         Step save;
         save.cmd = CMD_SAVE_TO_FLASH;
-        save.payload.append(char(configVersion & 0xFF));
-        save.payload.append(char((configVersion >> 8) & 0xFF));
+        if (configVersion.has_value()) {
+            save.payload.append(char(*configVersion & 0xFF));
+            save.payload.append(char((*configVersion >> 8) & 0xFF));
+        }
         save.stage = QStringLiteral("Saving to flash");
         save.timeoutMs = DeviceLink::kFlashTimeoutMs;
         save.skipIfUnsupported = true;
@@ -578,7 +580,7 @@ QString ConfigTransfer::planClassificationFaultForTest(bool getPlan)
         tables.crc8.resize(1);
         tables.scriptChunks.resize(1);
         t.buildSendSteps(tables, /*verify=*/true, {}, /*saveToFlash=*/true,
-                         /*configVersion=*/0, {}, /*resetAfter=*/false);
+                         /*configVersion=*/std::nullopt, {}, /*resetAfter=*/false);
     }
     return t.m_buildFault;
 }

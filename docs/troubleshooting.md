@@ -53,7 +53,7 @@ Configuration for anything that writes, clears or commits, Get a Configuration
 for anything that reads. Protected Comms never causes this error code: the
 device only confirms that password — it is this program that acts on the
 answer, refusing a send before anything is written. See
-<a href="fleet-identity.md">Fleet Identity &amp; Access Keys</a>.</td></tr>
+<a href="licensing.md">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 <tr><td>the device refused the image (0x08)</td>
 <td>Raised only by Update Firmware: the unit has no bootloader, the image was
 built for a different product, or the staged image failed its checks. The
@@ -81,6 +81,6 @@ On current firmware a password set in **Online → Set Access Passwords…** i
 - **"This firmware is too old to save to flash"** after a send — the configuration was sent and verified but lives in device RAM only, and is lost at power-off. Update the firmware to keep it.
 - **"Hidden comms — concealed"** in the status bar — the document carries a Protected Comms password, this session has not entered it, and at least one message marked **Hidden** or **Protect Communication** is therefore showing no detail. **File → Reveal Protected Comms…** is not by itself the answer: each of those messages also has a **Message Password** of its own, and it is opened by selecting it in Communications Setup and pressing **Edit…**, which asks for whatever that message's level requires. A document whose only markings are **Read Only** reads "revealed", because Read Only withholds nothing from anyone — see [Marking a message](communications.md#marking).
 - **A message you just opened is padlocked again** — that is deliberate. Closing the section editor on a message still marked **Hidden** or **Protect Communication** re-locks it immediately, whether you pressed OK or Cancel: the password opened it once and the box is still ticked. Press **Edit…** again to reopen it.
-- **Upload Configuration refuses a package** — the package was built for a different vendor, model, serial number or fleet. That check has no override by design; see [Online: Send, Get &amp; Flash](online.md).
+- **Send Secure Configuration refuses a package** — the package was built for a different vendor, model, serial number or fleet. That check has no override by design; see [Online: Send, Get &amp; Flash](online.md).
 
-> **Note:** For a quick overall picture — firmware protocol version, active table counts, device ID, which access passwords are set, and the fleet identity — use **Online → Device Status…** before digging further.
+> **Note:** For a quick overall picture — firmware protocol version, active table counts, device ID, which access passwords are set, and the firmware licence — use **Online → Device Status…** before digging further.

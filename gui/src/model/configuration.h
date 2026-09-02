@@ -377,48 +377,20 @@ public:
     // identity before an upload is allowed, and the policy saying how strictly.
     // fleetKey is a secret and is written only into a .ct3s; a plain .ct3
     // carries the identity without it.
-    //
-    // Note the asymmetry with the device side: a DEVICE's identity is compiled
-    // into its firmware, while a CONFIGURATION's is edited here. That is not an
-    // inconsistency — one is a statement about a piece of hardware, the other a
-    // statement about which hardware a file is allowed to reach.
-    const FleetIdentity &fleetIdentity() const { return m_fleetIdentity; }
-    void setFleetIdentity(const FleetIdentity &id);
-    const UploadPolicy &uploadPolicy() const { return m_uploadPolicy; }
-    void setUploadPolicy(const UploadPolicy &policy);
-
-    // ----------------------------------------------------------- device lock
-    // The ONE CAN Triple this configuration may be sent to, as the UID hex
-    // string Device Status shows. Empty means not locked, which is the default
-    // and what every configuration written before this existed loads as.
-    //
-    // Distinct from the fleet identity above, which says which FAMILY of
-    // hardware a file suits and is checked by the uploader. This is a single
-    // serial number: "this file belongs to that unit and no other". Both can be
-    // set; they answer different questions.
-    //
-    // Enforced by this application before a Send, not by the device — the
-    // device already has its own binding, which stops it RUNNING a configuration
-    // stamped for another unit. This one stops the send happening at all, which
-    // is what keeps a technician from writing the wrong car's calibration into a
-    // car and finding out when it will not start.
-    QString lockedDeviceUid() const { return m_lockedDeviceUid; }
-    // The key that authorises changing or clearing the lock, so the person who
-    // set it is the one who can move it. kNoAccessKey means anyone may.
-    AccessKey deviceLockKey() const { return m_deviceLockKey; }
-    void setDeviceLock(const QString &uid, AccessKey key);
-    bool isLockedToDevice() const { return !m_lockedDeviceUid.isEmpty(); }
-    // Whether this configuration may be sent to the unit with `uid`. An unlocked
-    // configuration goes anywhere; a locked one matches case-insensitively,
-    // because the UID is hex and its case is a display choice, not part of it.
-    bool mayBeSentTo(const QString &uid) const;
+    // (The fleet identity that used to be edited here is gone. Which hardware a
+    // package may reach is decided by the policy sealed into the .ct3s — see
+    // SecurePackagePolicy — and the package carries the configuration version
+    // it stamps on the unit. A plain document has neither.)
 
     // --------------------------------------------------------- files
     // What a file is, before committing to opening it — so the password prompt
     // happens while the current document is still untouched.
     struct FilePeek {
         bool secure = false;           // a .ct3s rather than a .ct3
-        bool requiresPassword = false; // .ct3s that will not open without one
+        // A pre-v8 read-protected .ct3, sealed under the retired Configuration
+        // Password. NOT a .ct3s any more: the container's password mode was
+        // removed, so a secure package never requires one.
+        bool requiresPassword = false;
         bool commsProtected = false;   // carries an Protected Comms verifier
     };
     static bool peekFile(const QString &path, FilePeek *out, QString *error = nullptr);
@@ -825,15 +797,11 @@ private:
     // that omitted the verifier set would answer commsRevealed() == true and
     // authorise a Protected downgrade the document it came from would refuse.
     AccessVerifierSet m_accessVerifiers;
-    FleetIdentity m_fleetIdentity;
-    UploadPolicy m_uploadPolicy;
     AccessKey m_commsKey = kNoAccessKey;
     // The four document-wide message passwords, as derived keys. Index 0 is
     // slot 1 — see commsPassword().
     AccessKey m_commsPasswords[kCommsPasswordSlots] = {kNoAccessKey, kNoAccessKey,
                                                        kNoAccessKey, kNoAccessKey};
-    QString m_lockedDeviceUid;                  // empty = not locked to a device
-    AccessKey m_deviceLockKey = kNoAccessKey;   // authorises changing the lock
     bool m_commsRevealed = false;
     // One section whose own challenge has been met this session: which section,
     // and which secret was given for it. See grantSectionAccess for why the bus

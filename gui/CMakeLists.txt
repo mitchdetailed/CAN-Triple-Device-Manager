@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.1.13 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.1.15 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -372,8 +372,10 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/ui/edit_channel_dialog.h
     src/ui/firmware_update_dialog.cpp
     src/ui/firmware_update_dialog.h
-    src/ui/fleet_identity_dialog.cpp
-    src/ui/fleet_identity_dialog.h
+    src/ui/firmware_license_dialog.cpp
+    src/ui/firmware_license_dialog.h
+    src/ui/secure_builder_dialog.cpp
+    src/ui/secure_builder_dialog.h
     src/ui/help_window.cpp
     src/ui/help_window.h
     src/ui/main_window.cpp
@@ -386,8 +388,6 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/ui/section_editor_dialog.h
     src/ui/select_channel_dialog.cpp
     src/ui/select_channel_dialog.h
-    src/ui/upload_dialog.cpp
-    src/ui/upload_dialog.h
     # The Windows resource script: the icon Explorer, Task Manager and
     # Add/Remove Programs draw on the executable, plus its VS_VERSION_INFO
     # block. Compiled by windres, which only runs because RC is in the
@@ -500,7 +500,7 @@ set(HELP_PAGES
     datatypes.html
     online.html
     firmware-update.html
-    fleet-identity.html
+    licensing.html
     validation-report.html
     license.html
 )
@@ -610,7 +610,9 @@ qt_add_executable(test_firmware_link
     ${FIRMWARE_DIR}/src/engine_math.c
     ${FIRMWARE_DIR}/src/serial_proto.c
     ${FIRMWARE_DIR}/src/flash_store.c
-    ${FIRMWARE_DIR}/src/fleet_identity.c
+    # The licence store, so serial_proto.c has something to link against and
+    # so the record round-trips through the REAL device code in the tests.
+    ${FIRMWARE_DIR}/src/license_store.c
     ${FIRMWARE_DIR}/src/sha256.c
     ${FIRMWARE_DIR}/src/cobs.c
     # The firmware-update path, compiled for the host so its state machine is
@@ -1052,6 +1054,38 @@ qt_add_executable(test_name_limits
 target_include_directories(test_name_limits PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_name_limits PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
     ct_device_core) # device_mapper.cpp - see test_roundtrip
+
+# The two licensing dialogs, driven offscreen with no device: which inputs
+# enable Build/Apply, which refuse them and why, and the clear-password box's
+# gating. The device-facing halves cannot run here and are not pretended to.
+# device_session -> device_link brings SerialPort in, exactly as in
+# test_firmware_link; no port is ever opened.
+qt_add_executable(test_license_dialogs
+    test/test_license_dialogs.cpp
+    src/ui/secure_builder_dialog.cpp
+    src/ui/firmware_license_dialog.cpp
+    src/protocol/device_session.cpp
+    src/protocol/device_link.cpp
+    src/protocol/access_state.cpp
+    src/protocol/cobs.cpp
+    src/protocol/framer.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_license_dialogs PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_license_dialogs PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
+    Qt6::SerialPort ct_device_core)
 
 # What a DBC signal is imported as: underscores become spaces.
 #

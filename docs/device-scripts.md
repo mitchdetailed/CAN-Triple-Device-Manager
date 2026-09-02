@@ -108,7 +108,7 @@ Deliberately absent: tables, strings as values, closures, functions other than t
 
 The script is part of the configuration. A script you wrote saves in the `.ct3` file as **source** and is compiled to bytecode when you send it; a script [read back off a device](#retrieved) has no source, so the file carries the compiled image instead. A document describes its script one way or the other, never both.
 - **Send Configuration** compiles the script and writes it with everything else. A script that does not compile blocks the send, with the reason — the device is never left running an old script against new tables. A retained compiled image is sent exactly as it came back, and is refused before anything is erased if it has been damaged since.
-- **Verify Configuration** compares the device's stored script against what this document would send, like any other table.
+- **Get Configuration** reads the device's stored script back like any other table.
 - Sending a configuration with *no* script **removes** any script already on the device.
 
 <a id="retrieved"></a>

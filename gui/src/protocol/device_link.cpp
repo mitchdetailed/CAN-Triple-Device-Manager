@@ -41,8 +41,7 @@ bool DeviceLink::isReadResponse(quint8 cmd)
     // wrong either way.)
     case CMD_READ_ACCESS_KEYS:
     case CMD_ACCESS_CHALLENGE:
-    case CMD_READ_FLEET_ID:
-    case CMD_FLEET_ID_PROVE:      // the device's HMAC over the host's challenge
+    case CMD_READ_CONFIG_VERSION: // u16; fixed shape, no echo
     case CMD_READ_CAN_SETUP:      // ControlCanPayload[3]; empty request, no echo
     // Was missing on the day it shipped — the same mistake this list's own
     // history records for v6, v7, v11 and v16, made again. The device answered
@@ -70,6 +69,22 @@ bool DeviceLink::isReadResponse(quint8 cmd)
     // the echoesRequestRange list below rather than here alongside the
     // fixed-shape replies.
     case CMD_READ_SCRIPT:
+    // The OTP manufacturing record. Added in the same edit as the command, not
+    // after a bench session — the seven entries above between them cost seven of
+    // those, and the list's own comments are the record of it. Fixed shape, no
+    // echo, so it belongs here and NOT in echoesRequestRange below.
+    case CMD_GET_DEVICE_INFO:
+    // The licence pair that answers with data. READ_LICENSE returns the public
+    // record and LICENSE_CHALLENGE returns a nonce; both echo the command and
+    // neither echoes a request range. WRITE_LICENSE and LICENSE_RESPONSE are
+    // deliberately absent — they are answered with a plain ACK or NACK, and
+    // listing one here would leave requestSync waiting for a payload that never
+    // comes. Exactly the split ACCESS_CHALLENGE and ACCESS_RESPONSE have.
+    case CMD_READ_LICENSE:
+    case CMD_LICENSE_CHALLENGE:
+    // KEY_PROVE answers with the device's HMAC over the host's own nonce, so it
+    // carries data and belongs here, exactly as the access challenge does.
+    case CMD_LICENSE_KEY_PROVE:
         return true;
     default:
         return false;

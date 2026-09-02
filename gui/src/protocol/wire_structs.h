@@ -79,14 +79,11 @@ constexpr uint8_t CMD_ACCESS_RESPONSE     = 0x2E;
 // silently. Answer ERR_LOCKED instead and every one of them enters an
 // unescapable password prompt loop. Nothing in this build sends it.
 constexpr uint8_t CMD_MSG_ACCESS_RESPONSE = 0x40;
-// Fleet identity — who the device IS. Readable unconditionally, because
-// deciding whether an update belongs on a unit must not require reading the
-// configuration it is meant to protect. There is no write: the identity is
-// compiled into the firmware, so it cannot be changed over the wire at all.
-// 0x30 was reserved for that write; it was never implemented and the opcode has
-// since been reused by CMD_READ_CAN_SETUP below.
-constexpr uint8_t CMD_READ_FLEET_ID       = 0x2F;
-constexpr uint8_t CMD_FLEET_ID_PROVE      = 0x31;
+// 0x2F and 0x31 were the compiled-in fleet identity's read and prove. Retired,
+// not reused, when the identity became the writable firmware licence
+// (CMD_READ_LICENSE and friends) and the hardware record moved into OTP
+// (CMD_GET_DEVICE_INFO). The one field of the old reply still consumed — the
+// configuration version — has its own command below.
 // Reads back what the three buses are running (mode / rate / FD rate /
 // termination) as ControlCanPayload[3], bus 1..3 in order. CONTROL_CAN is
 // write-only, so before this a Get had to assume the bring-up rates and say so.
@@ -132,6 +129,74 @@ constexpr uint8_t CMD_WRITE_CRC8_CFG     = 0x41;
 constexpr uint8_t CMD_WRITE_MSG_PASSWORDS = 0x43;
 constexpr uint8_t CMD_READ_MSG_PASSWORDS  = 0x44;
 constexpr uint8_t CMD_READ_CRC8_CFG      = 0x42;
+
+// The firmware licence: who this FIRMWARE is licensed to, and the key that
+// proves it. Replaces the compiled-in fleet identity, which could only be
+// changed by rebuilding and reflashing — fine for an identity, useless for a
+// licence, which is a thing you issue and revise.
+//
+// THERE IS NO KEY FIELD HERE AND THERE IS NOT MEANT TO BE. The device never
+// discloses the key in any form. It is written (derived, never as the
+// passphrase) and afterwards it can only be PROVED, by answering a challenge.
+// LicenseRecordPublic is the whole of what a host may learn.
+//
+// Sizes are BYTES, not characters — one non-ASCII character costs two to four
+// of them, so the dialog clamps on bytes the way every other name field does.
+constexpr uint8_t CMD_READ_LICENSE       = 0x46; // -> LicenseRecordPublic
+constexpr uint8_t CMD_WRITE_LICENSE      = 0x47; // LicenseWritePayload; needs the key proved
+constexpr uint8_t CMD_LICENSE_CHALLENGE  = 0x48; // -> a nonce
+constexpr uint8_t CMD_LICENSE_RESPONSE   = 0x49; // HMAC-SHA256(updater password, nonce)
+// The Firmware Key runs the OTHER WAY: the host picks the nonce and the device
+// answers under its stored key. That direction is what makes the answer mean
+// anything — a unit cannot pre-compute a reply to a challenge it has not been
+// given — and it is the only use a key nobody may read can ever have.
+constexpr uint8_t CMD_LICENSE_KEY_PROVE  = 0x4A; // challenge -> HMAC-SHA256
+// The configuration's revision number out of the flash header: a u16, little-
+// endian, 0 = unversioned. A READ with a fixed-shape reply and no echo, so it
+// belongs in DeviceLink::isReadResponse() — and is listed there in the same
+// edit that added it.
+constexpr uint8_t CMD_READ_CONFIG_VERSION = 0x4B;
+
+constexpr int LICENSE_MANUFACTURER_LEN = 32;
+constexpr int LICENSE_MODEL_LEN        = 32;
+constexpr int LICENSE_VERSION_LEN      = 8;
+constexpr int LICENSE_KEY_LEN          = 16; // the DERIVED key, never the passphrase
+constexpr int LICENSE_PASSPHRASE_MAX   = 32; // characters the user may type
+
+// TWO SECRETS. The FW Updater Password is the GATE — it decides who may write
+// this record. The Firmware Key is a CLAIM — it decides nothing, and is what a
+// unit proves to show which licence it holds. Neither is ever read back; these
+// two bits are the whole of what a host learns about them.
+constexpr quint16 LICENSE_FLAG_KEY_SET     = 0x0001;
+constexpr quint16 LICENSE_FLAG_UPDATER_SET = 0x0002;
+
+// key_action on a write. KEEP is the ordinary case: editing the model name must
+// not make you retype the passphrase, so clearing a key has to be asked for.
+constexpr quint8 LICENSE_KEY_KEEP  = 0;
+constexpr quint8 LICENSE_KEY_SET   = 1;
+constexpr quint8 LICENSE_KEY_CLEAR = 2;
+
+// The OTP manufacturing record: who built this board, what it is, and when.
+// Burned once during manufacture into one-time-programmable memory, so it is
+// read-only for the life of the part and there is deliberately no write half —
+// see protocol.h, which owns the field layout these offsets mirror.
+//
+// A READ whose reply carries a fixed-shape payload and echoes nothing, so it
+// belongs in DeviceLink::isReadResponse() and NOT in echoesRequestRange(). The
+// commands above it record six occasions on which that was learned from a
+// device answering in under a millisecond and a GUI seeing nothing at all.
+constexpr uint8_t CMD_GET_DEVICE_INFO    = 0x45;
+constexpr int OTP_INFO_LEN               = 88; // 11 double-words
+constexpr int OTP_INFO_MANUFACTURER_AT   = 0;
+constexpr int OTP_INFO_MANUFACTURER_LEN  = 32;
+constexpr int OTP_INFO_PRODUCT_AT        = 32;
+constexpr int OTP_INFO_PRODUCT_LEN       = 32;
+constexpr int OTP_INFO_HW_VERSION_AT     = 64;
+constexpr int OTP_INFO_HW_VERSION_LEN    = 8;
+constexpr int OTP_INFO_SERIAL_AT         = 72;
+constexpr int OTP_INFO_SERIAL_LEN        = 8;   // big-endian u64, unlike the rest
+constexpr int OTP_INFO_DATE_AT           = 80;
+constexpr int OTP_INFO_DATE_LEN          = 8;   // ASCII "DDMMYYYY"
 
 // Firmware update (v2 bootloader). The RUNNING application receives the image
 // into its bank-2 staging slot and the bootloader installs it on the next
@@ -955,28 +1020,6 @@ struct AccessKeyWritePayload {
     // v17: which Protected Comms slot (1..4); ignored for Send and Get. The
     // device also accepts the old 6-byte payload as slot 1.
     uint8_t slot;
-};
-
-// The fleet identity as CMD_READ_FLEET_ID returns it. Mirrors
-// FleetIdentityPublic in firmware/include/protocol.h byte for byte; the pair is
-// asserted equal in test_firmware_link.
-//
-// fleet_key is absent: it is compiled into the firmware and never comes back
-// off the device — CMD_FLEET_ID_PROVE is how a host learns the device holds it.
-//
-// The two strings are fixed-width and NUL-PADDED, not NUL-terminated, so all 16
-// bytes are usable. Read them as counted fields.
-constexpr int FLEET_VENDOR_ID_LEN = 16;
-constexpr int FLEET_MODEL_ID_LEN  = 16;
-constexpr int FLEET_KEY_LEN       = 4;
-
-struct FleetIdentityPublic {
-    char vendor_id[FLEET_VENDOR_ID_LEN];
-    char model_id[FLEET_MODEL_ID_LEN];
-    uint32_t serial_number;
-    uint16_t config_version; // from the flash header, not the build
-    uint16_t flags;
-    uint8_t key_present;
 };
 
 struct InjectCanPayload {

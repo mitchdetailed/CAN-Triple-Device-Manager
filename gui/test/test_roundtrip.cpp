@@ -557,72 +557,44 @@ static void testAdvancedMath()
     }
 }
 
-// Locking a configuration to one unit. The rules that matter are the refusals,
-// so those are what is pinned: the wrong device, and — the one a careless
-// implementation gets backwards — a device that cannot say who it is.
-static void testDeviceLock()
+// The per-file device lock was REMOVED, and this pins the removal.
+//
+// It was the only guard against sending a configuration to the wrong unit, and
+// it failed at that in the cases that mattered: absent from both dealer-facing
+// send paths, and discarded entirely by File > New before a Get \u2014 because the
+// lock never travelled to the device, so it could never be recovered from one.
+// The replacement is an upload policy keyed on the OTP hardware serial, which is
+// per-chip and cannot be discarded by opening a new document.
+//
+// WHAT THIS CAN AND CANNOT CHECK. buildBody()/loadBody() are private and a .ct3
+// is a sealed container, so a test cannot reach the JSON to inject a stale
+// "deviceLock" object and watch it be ignored. What it can check is that the
+// public path still works end to end on a configuration that would once have
+// carried one \u2014 and the removal of the accessors is itself pinned by the
+// compiler, since anything still calling them would not build.
+static void testDeviceLockRemoved()
 {
     Configuration config;
     config.clear();
+    config.setConfigTitle(QStringLiteral("Was Locked"));
 
-    // Unlocked goes anywhere, including to a unit that reports no ID at all.
-    CHECK(!config.isLockedToDevice());
-    CHECK(config.mayBeSentTo(QStringLiteral("510043000350315154373520")));
-    CHECK(config.mayBeSentTo(QString()));
+    QTemporaryFile file;
+    file.setFileTemplate(QDir::tempPath() + QStringLiteral("/ct_oldlock_XXXXXX.ct3"));
+    CHECK(file.open());
+    const QString path = file.fileName();
+    file.close();
 
-    config.setDeviceLock(QStringLiteral("510043000350315154373520"), deriveAccessKey("bench"));
-    CHECK(config.isLockedToDevice());
-    CHECK(config.mayBeSentTo(QStringLiteral("510043000350315154373520")));
-    CHECK(!config.mayBeSentTo(QStringLiteral("510043000350315154373521"))); // one digit out
+    QString error;
+    CHECK(config.saveToFile(path, &error));
 
-    // The UID is hex: its case and any separators someone pastes in are
-    // presentation, not identity, so they must not decide whether a send works.
-    CHECK(config.mayBeSentTo(QStringLiteral("510043000350315154373520").toLower()));
-    CHECK(config.mayBeSentTo(QStringLiteral("5100 4300 0350 3151 5437 3520")));
-
-    // "I cannot tell you who I am" must read as a refusal, never as a match.
-    // Firmware too old for the identity command reports nothing, and treating
-    // that as a pass would make the lock evaporate on exactly the units least
-    // likely to be the intended one.
-    CHECK(!config.mayBeSentTo(QString()));
-
-    // Round-trips through a saved file, key and all — a lock that did not
-    // survive Save/Open would be no lock at all.
-    {
-        QTemporaryFile file;
-        file.setFileTemplate(QDir::tempPath() + QStringLiteral("/ct_lock_XXXXXX.ct3"));
-        CHECK(file.open());
-        const QString path = file.fileName();
-        file.close();
-        QString error;
-        CHECK(config.saveToFile(path, &error));
-
-        Configuration reloaded;
-        CHECK(reloaded.loadFromFile(path, &error));
-        CHECK(reloaded.lockedDeviceUid() == QStringLiteral("510043000350315154373520"));
-        CHECK(reloaded.deviceLockKey() == deriveAccessKey(QStringLiteral("bench")));
-        CHECK(!reloaded.mayBeSentTo(QStringLiteral("510043000350315154373521")));
-        CHECK(!reloaded.mayBeSentTo(QString()));
-    }
-
-    // Clearing the lock clears the key with it — a configuration that goes
-    // anywhere must not still be carrying the key that used to guard it.
-    config.setDeviceLock(QString(), deriveAccessKey(QStringLiteral("bench")));
-    CHECK(!config.isLockedToDevice());
-    CHECK(config.deviceLockKey() == kNoAccessKey);
-    CHECK(config.mayBeSentTo(QStringLiteral("anything")));
-    {
-        QTemporaryFile file;
-        file.setFileTemplate(QDir::tempPath() + QStringLiteral("/ct_unlock_XXXXXX.ct3"));
-        CHECK(file.open());
-        const QString path = file.fileName();
-        file.close();
-        QString error;
-        CHECK(config.saveToFile(path, &error));
-        Configuration reloaded;
-        CHECK(reloaded.loadFromFile(path, &error));
-        CHECK(!reloaded.isLockedToDevice());
-    }
+    Configuration reloaded;
+    CHECK(reloaded.loadFromFile(path, &error));
+    CHECK(reloaded.configTitle() == QStringLiteral("Was Locked"));
+    // A freshly loaded document is not dirty. Worth pinning here because the
+    // lock's loader used to run through setDeviceLock(), which called setDirty()
+    // \u2014 so every locked file opened already modified. Removing the field
+    // removed that too, and nothing should put it back.
+    CHECK(!reloaded.isDirty());
 }
 
 static void testConfigJson()
@@ -4580,7 +4552,6 @@ static void testSecureFile()
 
     SecureFileInfo peek;
     CHECK(peekSecureFile(standard, &peek, &err));
-    CHECK(!peek.requiresPassword);
     CHECK(peek.formatVersion == kSecureFormatVersion);
     // Peeking reads the header alone; the key lives in the carrier, so it
     // cannot come back from a peek even though the file carries one.
@@ -4588,14 +4559,15 @@ static void testSecureFile()
 
     QByteArray out;
     SecureFileInfo info;
-    CHECK(readSecureFile(standard, QString(), &out, &info, &err));
+    CHECK(readSecureFile(standard, &out, &info, &err));
     CHECK(out == body); // byte-identical, not merely parseable
-    CHECK(!info.requiresPassword);
     CHECK(info.embeddedCommsKey == opts.embeddedCommsKey);
-    // A password nobody asked for is ignored rather than refused: this mode is
-    // meant to open unattended, on a customer's machine, with nothing typed.
+    // A password nobody asked for is ignored rather than refused: EVERY package
+    // opens unattended now, on a customer's machine, with nothing typed. The
+    // parameter survives on readSecureFile only so the call sites did not all
+    // have to change; nothing reads it.
     out.clear();
-    CHECK(readSecureFile(standard, QStringLiteral("irrelevant"), &out, &info, &err));
+    CHECK(readSecureFile(standard, &out, &info, &err));
     CHECK(out == body);
 
     // ---- opacity: the test the format exists to pass ----
@@ -4631,46 +4603,215 @@ static void testSecureFile()
     CHECK(raw2.mid(12, 16) != raw.mid(12, 16)); // the salt itself
     CHECK(!raw2.contains(marker));
     QByteArray out2;
-    CHECK(readSecureFile(twin, QString(), &out2, &info, &err));
+    CHECK(readSecureFile(twin, &out2, &info, &err));
     CHECK(out2 == body); // ...and both still open
 
-    // ---- password mode: no password, no file ----
+    // ---- the install policy, sealed with the configuration ----
+    //
+    // The policy is what decides where a package may install and what it changes
+    // there, so the properties worth pinning are that it survives the round trip
+    // EXACTLY and that it is not readable without opening the file.
     {
-        const QString locked = dir.filePath(QStringLiteral("locked.ct3s"));
-        const QString pass = QStringLiteral("fleet-owner-only");
-        SecureSaveOptions pw;
-        pw.requirePassword = true;
-        pw.password = pass;
-        pw.embeddedCommsKey = AccessKey(0x0BADC0DEu);
-        CHECK(writeSecureFile(locked, body, pw, &err));
+        const QString packaged = dir.filePath(QStringLiteral("policy.ct3s"));
+        SecureSaveOptions po;
+        po.embeddedCommsKey = AccessKey(0x5A5A5A5Au);
+        po.policy.matchManufacturer = QStringLiteral("Minton Performance");
+        po.policy.matchModel = QStringLiteral("CAN Triple TD");
+        // Version deliberately LEFT EMPTY: an optional match that was not asked
+        // for must come back not-asked-for, rather than as an empty string that
+        // no device could ever equal.
+        po.policy.key = deriveLicenseKey(QStringLiteral("fleet master phrase"));
+        CHECK(po.policy.isValid());
+        // The revision the package stamps on the unit. It used to be a document
+        // field; a package is the deployable revision, so this is its home now.
+        po.policy.configVersion = 4242;
+        // Passwords enter the policy already DERIVED. The phrase is what the
+        // Builder types; the policy never sees it — the struct has no field that
+        // could hold one, which is the compile-time half of this guarantee.
+        const AccessKey sendKey = deriveAccessKey(QStringLiteral("new-send-secret"));
+        const AccessKey slotKey = deriveAccessKey(QStringLiteral("slot-three"));
+        po.policy.setSend = true;
+        po.policy.sendKey = sendKey;
+        // Ticked with kNoAccessKey means CLEAR, and that is a different
+        // instruction from "leave it alone". If these two ever collapse, a
+        // package meant to remove a password would silently preserve it.
+        po.policy.setGet = true;
+        po.policy.getKey = kNoAccessKey;
+        po.policy.setCommsSlot[2] = true;
+        po.policy.commsSlotKey[2] = slotKey;
 
-        // The header says a password is needed before anything is disturbed,
-        // so the prompt can happen while the open document is still intact.
-        CHECK(peekSecureFile(locked, &peek, &err));
-        CHECK(peek.requiresPassword);
+        CHECK(writeSecureFile(packaged, body, po, &err));
 
+        SecureFileInfo pinfo;
+        QByteArray pbody;
+        CHECK(readSecureFile(packaged, &pbody, &pinfo, &err));
+        CHECK(pbody == body); // the body still comes back byte-identical
+        const SecurePackagePolicy &got = pinfo.policy;
+        CHECK(got.isValid());
+        CHECK(got.key == po.policy.key);
+        CHECK(got.configVersion == 4242);
+        CHECK(got.matchManufacturer == QStringLiteral("Minton Performance"));
+        CHECK(got.matchModel == QStringLiteral("CAN Triple TD"));
+        CHECK(got.matchVersion.isEmpty());
+        CHECK(got.setSend);
+        CHECK(got.sendKey == sendKey);
+        CHECK(got.setGet);                   // ticked...
+        CHECK(got.getKey == kNoAccessKey);   // ...with nothing, i.e. CLEAR
+        CHECK(!got.setCommsSlot[0]);
+        CHECK(!got.setCommsSlot[1]);
+        CHECK(got.setCommsSlot[2]);
+        CHECK(got.commsSlotKey[2] == slotKey);
+        CHECK(!got.setCommsSlot[3]);
+        CHECK(got.changesPasswords());
+
+        // NOT READABLE WITHOUT OPENING THE FILE. A peek reads the cleartext
+        // header alone, and the policy is sealed with the body — so a package
+        // lying on a disk does not announce which fleet it is for.
+        SecureFileInfo peeked;
+        CHECK(peekSecureFile(packaged, &peeked, &err));
+        CHECK(!peeked.policy.isValid());
+
+        // ...and none of it is in the bytes. The phrases are the important
+        // half: they never entered the policy at all (there is no field for
+        // them), so they cannot be in the file even DECRYPTED — which is the
+        // whole point, since the file's key travels inside it. The check on the
+        // raw bytes is a belt over those braces.
+        QFile pf(packaged);
+        CHECK(pf.open(QIODevice::ReadOnly));
+        const QByteArray praw = pf.readAll();
+        pf.close();
+        CHECK(!praw.contains(QByteArrayLiteral("Minton Performance")));
+        CHECK(!praw.contains(QByteArrayLiteral("new-send-secret")));
+        CHECK(!praw.contains(QByteArrayLiteral("slot-three")));
+        CHECK(!praw.contains(po.policy.key));
+        // The DERIVED keys are in the sealed body and that is accepted — they
+        // open one function on one fleet and nothing else. But they must not be
+        // in the cleartext header or carrier noise, which this also covers.
+        CHECK(!praw.contains(accessKeyBytes(sendKey)));
+    }
+
+    // ---- the install verdict: the decision, pinned without a device ----
+    //
+    // This is the gate Send Secure Configuration applies before it touches a
+    // unit. It used to be inline in the window and therefore untested — the same
+    // shape that let the licence-key oracle ship. Each refusal is a separate
+    // outcome and each is pinned separately.
+    {
+        SecurePackagePolicy demands;
+        demands.key = deriveLicenseKey(QStringLiteral("fleet master phrase"));
+        demands.matchManufacturer = QStringLiteral("Minton Performance");
+        demands.matchModel = QStringLiteral("CAN Triple TD");
+        // version deliberately not asked for
+
+        // The good case: every asked-for field matches, the unasked one is free.
+        InstallVerdict v = packageInstallVerdict(demands, true, QStringLiteral("Minton Performance"),
+                                                 QStringLiteral("CAN Triple TD"),
+                                                 QStringLiteral("anything at all"));
+        CHECK(v.ok());
+        CHECK(v.mismatches.isEmpty());
+
+        // No policy is fatal on its own, before anything is compared.
+        SecurePackagePolicy none;
+        CHECK(!none.isValid());
+        v = packageInstallVerdict(none, true, QStringLiteral("Minton Performance"),
+                                  QStringLiteral("CAN Triple TD"), QString());
+        CHECK(!v.ok());
+        CHECK(v.noPolicy);
+        CHECK(!v.deviceUnlicensed);
+
+        // A unit that cannot be asked is refused, and is NOT reported as a
+        // mismatch — only one of those is fixed by updating the firmware.
+        v = packageInstallVerdict(demands, false, QString(), QString(), QString());
+        CHECK(!v.ok());
+        CHECK(v.deviceUnlicensed);
+        CHECK(!v.noPolicy);
+        CHECK(v.mismatches.isEmpty());
+
+        // ALL mismatches are listed, not the first. Wrong file or wrong unit is
+        // a question the person answers by reading both lines at once.
+        v = packageInstallVerdict(demands, true, QStringLiteral("Somebody Else"),
+                                  QStringLiteral("Their Model"), QString());
+        CHECK(!v.ok());
+        CHECK(v.mismatches.size() == 2);
+        CHECK(v.mismatches[0].field == QStringLiteral("manufacturer"));
+        CHECK(v.mismatches[0].wanted == QStringLiteral("Minton Performance"));
+        CHECK(v.mismatches[0].actual == QStringLiteral("Somebody Else"));
+        CHECK(v.mismatches[1].field == QStringLiteral("model"));
+
+        // Exact and case-sensitive: a licence is not a search.
+        v = packageInstallVerdict(demands, true, QStringLiteral("minton performance"),
+                                  QStringLiteral("CAN Triple TD"), QString());
+        CHECK(!v.ok());
+        CHECK(v.mismatches.size() == 1);
+
+        // An unlicensed-but-answering unit (all fields empty) fails every asked
+        // match by name rather than by a special case, so the message still
+        // says what the package wanted.
+        v = packageInstallVerdict(demands, true, QString(), QString(), QString());
+        CHECK(!v.ok());
+        CHECK(v.mismatches.size() == 2);
+        CHECK(v.mismatches[0].actual.isEmpty());
+    }
+
+    // ---- a file with NO policy is still a valid file ----
+    //
+    // Every writer that is not the Builder passes an invalid policy, and those
+    // files must keep working: a comms template and a plain sealed .ct3 both go
+    // through this same container.
+    {
+        const QString plainPkg = dir.filePath(QStringLiteral("nopolicy.ct3s"));
+        SecureSaveOptions np;
+        np.embeddedCommsKey = AccessKey(0x01020304u);
+        CHECK(!np.policy.isValid()); // the default
+        CHECK(writeSecureFile(plainPkg, body, np, &err));
+
+        SecureFileInfo ninfo;
+        QByteArray nbody;
+        CHECK(readSecureFile(plainPkg, &nbody, &ninfo, &err));
+        CHECK(nbody == body);
+        CHECK(!ninfo.policy.isValid());
+        CHECK(ninfo.embeddedCommsKey == np.embeddedCommsKey);
+    }
+
+    // ---- there is no password mode any more ----
+    //
+    // v2 removed it. The block that used to live here proved the good half of
+    // this format: a file whose key was wrapped under a passphrase could not be
+    // opened by anyone without it, not even by this application's own reader.
+    // That was the only mode that withheld anything from a determined reader,
+    // and removing it was a deliberate product decision, not an oversight.
+    //
+    // What remains is stated plainly by the opacity check above and by
+    // buildWrapMask's comment: the key travels in the file. A .ct3s defeats a
+    // hex editor and any tool that does not implement the format. It does not
+    // defeat someone who reads this source. What stops a package being USED
+    // where it should not be is the licence match at install, which is a
+    // different guarantee from being unreadable and must not be mistaken for it.
+    {
+        // A v1 file is refused rather than read \u2014 there is no wrapping code left
+        // to service one. Forged by hand because no writer produces v1 any more.
+        const QString old = dir.filePath(QStringLiteral("v1.ct3s"));
+        QByteArray legacy;
+        {
+            SecureSaveOptions o;
+            o.embeddedCommsKey = AccessKey(0x11223344u);
+            CHECK(writeSecureFile(old, body, o, &err));
+            QFile lf(old);
+            CHECK(lf.open(QIODevice::ReadOnly));
+            legacy = lf.readAll();
+            lf.close();
+        }
+        legacy[8] = char(1); // formatVersion 2 -> 1, in the cleartext header
+        legacy[9] = char(0);
+        {
+            QFile lf(old);
+            CHECK(lf.open(QIODevice::WriteOnly));
+            lf.write(legacy);
+            lf.close();
+        }
         QByteArray got;
-        CHECK(readSecureFile(locked, pass, &got, &info, &err));
-        CHECK(got == body);
-        CHECK(info.requiresPassword);
-        CHECK(info.embeddedCommsKey == pw.embeddedCommsKey);
-
-        // A wrong password FAILS. It must not yield a truncated document, an
-        // empty one, or anything at all — the tag is checked before a single
-        // byte is handed back, so `plainBody` is left exactly as it was.
-        QByteArray junk = QByteArrayLiteral("untouched");
-        CHECK(!readSecureFile(locked, QStringLiteral("fleet-owner-onlY"), &junk, &info, &err));
-        CHECK(junk == QByteArrayLiteral("untouched"));
+        CHECK(!readSecureFile(old, &got, &info, &err));
         CHECK(!err.isEmpty());
-        CHECK(!readSecureFile(locked, QString(), &junk, &info, &err));
-        CHECK(junk == QByteArrayLiteral("untouched"));
-        // There is no recovery path, by design: nothing about the file offers a
-        // way in without the password, not even the standard-mode reader.
-        QFile lf(locked);
-        CHECK(lf.open(QIODevice::ReadOnly));
-        const QByteArray lockedRaw = lf.readAll();
-        lf.close();
-        CHECK(!lockedRaw.contains(marker));
     }
 
     // ---- tampering ----
@@ -4708,7 +4849,7 @@ static void testSecureFile()
             bf.close();
             QByteArray scratch;
             SecureFileInfo si;
-            return !readSecureFile(tpath, QString(), &scratch, &si, nullptr);
+            return !readSecureFile(tpath, &scratch, &si, nullptr);
         };
 
         const auto headerU32 = [&good](int off) {
@@ -4786,249 +4927,22 @@ static void testSecureFile()
         CHECK(!isSecureFile(bogus));
         CHECK(!peekSecureFile(bogus, &peek, &err));
         QByteArray scratch;
-        CHECK(!readSecureFile(bogus, QString(), &scratch, &info, &err));
+        CHECK(!readSecureFile(bogus, &scratch, &info, &err));
         CHECK(!isSecureFile(dir.filePath(QStringLiteral("no-such-file.ct3s"))));
     }
 }
 
-// The fleet identity block: which fleet a configuration is FOR. Three things
-// here are worth testing directly — the byte budget on the two strings, what
-// counts as "the same fleet", and the one rule the JSON has to obey, which is
-// that the fleet key is the fleet's only secret and a plain .ct3 is a text
-// file people mail around.
-static void testFleetIdentity()
-{
-    // ---- clampToWire: at most N BYTES, and never half a character ----
-    // The whole reason this exists rather than QString::left(). The wire field
-    // is fixed-width UTF-8, so sixteen CHARACTERS can be forty-eight bytes, and
-    // a truncation that counted QChars would cut the last one in half and hand
-    // the device a field it cannot decode. The damage from that is invisible:
-    // the unit simply reports a vendor no configuration matches, months later.
-    //
-    // Every case asserts the same things: the result is a byte-for-byte PREFIX
-    // of the input, it fits the budget, it is exactly as long as it should be,
-    // and the cut landed on a character boundary. The expected lengths are
-    // written out per case rather than derived, so the arithmetic the function
-    // is supposed to do is stated here and not repeated from it.
-    {
-        const auto checkClamp = [](const QString &input, int maxBytes, int expectedChars,
-                                   int expectedBytes) {
-            const QString clamped = FleetIdentity::clampToWire(input, maxBytes);
-            const QByteArray clampedUtf8 = clamped.toUtf8();
-            const QByteArray inputUtf8 = input.toUtf8();
-            CHECK(clampedUtf8.size() <= maxBytes);
-            CHECK(clampedUtf8.size() == expectedBytes);
-            CHECK(clamped.size() == expectedChars);
-            CHECK(clamped == input.left(expectedChars));
-            CHECK(inputUtf8.startsWith(clampedUtf8));
-            // The cut landed on a character boundary: the next byte of the
-            // input, where there is one, STARTS a sequence rather than
-            // continuing the one that was just severed (continuation bytes are
-            // 10xxxxxx). This is the single check the function exists to pass.
-            if (clampedUtf8.size() < inputUtf8.size())
-                CHECK((quint8(inputUtf8[clampedUtf8.size()]) & 0xC0) != 0x80);
-            // ...and re-decoding gives back exactly what was clamped. A split
-            // sequence would come back as U+FFFD instead.
-            CHECK(QString::fromUtf8(clampedUtf8) == clamped);
-            CHECK(!clamped.contains(QChar(QChar::ReplacementCharacter)));
-        };
-
-        // Sixteen 3-byte characters (U+6F22) = 48 bytes. Five fit in sixteen
-        // bytes; a sixth would need eighteen. This is the case the function
-        // exists for, and the one QString::left(16) gets catastrophically wrong.
-        QString han;
-        for (int i = 0; i < 16; ++i)
-            han += QString::fromUtf8("\xE6\xBC\xA2");
-        CHECK(han.size() == 16 && han.toUtf8().size() == 48);
-        checkClamp(han, kFleetVendorIdBytes, 5, 15);
-
-        // Sixteen 2-byte characters (U+00E9) = 32 bytes; eight fit exactly.
-        QString accented;
-        for (int i = 0; i < 16; ++i)
-            accented += QString::fromUtf8("\xC3\xA9");
-        CHECK(accented.size() == 16 && accented.toUtf8().size() == 32);
-        checkClamp(accented, kFleetModelIdBytes, 8, 16);
-
-        // Astral plane (U+1F3CE): four UTF-8 bytes AND a surrogate PAIR in the
-        // QString, so a clamp that stopped at a QChar boundary would leave a
-        // lone surrogate — something Qt cannot encode at all.
-        QString cars;
-        for (int i = 0; i < 6; ++i)
-            cars += QString::fromUtf8("\xF0\x9F\x8F\x8E");
-        CHECK(cars.size() == 12 && cars.toUtf8().size() == 24);
-        checkClamp(cars, kFleetVendorIdBytes, 8, 16); // four whole cars
-
-        // Plain ASCII: exactly sixteen is legal — the field is NUL-PADDED, not
-        // NUL-terminated, so all sixteen bytes are usable and a sixteen-byte
-        // name must not lose its last character to a terminator that is not
-        // there.
-        checkClamp(QStringLiteral("0123456789ABCDEF"), kFleetVendorIdBytes, 16, 16);
-        checkClamp(QStringLiteral("0123456789ABCDEFG"), kFleetVendorIdBytes, 16, 16);
-        CHECK(FleetIdentity::clampToWire(QString(), kFleetVendorIdBytes).isEmpty());
-        CHECK(FleetIdentity::clampToWire(QStringLiteral("x"), 0).isEmpty());
-    }
-
-    FleetIdentity id;
-    CHECK(!id.isSet()); // what an unprovisioned unit reports
-    id.vendorId = QStringLiteral("Detailed Motor");
-    id.modelId = QStringLiteral("CAN Triple");
-    id.serialNumber = 0x00000123u;
-    id.configVersion = 42;
-    id.flags = 0;
-    id.fleetKey = AccessKey(0xDEADBEEFu);
-    CHECK(id.isSet());
-    // A serial on its own says which UNIT this is and nothing about which fleet
-    // it belongs to, so it must not make an otherwise blank identity read as
-    // provisioned — that unit would match no policy in existence.
-    {
-        FleetIdentity serialOnly;
-        serialOnly.serialNumber = 0x99u;
-        CHECK(!serialOnly.isSet());
-    }
-
-    // ---- sameFleetAs: vendor and model, exactly ----
-    {
-        CHECK(id.sameFleetAs(id));
-        // Serial and version are the targeting and ordering questions, asked
-        // separately. Folding them in here would refuse every update to a
-        // device that is merely out of date — which is every update.
-        FleetIdentity other = id;
-        other.serialNumber = 0x00000999u;
-        other.configVersion = 99;
-        CHECK(id.sameFleetAs(other));
-        CHECK(other.sameFleetAs(id));
-
-        // Vendor and model are identifiers, not display names: case and spacing
-        // are part of them. A case-insensitive match would let "acme" collect
-        // updates built for "ACME", and the two are not obliged to be the same
-        // company.
-        FleetIdentity cased = id;
-        cased.vendorId = id.vendorId.toLower();
-        CHECK(!id.sameFleetAs(cased));
-        FleetIdentity spaced = id;
-        spaced.modelId = QStringLiteral("CANTriple");
-        CHECK(!id.sameFleetAs(spaced));
-        // A different product line is a different fleet. There is deliberately
-        // no separate series field to distinguish config lines — the model name
-        // carries that, so this is the comparison that has to do the work.
-        FleetIdentity elsewhere = id;
-        elsewhere.modelId = id.modelId + QStringLiteral(" X");
-        CHECK(!id.sameFleetAs(elsewhere));
-
-        // Two blank identities are not "the same fleet"; they are two things
-        // nobody has told anything about. Matching them would wave every update
-        // through on unprovisioned hardware, which is the one case where the
-        // check has to be strictest.
-        CHECK(!FleetIdentity().sameFleetAs(id));
-        CHECK(!id.sameFleetAs(FleetIdentity()));
-        CHECK(!FleetIdentity().sameFleetAs(FleetIdentity()));
-    }
-
-    // ---- toJson(false) must not carry the key under ANY name ----
-    // Asserting that the object has no "fleetKey" member would only prove it
-    // is absent under the name we happen to expect. The whole serialised object
-    // is searched instead, for every form the four bytes could be written in.
-    {
-        const QJsonObject o = id.toJson(false);
-        const QByteArray text = QJsonDocument(o).toJson(QJsonDocument::Compact);
-        const QByteArray keyBytes = accessKeyBytes(id.fleetKey);
-        CHECK(!text.contains(keyBytes.toBase64()));
-        CHECK(!text.contains(keyBytes.toHex()));
-        CHECK(!text.contains(keyBytes.toHex().toUpper()));
-        CHECK(!text.contains(keyBytes));
-        CHECK(!text.contains(QByteArray::number(qlonglong(id.fleetKey))));
-        CHECK(!text.contains(QByteArray::number(qlonglong(id.fleetKey), 16)));
-
-        // What IS there still names the fleet — a plain .ct3 that could not be
-        // checked against a device would be no use at all.
-        const FleetIdentity back = FleetIdentity::fromJson(o);
-        CHECK(back.vendorId == id.vendorId);
-        CHECK(back.modelId == id.modelId);
-        CHECK(back.serialNumber == id.serialNumber);
-        CHECK(back.configVersion == id.configVersion);
-        CHECK(back.flags == id.flags);
-        CHECK(back.fleetKey == kNoAccessKey);
-        CHECK(back.sameFleetAs(id));
-    }
-
-    // ---- toJson(true): a .ct3s body is sealed, so it may carry the key ----
-    {
-        const FleetIdentity back = FleetIdentity::fromJson(id.toJson(true));
-        CHECK(back.fleetKey == id.fleetKey);
-        CHECK(back.sameFleetAs(id));
-        CHECK(back.serialNumber == id.serialNumber);
-        CHECK(back.configVersion == id.configVersion);
-    }
-
-    // An object with nothing in it is an unprovisioned identity rather than a
-    // half-populated one, so a file written before the block existed loads as
-    // "no fleet" instead of as a fleet whose name is the empty string.
-    CHECK(!FleetIdentity::fromJson(QJsonObject()).isSet());
-}
-
-// The uploader's rulebook. It travels inside the configuration, so a .ct3s
-// handed to a customer carries its own restrictions — which means the defaults
-// matter as much as the values: a policy key missing from an older file must
-// read as the STRICT answer, never as permission.
-static void testUploadPolicy()
-{
-    // ---- an empty allow-list is "any serial in the fleet" ----
-    UploadPolicy any;
-    CHECK(!any.pinsSerial());
-    CHECK(any.allowsSerial(0));
-    CHECK(any.allowsSerial(1));
-    CHECK(any.allowsSerial(0xFFFFFFFFu));
-    CHECK(any.requireFleetKey);
-    CHECK(any.warnOnOlderVersion);
-
-    // ---- a populated one permits exactly what it names ----
-    // This is what stops a one-off replacement configuration, built for the car
-    // that broke, from installing on the rest of a customer's fleet.
-    UploadPolicy pinned;
-    pinned.allowedSerials = QList<quint32>{0x100u, 0x102u, 0x105u};
-    CHECK(pinned.pinsSerial());
-    CHECK(pinned.allowsSerial(0x100u));
-    CHECK(pinned.allowsSerial(0x102u));
-    CHECK(pinned.allowsSerial(0x105u));
-    CHECK(!pinned.allowsSerial(0x101u));
-    CHECK(!pinned.allowsSerial(0x106u));
-    // Serial 0 is what an unprovisioned unit reports. A pinned policy must not
-    // treat that as a wildcard, or the one device that has told you nothing
-    // would be the one device every restricted update installs on.
-    CHECK(!pinned.allowsSerial(0));
-
-    // ---- JSON ----
-    {
-        const UploadPolicy back = UploadPolicy::fromJson(pinned.toJson());
-        CHECK(back.allowedSerials == pinned.allowedSerials);
-        CHECK(back.allowsSerial(0x102u));
-        CHECK(!back.allowsSerial(0x101u));
-        CHECK(back.requireFleetKey);
-        CHECK(back.warnOnOlderVersion);
-    }
-    // Absent means TRUE for both flags. Read the other way round, a file that
-    // predates the field — or one an editor stripped a key out of — would
-    // silently stop demanding the attestation and stop refusing a downgrade,
-    // and nothing on screen would say the policy had been relaxed.
-    {
-        const UploadPolicy fromNothing = UploadPolicy::fromJson(QJsonObject());
-        CHECK(fromNothing.requireFleetKey);
-        CHECK(fromNothing.warnOnOlderVersion);
-        CHECK(!fromNothing.pinsSerial());
-        CHECK(fromNothing.allowsSerial(0x1234u));
-    }
-    // ...and an explicit false has to survive, or turning a check off would be
-    // inexpressible: deliberately reflashing an older configuration is a real
-    // thing to want to do.
-    {
-        UploadPolicy relaxed;
-        relaxed.requireFleetKey = false;
-        relaxed.warnOnOlderVersion = false;
-        const UploadPolicy back = UploadPolicy::fromJson(relaxed.toJson());
-        CHECK(!back.requireFleetKey);
-        CHECK(!back.warnOnOlderVersion);
-    }
-}
+// testFleetIdentity is GONE with the block it tested. Two of the properties it
+// pinned survived in other clothes and are pinned elsewhere:
+//
+//   - the byte-budget clamp on a fixed-width wire string is now
+//     limitToUtf8Bytes() (test_name_limits), applied to the licence fields;
+//   - "a plain .ct3 must never carry the secret" became "the secret lives in
+//     the .ct3s policy, sealed" — the policy round-trip beside the secure-file
+//     cases checks the key is not in the bytes.
+//
+// What was deliberately NOT carried forward: sameFleetAs(). Vendor/model
+// equality is now packageInstallVerdict(), tested where it lives.
 
 // A retained device script as it reaches disk.
 //
@@ -5803,105 +5717,11 @@ static void testConditionQualifierPersists()
     CHECK(ConditionRow::fromJson(o).qualifyResetTerms == 0);
 }
 
-// The identity and the policy as they reach disk. The sharp edge is the fleet
-// key: it is the fleet's only secret and only a .ct3s carries it, so the same
-// document has to write two different things. Both files are sealed now, so the
-// asymmetry is a deliberate choice rather than a consequence of one format
-// being legible — see withFleetKey() for the reasons it survived format 2.
-static void testFleetDocument()
-{
-    QTemporaryDir dir;
-    CHECK(dir.isValid());
-    QString error;
+// testFleetDocument is GONE. It pinned that a plain .ct3 dropped the fleet key
+// while a .ct3s kept it. Neither file carries any fleet field now; a .ct3s
+// carries a SecurePackagePolicy in its sealed payload prefix instead, and the
+// round-trip beside the secure-file cases is what pins that.
 
-    Configuration cfg;
-    FleetIdentity id;
-    id.vendorId = QStringLiteral("Detailed Motor");
-    id.modelId = QStringLiteral("CAN Triple");
-    id.serialNumber = 0x00000123u;
-    id.configVersion = 12;
-    id.fleetKey = AccessKey(0xDEADBEEFu);
-    cfg.setFleetIdentity(id);
-
-    UploadPolicy policy;
-    policy.allowedSerials = QList<quint32>{0x00000123u, 0x00000124u};
-    policy.warnOnOlderVersion = false; // deliberately not the default
-    cfg.setUploadPolicy(policy);
-
-    const QByteArray keyBytes = accessKeyBytes(id.fleetKey);
-    const auto fileBytes = [](const QString &path) {
-        QFile f(path);
-        return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
-    };
-    const auto carriesKey = [&keyBytes, &id](const QByteArray &blob) {
-        return blob.contains(keyBytes) || blob.contains(keyBytes.toHex())
-               || blob.contains(keyBytes.toHex().toUpper()) || blob.contains(keyBytes.toBase64())
-               || blob.contains(QByteArray::number(qlonglong(id.fleetKey)));
-    };
-
-    // ---- a plain .ct3 carries the fleet, never the secret ----
-    const QString plain = dir.filePath(QStringLiteral("fleet.ct3"));
-    CHECK(cfg.saveToFile(plain, &error));
-    const QByteArray plainRaw = fileBytes(plain);
-    CHECK(!plainRaw.isEmpty());
-    CHECK(!carriesKey(plainRaw));
-
-    Configuration loaded;
-    CHECK(loaded.loadFromFile(plain, &error));
-    CHECK(loaded.fleetIdentity().vendorId == id.vendorId);
-    CHECK(loaded.fleetIdentity().modelId == id.modelId);
-    CHECK(loaded.fleetIdentity().serialNumber == id.serialNumber);
-    CHECK(loaded.fleetIdentity().configVersion == id.configVersion);
-    CHECK(loaded.fleetIdentity().sameFleetAs(id));
-    CHECK(loaded.fleetIdentity().fleetKey == kNoAccessKey);
-    CHECK(loaded.uploadPolicy().allowedSerials == policy.allowedSerials);
-    CHECK(loaded.uploadPolicy().allowsSerial(0x00000124u));
-    CHECK(!loaded.uploadPolicy().allowsSerial(0x00000125u));
-    CHECK(!loaded.uploadPolicy().warnOnOlderVersion);
-    CHECK(loaded.uploadPolicy().requireFleetKey);
-
-    // ---- a .ct3s is sealed, so it may carry the key ----
-    // Without this a customer's copy could never verify a device's attestation
-    // by itself, and somebody would have to type the fleet secret in by hand on
-    // every machine — which is how a shared secret stops being one.
-    const QString secure = dir.filePath(QStringLiteral("fleet.ct3s"));
-    SecureSaveOptions opts;
-    CHECK(cfg.saveSecureToFile(secure, opts, &error));
-    const QByteArray secureRaw = fileBytes(secure);
-    CHECK(!secureRaw.isEmpty());
-    // Sealed means sealed: the key is inside the encrypted body, so it must not
-    // be visible in the file's bytes either.
-    CHECK(!carriesKey(secureRaw));
-
-    Configuration reopened;
-    CHECK(reopened.loadFromFile(secure, &error));
-    CHECK(reopened.fleetIdentity().fleetKey == id.fleetKey);
-    CHECK(reopened.fleetIdentity().sameFleetAs(id));
-    CHECK(reopened.fleetIdentity().serialNumber == id.serialNumber);
-    CHECK(reopened.fleetIdentity().configVersion == id.configVersion);
-    CHECK(reopened.uploadPolicy().allowedSerials == policy.allowedSerials);
-    CHECK(!reopened.uploadPolicy().warnOnOlderVersion);
-}
-
-// The Protected tier as it reaches disk: what a viewer without the Edit
-// Protected Comms password may see, what they may change, and that neither
-// answer can be walked around through the loader.
-//
-// The channels half is the part worth labouring. Locking the message but
-// leaving its channels editable would protect the secret and break the
-// function: change a protected channel's resolution and the message silently
-// starts decoding to different numbers, with nothing on screen to say why.
-//
-// STAGE E: as of 2.3.0 this function covers only CONCEALMENT. The single
-// isChannelProtected() it was written against answered two questions that have
-// since come apart — isChannelConcealed (a value is withheld; lifted by the
-// password) and isChannelEditLocked (a control is disabled; NOT lifted by it,
-// because the password buys the right to untick the tier and unticking is what
-// unlocks editing). These lines inherited the first because that is the
-// property they always asserted. Nothing here exercises the second, and nothing
-// here exercises ReadOnly at all — the tier that is VISIBLE and still not
-// editable, i.e. the one case where the two predicates disagree. That is
-// plan.md §6.2's testChannelPredicateSplit and it is not yet written.
 static void testProtectedDocument()
 {
     const QString pass = QStringLiteral("vendor-comms-secret");
@@ -6325,36 +6145,32 @@ static void testConcealedSaveGuards()
     }
 
     // ---- changing the password used to re-seal under the OLD one ----
-    // setCommsPassword rewrote the verifier and the key but left the cached
-    // secure-save options alone, so the next .ct3s Save wrapped the file key
-    // under the previous password while the document's verifier expected the
-    // new one. The file that came out opened with neither.
+    // The regression that used to be pinned here was specific to the password
+    // mode: setCommsPassword rewrote the document's verifier and key but left
+    // the cached secure-save options naming the OLD password, so the next Save
+    // wrapped the file key under one password while the verifier expected
+    // another, and the file opened with neither.
+    //
+    // v2 removed the wrapping, so there is no second password for the cached
+    // options to disagree with. What is still worth pinning is that the EMBEDDED
+    // KEY follows the password \u2014 that half was never about wrapping, and a file
+    // still hands a device a key derived from whatever the document now holds.
     {
         const QString spath = dir.filePath(QStringLiteral("reseal.ct3s"));
         SecureSaveOptions opts;
-        opts.requirePassword = true;
-        opts.password = pass;
         opts.embeddedCommsKey = cfg.commsKey();
         CHECK(cfg.saveSecureToFile(spath, opts, &err));
 
         const QString second = QStringLiteral("second-comms-secret");
         CHECK(cfg.commsRevealed());
         CHECK(cfg.setCommsPassword(second));
-        // Deliberately re-saving with the options the DOCUMENT now carries,
-        // which is what a plain Save does — not with the `opts` above, which
-        // still names the old password.
         CHECK(cfg.saveSecureToFile(spath, cfg.secureOptions(), &err));
 
         Configuration reopened;
-        CHECK(reopened.loadFromFile(spath, &err, second));
+        CHECK(reopened.loadFromFile(spath, &err));
         CHECK(reopened.isSecureFile());
         CHECK(reopened.bus[0].sections.size() == 1);
-        // The embedded key moved with the password too, or the file would still
-        // be handing a device the key derived from the retired one.
         CHECK(reopened.commsKey() == deriveAccessKey(second));
-
-        Configuration stale;
-        CHECK(!stale.loadFromFile(spath, &err, pass));
     }
 }
 
@@ -6671,15 +6487,20 @@ static void testDeviceLinkReadCommands()
         // for; it was not in it.
         CMD_READ_INTEG_CFG,
         CMD_GET_DEVICE_ID, // v18 device binding
-        // Access passwords + fleet identity. All four answer with a payload:
-        // which keys are set, the device's nonce, the identity block, and the
-        // device's HMAC over the host's own challenge.
+        // Access passwords: which keys are set, and the device's nonce.
         CMD_READ_ACCESS_KEYS, CMD_ACCESS_CHALLENGE,
-        CMD_READ_FLEET_ID,    CMD_FLEET_ID_PROVE,
+        // The configuration version, which took over from the fleet identity
+        // reply (0x2F/0x31, retired) as the one thing anybody still read.
+        CMD_READ_CONFIG_VERSION,
         // v9's CRC8 table — added AFTER it repeated the family failure in the
         // field ("Reading CRC8 rules (no response)"), because this list is as
         // hand-maintained as the one it guards. Sixth occurrence.
         CMD_READ_CRC8_CFG,
+        // The OTP manufacturing record. Listed here in the same edit that added
+        // the command — the entries above it were each added after a bench
+        // session that started with "the device answers instantly and the GUI
+        // sees nothing".
+        CMD_GET_DEVICE_INFO,
     };
     for (quint8 cmd : reads)
         CHECK(DeviceLink::isReadResponse(cmd));
@@ -6727,8 +6548,9 @@ static void testDeviceLinkReadCommands()
     // last step — found on hardware the next day. This list exists so that the
     // NEXT read command fails HERE instead of in the field.
     for (quint8 cmd : {CMD_GET_STATUS, CMD_READ_CONFIG_NAME, CMD_GET_DEVICE_ID,
-                       CMD_READ_ACCESS_KEYS, CMD_ACCESS_CHALLENGE, CMD_READ_FLEET_ID,
-                       CMD_FLEET_ID_PROVE, CMD_READ_CAN_SETUP, CMD_READ_DEVICE_CHANNELS}) {
+                       CMD_READ_ACCESS_KEYS, CMD_ACCESS_CHALLENGE,
+                       CMD_READ_CONFIG_VERSION, CMD_READ_CAN_SETUP, CMD_READ_DEVICE_CHANNELS,
+                       CMD_GET_DEVICE_INFO}) {
         CHECK(DeviceLink::isReadResponse(cmd));
         CHECK(!DeviceLink::echoesRequestRange(cmd));
     }
@@ -7246,7 +7068,7 @@ int main(int argc, char *argv[])
     testMapper();
     testAdvancedMath();
     testConfigJson();
-    testDeviceLock();
+    testDeviceLockRemoved();
     testConstants();
     testIntegrators();
     testDbcImport();
@@ -7273,9 +7095,6 @@ int main(int argc, char *argv[])
     testCounterMessageInputsAreValidated();
     testQualifyMaskDropsMessageComparisonsAtTheMapper();
     testConditionQualifierPersists();
-    testFleetIdentity();
-    testUploadPolicy();
-    testFleetDocument();
     testRetainedScriptDocument();
     testProtectedDocument();
     testConcealedSaveGuards();

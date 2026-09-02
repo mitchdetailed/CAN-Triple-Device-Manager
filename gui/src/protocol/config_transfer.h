@@ -4,6 +4,8 @@
 
 #include <QObject>
 
+#include <optional>
+
 #include "../model/device_mapper.h"
 #include "device_link.h"
 #include "device_session.h"
@@ -19,15 +21,15 @@ public:
     // just-sent (and verified) configuration in one operation. Deletes itself
     // when finished.
     //
-    // configVersion is the configuration's own revision number — the caller
-    // passes Configuration::fleetIdentity().configVersion — and rides that same
-    // SAVE_TO_FLASH as its payload, so the version the device reports can never
-    // describe tables other than the ones it was committed with. It is sent even
-    // when zero: an unversioned configuration has to CLEAR whatever version was
-    // there before, or the unit would go on claiming a revision it is no longer
-    // running and the uploader's "is this newer?" test would refuse the very
-    // package that fixes it. Ignored when saveToFlash is false, because then
-    // nothing is being committed for it to belong to.
+    // configVersion, when it has a value, rides the SAVE_TO_FLASH as its payload,
+    // so the version the device reports can never describe tables other than
+    // the ones it was committed with. A PACKAGE passes the version its policy
+    // carries (zero included: an unversioned package must clear a stale number
+    // rather than inherit one). A plain Send passes nullopt, which sends an
+    // empty payload the firmware reads as "leave the stored version alone" — an
+    // engineer's bench Send is not a release and must not renumber the unit.
+    // Ignored when saveToFlash is false, because then nothing is being
+    // committed for it to belong to.
     //
     // deviceAccess is whatever the caller already learned from
     // CMD_READ_ACCESS_KEYS about the unit in front of it, and it is here for one
@@ -47,7 +49,8 @@ public:
     // slot, and a pointer slotted into a bool-shaped gap converts silently.
     static ConfigTransfer *send(DeviceLink *link, const DeviceTables &tables, bool verify,
                                 const QVector<ControlCanPayload> &busSetups = {},
-                                bool saveToFlash = false, quint16 configVersion = 0,
+                                bool saveToFlash = false,
+                                std::optional<quint16> configVersion = std::nullopt,
                                 const QString &configName = {}, bool resetAfter = false,
                                 QObject *parent = nullptr,
                                 const device_session::AccessState &deviceAccess = {});
@@ -149,7 +152,8 @@ private:
 
     void buildSendSteps(const DeviceTables &tables, bool verify,
                         const QVector<ControlCanPayload> &busSetups, bool saveToFlash,
-                        quint16 configVersion, const QString &configName, bool resetAfter);
+                        std::optional<quint16> configVersion, const QString &configName,
+                        bool resetAfter);
     void buildGetSteps();
     // Runs over the freshly built plan; a non-empty m_buildFault stops the
     // transfer before its first request, with the fix in the message. See the

@@ -10,7 +10,7 @@ The menu bar follows the same split:
 
 <table>
 <tr><th>Menu</th><th>Contents</th></tr>
-<tr><td><b>File</b></td><td>New, Open…, Save, Save As…, Save Secure Config…,
+<tr><td><b>File</b></td><td>New, Open…, Save, Save As…, Secure Configuration Builder…,
 Check Channels, Config Summary…, Reveal / Conceal Protected Comms, Recent
 Files, Exit. See <a href="files.md">Configuration Files</a> and
 <a href="validation-report.md">Validation &amp; the Config Summary</a>.</td></tr>
@@ -23,7 +23,7 @@ on-device calculations that read and write channels.</td></tr>
 <tr><td><b>Online</b></td><td>Connect / Disconnect, Send / Get / Verify
 Configuration, Send Secure Configuration…, Monitor Channels… (F3), CAN
 Viewer… (F4), Reset Device, Device Status…, Set Access
-Passwords…, Upload Configuration…, Update Firmware…, Fleet Identity…. See
+Passwords…, Update Firmware…, Firmware License Manager…. See
 <a href="online.md">Online: Send, Get &amp; Flash</a>.</td></tr>
 <tr><td><b>Tools</b></td><td>Channel Editor…, Lua Console…, Connection
 Settings… (the serial port belongs to the application, not the
@@ -70,7 +70,7 @@ in what order, and how often</td></tr>
 <a href="online.md">Send, Get &amp; Flash</a> ·
 <a href="monitor.md">Monitoring Live Values</a> ·
 <a href="firmware-update.md">Updating Firmware</a> ·
-<a href="fleet-identity.md">Fleet Identity &amp; Access Keys</a></td></tr>
+<a href="licensing.md">Firmware Licensing &amp; Access Keys</a></td></tr>
 <tr><td>Reports</td><td>
 <a href="validation-report.md">Validation &amp; the Config Summary</a></td></tr>
 <tr><td>Legal</td><td><a href="license.md">License (MIT)</a></td></tr>

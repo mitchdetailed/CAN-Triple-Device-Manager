@@ -135,7 +135,6 @@ bool writeBinaryConfigFile(const QString &path, const QByteArray &plainBody, int
     // what Save Secure Config is for, and quietly giving them to every plain
     // save would make the two formats the same thing wearing two names.
     SecureSaveOptions options;
-    options.requirePassword = false;
     options.embeddedCommsKey = kNoAccessKey;
 
     QByteArray blob;
@@ -207,7 +206,7 @@ bool readBinaryConfigFile(const QString &path, QByteArray *plainBody, ConfigFile
     // password there is exactly one explanation left for a tag that does not
     // verify, and naming it is more use than repeating the container's hedge.
     SecureFileInfo blobInfo;
-    if (!openSecureBlob(raw.mid(kConfigPreambleBytes), QString(), plainBody, &blobInfo, nullptr))
+    if (!openSecureBlob(raw.mid(kConfigPreambleBytes), plainBody, &blobInfo, nullptr))
         return fail(QStringLiteral("This configuration file is damaged and cannot be opened."));
 
     if (info)

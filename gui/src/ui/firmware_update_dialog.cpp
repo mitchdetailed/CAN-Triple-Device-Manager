@@ -591,8 +591,9 @@ void FirmwareUpdateDialog::offerConfigurationRestore(const QString &backupPath)
     QString sendError;
     auto *transfer = ConfigTransfer::send(
         m_link, mapped.tables, /*verify=*/true, busSetups, /*saveToFlash=*/true,
-        restored.fleetIdentity().configVersion, restored.effectiveTitle(),
-        /*resetAfter=*/false, this);
+        // nullopt: restoring what the unit already ran is not a release, so the
+        // version it was running stays exactly as it was.
+        std::nullopt, restored.effectiveTitle(), /*resetAfter=*/false, this);
     connect(transfer, &ConfigTransfer::progress, this,
             [this](int done, int total, const QString &stage) {
                 m_progress->setMaximum(total);

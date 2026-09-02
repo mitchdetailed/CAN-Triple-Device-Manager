@@ -285,7 +285,6 @@ bool writeCommsTemplate(const QString &path, const CommsTemplate &tmpl, QString 
     // is not used here; wiring it up would be a second, differently-shaped
     // secret for the user to lose.
     SecureSaveOptions options;
-    options.requirePassword = false;
     options.embeddedCommsKey = kNoAccessKey;
 
     const bool ok = writeSecureFile(path, plain, options, error);
@@ -309,7 +308,7 @@ bool readCommsTemplate(const QString &path, CommsTemplate *out, QString *error)
 
     QByteArray plain;
     SecureFileInfo info;
-    if (!readSecureFile(path, QString(), &plain, &info, error))
+    if (!readSecureFile(path, &plain, &info, error))
         return false;
 
     const QJsonDocument doc = QJsonDocument::fromJson(plain);

@@ -37,10 +37,10 @@ The transfer is verified by reading the device's tables back, and the configurat
 
 **Online → Monitor Channels…** (F3) shows live channel values; **Online → CAN Viewer…** (F4) shows raw bus traffic. See [Monitoring Live Values](monitor.md).
 
-**Online → Device Status…** is the quick health check: uptime, per-bus counters, active table counts, firmware protocol version, device ID, which access passwords are set, and the unit's fleet identity.
+**Online → Device Status…** is the quick health check: uptime, per-bus counters, active table counts, firmware protocol version, device ID, which access passwords are set, and the unit's firmware licence.
 
 ## Reading the device back
 
-**Online → Get Configuration** reads the device's tables into the editor, replacing the current document (it warns first when there are unsaved changes). **Online → Verify Configuration** compares the device against the document without changing either.
+**Online → Get Configuration** reads the device's tables into the editor, replacing the current document (it warns first when there are unsaved changes).
 
 > **Warning:** Send Configuration replaces the device's *entire* configuration. If you meant to keep what the device is running, Get it into the editor and save it before sending something else.

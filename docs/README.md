@@ -23,7 +23,7 @@ then the first entry below.
   - [Device Scripts](device-scripts.md)
 - [Order & Timing of Operations](engine.md)
 - [Online: Send, Get & Flash](online.md)
-  - [Fleet Identity & Access Keys](fleet-identity.md)
+  - [Firmware Licensing & Access Keys](licensing.md)
   - [Updating Firmware](firmware-update.md)
 - [Lua Scripting](scripting.md)
 - [Monitoring Live Values](monitor.md)

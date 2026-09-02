@@ -36,6 +36,7 @@ extern "C" {
 #include "bcb.h"
 #include "engine_core.h"
 #include "flash_store.h"
+#include "license_store.h"
 #include "fw_host_stub.h"
 #include "fw_image.h"
 #include "fw_update.h"
@@ -82,11 +83,8 @@ constexpr unsigned kErrInvalidLen = ERR_INVALID_LEN;
 // the two headers declare these under identical names, and a field width that
 // had drifted would put the model id where the serial belongs â€” a device that
 // reads as a plausible member of a fleet it has nothing to do with.
-constexpr int kFleetVendorIdLen = FLEET_VENDOR_ID_LEN;
-constexpr int kFleetModelIdLen = FLEET_MODEL_ID_LEN;
-constexpr int kFleetKeyLen = FLEET_KEY_LEN;
-constexpr unsigned kCmdReadFleetId = CMD_READ_FLEET_ID;
-constexpr unsigned kCmdFleetIdProve = CMD_FLEET_ID_PROVE;
+// The configuration version's own command — what outlived the fleet identity.
+constexpr unsigned kCmdReadConfigVersion = CMD_READ_CONFIG_VERSION;
 // The commit that carries the configuration's version number with it.
 constexpr unsigned kCmdSaveToFlash = CMD_SAVE_TO_FLASH;
 // v18 device binding.
@@ -179,8 +177,8 @@ constexpr unsigned kAllCommandIds[] = {
     CMD_WRITE_TABLE2X16_OUT, CMD_READ_TABLE2X16_OUT, CMD_WRITE_INTEG_CFG,
     CMD_READ_INTEG_CFG, CMD_GET_DEVICE_ID, CMD_WRITE_CONFIG_BINDING,
     CMD_READ_ACCESS_KEYS, CMD_WRITE_ACCESS_KEYS, CMD_ACCESS_CHALLENGE,
-    CMD_ACCESS_RESPONSE, CMD_READ_FLEET_ID, CMD_READ_CAN_SETUP,
-    CMD_FLEET_ID_PROVE, CMD_WRITE_DEVICE_CHANNELS, CMD_READ_DEVICE_CHANNELS,
+    CMD_ACCESS_RESPONSE, CMD_READ_CAN_SETUP,
+    CMD_WRITE_DEVICE_CHANNELS, CMD_READ_DEVICE_CHANNELS, CMD_READ_CONFIG_VERSION,
     CMD_WRITE_TABLE8X8_DEF, CMD_READ_TABLE8X8_DEF, CMD_WRITE_TABLE8X8_ROW,
     CMD_READ_TABLE8X8_ROW, CMD_WRITE_CRC8_CFG, CMD_READ_CRC8_CFG,
     CMD_FW_UPDATE_BEGIN, CMD_FW_UPDATE_DATA, CMD_FW_UPDATE_END,
@@ -208,6 +206,41 @@ constexpr bool commandIdsDistinct()
 }
 static_assert(commandIdsDistinct(),
               "two protocol commands share an id -- the dispatch switch would eat one of them");
+// The OTP manufacturing record. Snapshotted like everything else here: the
+// offsets are spelled out twice, once per header, and a pair that had drifted
+// would read the serial number out of the date field — a plausible-looking
+// answer, on a record that cannot be corrected afterwards.
+constexpr unsigned kCmdGetDeviceInfo = CMD_GET_DEVICE_INFO;
+constexpr int kOtpInfoLen = OTP_INFO_LEN;
+constexpr int kOtpManufacturerAt = OTP_INFO_MANUFACTURER_AT;
+constexpr int kOtpManufacturerLen = OTP_INFO_MANUFACTURER_LEN;
+constexpr int kOtpProductAt = OTP_INFO_PRODUCT_AT;
+constexpr int kOtpProductLen = OTP_INFO_PRODUCT_LEN;
+constexpr int kOtpHwVersionAt = OTP_INFO_HW_VERSION_AT;
+constexpr int kOtpHwVersionLen = OTP_INFO_HW_VERSION_LEN;
+constexpr int kOtpSerialAt = OTP_INFO_SERIAL_AT;
+constexpr int kOtpSerialLen = OTP_INFO_SERIAL_LEN;
+constexpr int kOtpDateAt = OTP_INFO_DATE_AT;
+constexpr int kOtpDateLen = OTP_INFO_DATE_LEN;
+// The firmware licence. Snapshotted like everything else: the two headers spell
+// these widths twice, and a pair that had drifted would put the model where the
+// version belongs on a record that gates re-badging a unit.
+constexpr unsigned kCmdReadLicense = CMD_READ_LICENSE;
+constexpr unsigned kCmdWriteLicense = CMD_WRITE_LICENSE;
+constexpr unsigned kCmdLicenseChallenge = CMD_LICENSE_CHALLENGE;
+constexpr unsigned kCmdLicenseResponse = CMD_LICENSE_RESPONSE;
+constexpr int kLicenseManufacturerLen = LICENSE_MANUFACTURER_LEN;
+constexpr int kLicenseModelLen = LICENSE_MODEL_LEN;
+constexpr int kLicenseVersionLen = LICENSE_VERSION_LEN;
+constexpr int kLicenseKeyLen = LICENSE_KEY_LEN;
+constexpr unsigned kLicenseFlagKeySet = LICENSE_FLAG_KEY_SET;
+constexpr unsigned kLicenseFlagUpdaterSet = LICENSE_FLAG_UPDATER_SET;
+constexpr unsigned kCmdLicenseKeyProve = CMD_LICENSE_KEY_PROVE;
+constexpr const char *kLicenseAuthLabel = LICENSE_AUTH_LABEL;
+constexpr const char *kLicenseProveLabel = LICENSE_PROVE_LABEL;
+constexpr unsigned kLicenseKeyKeep = LICENSE_KEY_KEEP;
+constexpr unsigned kLicenseKeySet = LICENSE_KEY_SET;
+constexpr unsigned kLicenseKeyClear = LICENSE_KEY_CLEAR;
 } // namespace fw
 
 #undef CMD_GET_STATUS
@@ -256,8 +289,7 @@ static_assert(commandIdsDistinct(),
 // (ct::CMD_MSG_ACCESS_RESPONSE in wire_structs.h) so the retirement is
 // spellable, and an #undef here read as if a firmware macro were still
 // shadowing it.
-#undef CMD_READ_FLEET_ID
-#undef CMD_FLEET_ID_PROVE
+#undef CMD_READ_CONFIG_VERSION
 #undef CMD_READ_CAN_SETUP
 #undef ACCESS_KEY_LEN
 #undef ACCESS_CHALLENGE_LEN
@@ -268,11 +300,37 @@ static_assert(commandIdsDistinct(),
 #undef ACCESS_MASK_SEND
 #undef ACCESS_MASK_GET
 #undef ACCESS_MASK_EDIT_COMMS
-#undef FLEET_VENDOR_ID_LEN
-#undef FLEET_MODEL_ID_LEN
-#undef FLEET_KEY_LEN
 #undef CMD_GET_DEVICE_ID
 #undef CMD_WRITE_CONFIG_BINDING
+#undef CMD_GET_DEVICE_INFO
+#undef OTP_INFO_LEN
+#undef OTP_INFO_MANUFACTURER_AT
+#undef OTP_INFO_MANUFACTURER_LEN
+#undef OTP_INFO_PRODUCT_AT
+#undef OTP_INFO_PRODUCT_LEN
+#undef OTP_INFO_HW_VERSION_AT
+#undef OTP_INFO_HW_VERSION_LEN
+#undef OTP_INFO_SERIAL_AT
+#undef OTP_INFO_SERIAL_LEN
+#undef OTP_INFO_DATE_AT
+#undef OTP_INFO_DATE_LEN
+#undef CMD_READ_LICENSE
+#undef CMD_WRITE_LICENSE
+#undef CMD_LICENSE_CHALLENGE
+#undef CMD_LICENSE_RESPONSE
+#undef LICENSE_MANUFACTURER_LEN
+#undef LICENSE_MODEL_LEN
+#undef LICENSE_VERSION_LEN
+#undef LICENSE_KEY_LEN
+#undef LICENSE_PASSPHRASE_MAX
+#undef LICENSE_FLAG_KEY_SET
+#undef LICENSE_FLAG_UPDATER_SET
+#undef CMD_LICENSE_KEY_PROVE
+#undef LICENSE_AUTH_LABEL
+#undef LICENSE_PROVE_LABEL
+#undef LICENSE_KEY_KEEP
+#undef LICENSE_KEY_SET
+#undef LICENSE_KEY_CLEAR
 #undef CONFIG_UID_LEN
 #undef CONFIG_STATUS_OK
 #undef CONFIG_STATUS_NONE
@@ -1212,264 +1270,776 @@ static void testDeviceAccess(const SerialProtoCallbacks *restore)
     CHECK(accessMask() == 0);
 }
 
-// The fleet identity: who the device IS. The block exists so a host can decide
-// whether an update belongs on a unit WITHOUT reading its configuration â€” the
-// one question a locked-down device still has to answer.
-//
-// Almost none of it is state any more. Five of the six fields are COMPILED INTO
-// the firmware (firmware/include/fleet_identity.h), so there is nothing here to
-// program and nothing to round-trip through flash; only config_version lives in
-// the header, and that is exercised in testConfigVersion below. What is left to
-// prove is that the two halves agree on the layout, that the answer really is
-// the built-in identity, that the fleet key never comes back out of it, and
-// that 0x30 â€” the write this revision deleted â€” is gone rather than ignored.
-//
-// One limitation, stated plainly. This executable is linked with NO -DCT_*
-// build flags (see CMakeLists.txt), so the unit it faces reports itself
-// UNPROVISIONED. Every assertion below is therefore written against
-// fleet_identity() rather than against literals, and the handful that need a
-// real fleet key are guarded on fleet_key_is_set(). They light up the
-// moment the test target is built with CT_FLEET_KEY set, and there is no other
-// honest way to reach them: no command can put an identity on a device, which
-// is the entire point of moving it into the binary.
-static void testFleetIdentityBlock(const SerialProtoCallbacks *restore)
+// (A twenty-line note about the compiled-in fleet identity used to sit here.
+// The identity is gone — see the retirement note where testFleetIdentityBlock
+// was — and the config-version half of what it described is testConfigVersion.)
+
+// ---------------------------------------------------- OTP device info
+
+// What the fake device's OTP holds for the duration of one case. Static because
+// the callback the firmware calls takes no context pointer — the real one reads
+// a fixed address, so there was never anything to thread through.
+static uint8_t g_fakeOtp[fw::kOtpInfoLen];
+
+static void fakeDeviceInfo(uint8_t *out)
 {
-    static_assert(sizeof(ct::FleetIdentityPublic) == sizeof(::FleetIdentityPublic),
-                  "GUI and firmware fleet identity records differ in size");
-    static_assert(sizeof(ct::FleetIdentityPublic) == 41,
-                  "FleetIdentityPublic must be 41 bytes: 16 + 16 + 4 + 2 + 2 + 1");
-    CHECK(ct::FLEET_VENDOR_ID_LEN == fw::kFleetVendorIdLen);
-    CHECK(ct::FLEET_MODEL_ID_LEN == fw::kFleetModelIdLen);
-    CHECK(ct::FLEET_KEY_LEN == fw::kFleetKeyLen);
-    // One key width, two uses: the fleet key is HMAC'd exactly like an access
-    // key, and ct::accessKeyBytes/accessResponse are what the host computes with.
-    CHECK(ct::FLEET_KEY_LEN == ct::ACCESS_KEY_LEN);
-    CHECK(ct::CMD_READ_FLEET_ID == fw::kCmdReadFleetId);
-    CHECK(ct::CMD_FLEET_ID_PROVE == fw::kCmdFleetIdProve);
-    // ...and the MODEL's view of the two string budgets, since
-    // FleetIdentity::clampToWire is handed these and is the only thing standing
-    // between a long vendor name and a field cut in half mid-character.
-    CHECK(ct::kFleetVendorIdBytes == fw::kFleetVendorIdLen);
-    CHECK(ct::kFleetModelIdBytes == fw::kFleetModelIdLen);
+    std::memcpy(out, g_fakeOtp, sizeof(g_fakeOtp));
+}
 
-    // Field by field through the firmware's own view of the same bytes, the way
-    // the signal and integrator records are checked in main(). sizeof alone
-    // would sail past a reordering and land the config version in flags â€” which
-    // is precisely the field that decides whether an update goes on.
+// Lay ASCII into a field and NUL-pad the rest, the way the burn tool does.
+static void otpText(int at, int len, const char *text)
+{
+    std::memset(g_fakeOtp + at, 0, size_t(len));
+    const size_t n = std::strlen(text);
+    std::memcpy(g_fakeOtp + at, text, n < size_t(len) ? n : size_t(len));
+}
+
+// Ask the real firmware for the record and parse the reply with the real host
+// parser. Everything in between — framing, COBS, the CRC, the splitter — is the
+// shipping code, which is the point: this record's whole job is to survive a
+// round trip through a device.
+static bool readOtp(ct::device_session::DeviceInfo *out)
+{
+    const auto packets = exchange(ct::CMD_GET_DEVICE_INFO, QByteArray());
+    if (packets.size() != 1 || packets[0].cmd != ct::CMD_GET_DEVICE_INFO)
+        return false;
+    if (packets[0].payload.size() != ct::OTP_INFO_LEN)
+        return false;
+    return ct::device_session::parseDeviceInfo(packets[0].payload, out);
+}
+
+static void testOtpDeviceInfo(const SerialProtoCallbacks *restore)
+{
+    // The two headers' idea of the layout, before anything depends on it.
+    CHECK(ct::CMD_GET_DEVICE_INFO == fw::kCmdGetDeviceInfo);
+    CHECK(ct::OTP_INFO_LEN == fw::kOtpInfoLen);
+    CHECK(ct::OTP_INFO_MANUFACTURER_AT == fw::kOtpManufacturerAt);
+    CHECK(ct::OTP_INFO_MANUFACTURER_LEN == fw::kOtpManufacturerLen);
+    CHECK(ct::OTP_INFO_PRODUCT_AT == fw::kOtpProductAt);
+    CHECK(ct::OTP_INFO_PRODUCT_LEN == fw::kOtpProductLen);
+    CHECK(ct::OTP_INFO_HW_VERSION_AT == fw::kOtpHwVersionAt);
+    CHECK(ct::OTP_INFO_HW_VERSION_LEN == fw::kOtpHwVersionLen);
+    CHECK(ct::OTP_INFO_SERIAL_AT == fw::kOtpSerialAt);
+    CHECK(ct::OTP_INFO_SERIAL_LEN == fw::kOtpSerialLen);
+    CHECK(ct::OTP_INFO_DATE_AT == fw::kOtpDateAt);
+    CHECK(ct::OTP_INFO_DATE_LEN == fw::kOtpDateLen);
+    // 11 double-words exactly. OTP programs 64 bits at a time, so a record that
+    // was not a multiple of 8 would have a field sharing a double-word with its
+    // neighbour — and burning one would spend the other for good.
+    CHECK(ct::OTP_INFO_LEN % 8 == 0);
+    CHECK(ct::OTP_INFO_DATE_AT + ct::OTP_INFO_DATE_LEN == ct::OTP_INFO_LEN);
+
+    SerialProtoCallbacks cb = *restore;
+    cb.device_info = fakeDeviceInfo;
+    serial_proto_init(&cb);
+
+    // ---- a fully burned part: the record from the manufacturing script
     {
-        ct::FleetIdentityPublic g{};
-        for (int i = 0; i < ct::FLEET_VENDOR_ID_LEN; ++i)
-            g.vendor_id[i] = char('A' + i);
-        for (int i = 0; i < ct::FLEET_MODEL_ID_LEN; ++i)
-            g.model_id[i] = char('a' + i);
-        g.serial_number = 0x01020304u;
-        g.config_version = 0x1234;
-        g.flags = 0x5678;
-        g.key_present = 1;
+        std::memset(g_fakeOtp, 0, sizeof(g_fakeOtp));
+        otpText(fw::kOtpManufacturerAt, fw::kOtpManufacturerLen, "Minton Performance");
+        otpText(fw::kOtpProductAt, fw::kOtpProductLen, "CAN Triple");
+        otpText(fw::kOtpHwVersionAt, fw::kOtpHwVersionLen, "1.05");
+        // 1001 big-endian: 00 00 00 00 00 00 03 E9. Read the other way round it
+        // is 0xE903000000000000, so this value tells the two byte orders apart
+        // instead of agreeing with both.
+        const uint8_t serial[8] = {0, 0, 0, 0, 0, 0, 0x03, 0xE9};
+        std::memcpy(g_fakeOtp + fw::kOtpSerialAt, serial, sizeof(serial));
+        otpText(fw::kOtpDateAt, fw::kOtpDateLen, "31082026");
 
-        ::FleetIdentityPublic f;
-        std::memcpy(&f, &g, sizeof(f));
-        CHECK(std::memcmp(f.vendor_id, g.vendor_id, fw::kFleetVendorIdLen) == 0);
-        CHECK(std::memcmp(f.model_id, g.model_id, fw::kFleetModelIdLen) == 0);
-        CHECK(f.serial_number == 0x01020304u);
-        CHECK(f.config_version == 0x1234);
-        CHECK(f.flags == 0x5678);
-        CHECK(f.key_present == 1);
-        // NUL-PADDED, not NUL-terminated: all sixteen bytes are usable, so the
-        // last one here is a character and not a terminator. A reader that used
-        // strcmp would be right by accident on short names and wrong on the one
-        // case that matters.
-        CHECK(f.vendor_id[fw::kFleetVendorIdLen - 1] == char('A' + 15));
-        CHECK(f.model_id[fw::kFleetModelIdLen - 1] == char('a' + 15));
+        ct::device_session::DeviceInfo info;
+        CHECK(readOtp(&info));
+        CHECK(info.manufacturer == QStringLiteral("Minton Performance"));
+        CHECK(info.product == QStringLiteral("CAN Triple"));
+        CHECK(info.hardwareVersion == QStringLiteral("1.05"));
+        CHECK(info.serialKnown);
+        CHECK(info.serialNumber == 1001u);
+        CHECK(info.dateText == QStringLiteral("31082026"));
+        CHECK(info.date == QDate(2026, 8, 31)); // DDMMYYYY, not MMDDYYYY
+        CHECK(!info.blank());
+        CHECK(info.raw.size() == ct::OTP_INFO_LEN);
     }
 
-    // The build-time identity this binary actually carries, and the two
-    // questions the firmware answers about it.
-    const ::FleetIdentity *built = fleet_identity();
-    const bool keySet = fleet_key_is_set();
-    const QByteArray fleetKeyBytes(reinterpret_cast<const char *>(built->fleet_key),
-                                    fw::kFleetKeyLen);
-    const ct::AccessKey fleetKey = ct::accessKeyFromBytes(fleetKeyBytes);
-    CHECK(keySet == (fleetKey != ct::kNoAccessKey));
-
-    // The one runtime field, put somewhere recognisable first â€” otherwise "did
-    // the flash header's version reach the answer?" is not a question the
-    // exchange below can be asked.
-    engine_set_config_version(0x4321);
-
-    // ---- over the wire: READ_FLEET_ID answers, and never with the key ----
+    // ---- a virgin part: never burned, every byte 0xFF
     {
-        const auto packets = exchange(ct::CMD_READ_FLEET_ID, QByteArray());
-        CHECK(packets.size() == 1);
-        if (packets.size() == 1) {
-            CHECK(packets[0].cmd == ct::CMD_READ_FLEET_ID);
-            CHECK(packets[0].payload.size() == int(sizeof(ct::FleetIdentityPublic)));
-
-            ct::FleetIdentityPublic pub{};
-            std::memcpy(&pub, packets[0].payload.constData(),
-                        qMin(size_t(packets[0].payload.size()), sizeof(pub)));
-            CHECK(std::memcmp(pub.vendor_id, built->vendor_id, fw::kFleetVendorIdLen) == 0);
-            CHECK(std::memcmp(pub.model_id, built->model_id, fw::kFleetModelIdLen) == 0);
-            CHECK(pub.serial_number == built->serial_number);
-            CHECK(pub.flags == built->flags);
-            CHECK(pub.key_present == (keySet ? 1 : 0));
-            // ...and the one field that does NOT come from the build.
-            CHECK(pub.config_version == 0x4321);
-
-            // The assertion this command exists to satisfy. A host learns that
-            // the device HOLDS a fleet key, never what it is â€” with the key,
-            // anyone could impersonate the fleet it names. Guarded, because on
-            // an unprovisioned unit the "key" is four zero bytes and a serial
-            // number of zero would make the search hit for the wrong reason.
-            if (keySet)
-                CHECK(!packets[0].payload.contains(fleetKeyBytes));
-
-            // The GUI's own parser against the bytes the firmware just emitted.
-            // Asserting the layout by hand only proves the firmware is
-            // self-consistent; this proves the two sides agree.
-            ct::device_session::FleetIdentityState parsed;
-            CHECK(ct::device_session::parseFleetIdentity(packets[0].payload, &parsed));
-            CHECK(parsed.supported);
-            CHECK(parsed.keyPresent == keySet);
-            // Never, under any circumstances, populated from a read.
-            CHECK(parsed.identity.fleetKey == ct::kNoAccessKey);
-            CHECK(parsed.identity.serialNumber == built->serial_number);
-            CHECK(parsed.identity.flags == built->flags);
-            CHECK(parsed.identity.configVersion == 0x4321);
-            // The counted fields arrive as QStrings with the padding gone: read
-            // to the first NUL or the sixteenth byte, whichever comes first.
-            CHECK(parsed.identity.vendorId
-                  == QString::fromUtf8(built->vendor_id,
-                                       int(qstrnlen(built->vendor_id, fw::kFleetVendorIdLen))));
-            CHECK(parsed.identity.modelId
-                  == QString::fromUtf8(built->model_id,
-                                       int(qstrnlen(built->model_id, fw::kFleetModelIdLen))));
-            // Host and device must agree on what "unprovisioned" means, or the
-            // uploader either refuses a legitimate update or stops checking a
-            // device it should have checked.
-            CHECK(parsed.identity.isSet() == fleet_identity_is_set());
-
-            // A short payload is refused rather than read past its end.
-            CHECK(!ct::device_session::parseFleetIdentity(packets[0].payload.left(3), &parsed));
-            CHECK(!ct::device_session::parseFleetIdentity(QByteArray(), &parsed));
-        }
+        std::memset(g_fakeOtp, 0xFF, sizeof(g_fakeOtp));
+        ct::device_session::DeviceInfo info;
+        CHECK(readOtp(&info));
+        CHECK(info.raw.size() == ct::OTP_INFO_LEN); // a failed read is blank() too
+        CHECK(info.manufacturer.isEmpty());
+        CHECK(info.product.isEmpty());
+        CHECK(info.hardwareVersion.isEmpty());
+        // NOT 0xFFFFFFFFFFFFFFFF, which is what a parser that read the field
+        // before testing it would report — and which looks like a real serial.
+        CHECK(!info.serialKnown);
+        CHECK(info.serialNumber == 0u);
+        CHECK(info.dateText.isEmpty());
+        CHECK(!info.date.isValid());
+        CHECK(info.blank());
     }
 
-    // ---- the one exchange that runs device -> host ----
-    // Reading the identity says what the device CLAIMS to be. This says it
-    // actually holds the fleet secret, which is what stops a look-alike
-    // collecting an update meant for somebody else's fleet.
+    // ---- a zeroed part: burned with nothing, every byte 0x00
     {
-        QByteArray challenge(ct::ACCESS_CHALLENGE_LEN, char(0));
-        for (int i = 0; i < challenge.size(); ++i)
-            challenge[i] = char(0x30 + i);
-
-        if (keySet) {
-            const auto packets = exchange(ct::CMD_FLEET_ID_PROVE, challenge);
-            CHECK(packets.size() == 1);
-            if (packets.size() == 1) {
-                CHECK(packets[0].cmd == ct::CMD_FLEET_ID_PROVE);
-                // The device's HMAC and ct::accessResponse are two independent
-                // implementations of one construction, over a key laid out
-                // big-endian by both. This is the only place they meet, and a
-                // disagreement here would look from either side like a fleet
-                // key somebody typed in wrong.
-                CHECK(packets[0].payload == ct::accessResponse(fleetKey, challenge));
-                CHECK(packets[0].payload != ct::accessResponse(fleetKey + 1, challenge));
-            }
-        } else {
-            // An unprovisioned unit attests to NOTHING. All-zero is "no key
-            // set", the same convention the host uses; without it a blank unit
-            // would happily answer under a key of zeroes â€” which anyone can
-            // compute â€” and pass the one check meant to catch a look-alike.
-            CHECK(fleetKey == ct::kNoAccessKey);
-            CHECK(!expectAck(ct::CMD_FLEET_ID_PROVE, challenge));
-        }
-
-        // A challenge of the wrong length is refused rather than padded into an
-        // answer the host would then believe. True whether or not a key is set.
-        CHECK(expectNack(ct::CMD_FLEET_ID_PROVE, challenge.left(4), ct::ERR_INVALID_LEN));
-        CHECK(expectNack(ct::CMD_FLEET_ID_PROVE, QByteArray(), ct::ERR_INVALID_LEN));
-        CHECK(expectNack(ct::CMD_FLEET_ID_PROVE, challenge + QByteArray(1, char(0)),
-                         ct::ERR_INVALID_LEN));
-        CHECK(ct::ERR_INVALID_LEN == fw::kErrInvalidLen);
+        std::memset(g_fakeOtp, 0, sizeof(g_fakeOtp));
+        ct::device_session::DeviceInfo info;
+        CHECK(readOtp(&info));
+        CHECK(info.raw.size() == ct::OTP_INFO_LEN); // as above: not blank by accident
+        // Zero is a plausible serial number, which is exactly why an all-zero
+        // field has to be unknown rather than 0: a ledger lookup for unit 0
+        // would find whatever the first row happens to be.
+        CHECK(!info.serialKnown);
+        CHECK(info.blank());
     }
 
-    // ---- both stay answerable behind a Send password ----
-    // The whole point of the block: deciding whether an update belongs on this
-    // unit must not require the password that guards its configuration. A
-    // customer holding a locked-down device still has to be able to take
-    // updates, and the alternative â€” handing out the Get password so the host
-    // can read the config and work it out â€” gives away far more.
+    // ---- HALF BURNED, which is the case the per-field rule exists for.
+    // Each field is a whole number of double-words and OTP programs one at a
+    // time, so a board between two provisioning stages looks exactly like this.
+    // A record-wide "is it blank" test would call this part one thing or the
+    // other, and both answers would be wrong.
     {
-        // A virgin header for the key write to land in. Setting a password now
-        // commits it in the same breath (see testAccessKeyDurability), and
-        // STM32 flash programs each doubleword once between erases.
-        engine_clear_config();
+        std::memset(g_fakeOtp, 0xFF, sizeof(g_fakeOtp));
+        otpText(fw::kOtpManufacturerAt, fw::kOtpManufacturerLen, "Minton Performance");
+        otpText(fw::kOtpProductAt, fw::kOtpProductLen, "CAN Triple");
 
-        const ct::AccessKey sendKey = ct::deriveAccessKey(QStringLiteral("send-me"));
-        ct::AccessKeyWritePayload set{};
-        set.function = ct::ACCESS_FN_SEND;
-        std::memcpy(set.key, ct::accessKeyBytes(sendKey).constData(), ct::ACCESS_KEY_LEN);
-        CHECK(expectAck(ct::CMD_WRITE_ACCESS_KEYS,
-                        QByteArray(reinterpret_cast<const char *>(&set), sizeof(set))));
-        serial_proto_init(nullptr); // a fresh session has proved nothing
-
-        // The lock really is on â€” without this the two lines after it would
-        // pass on a device that simply had no password.
-        CHECK(expectNack(ct::CMD_WRITE_MSG_CFG, QByteArray(4, char(0)), ct::ERR_LOCKED));
-        CHECK(exchange(ct::CMD_READ_FLEET_ID, QByteArray()).size() == 1);
-        CHECK(exchange(ct::CMD_FLEET_ID_PROVE,
-                       QByteArray(ct::ACCESS_CHALLENGE_LEN, char(0x22)))
-                  .size()
-              == 1);
+        ct::device_session::DeviceInfo info;
+        CHECK(readOtp(&info));
+        CHECK(info.manufacturer == QStringLiteral("Minton Performance"));
+        CHECK(info.product == QStringLiteral("CAN Triple"));
+        CHECK(info.hardwareVersion.isEmpty()); // still virgin
+        CHECK(!info.serialKnown);
+        CHECK(info.dateText.isEmpty());
+        CHECK(!info.blank()); // something IS burned
     }
 
-    // ---- there is no way to WRITE an identity ----
-    // The identity used to be runtime state a host could program, on 0x30. It is
-    // compiled into the firmware now â€” re-badging a unit means building and
-    // flashing it â€” and 0x30 has since been reused for CMD_READ_CAN_SETUP.
-    //
-    // So the thing to pin is no longer "0x30 is unknown", which would now be
-    // false; it is that NOTHING accepts a fleet identity as a payload. Offering
-    // one to the command that occupies the old slot must not be mistaken for
-    // programming an identity: READ_CAN_SETUP ignores its payload entirely and
-    // answers the bus setup, which is a wrong answer to the wrong question
-    // rather than a write.
-    CHECK(ct::ERR_INVALID_CMD == fw::kErrInvalidCmd);
+    // ---- a date that is not a date. Kept verbatim rather than coerced: a
+    // mis-burned field cannot be corrected, so showing what it really says is
+    // the only honest option.
     {
-        const auto reply =
-            exchange(quint8(0x30), QByteArray(int(sizeof(ct::FleetIdentityPublic)), char(0x5A)));
-        CHECK(reply.size() == 1);
-        CHECK(reply[0].cmd == ct::CMD_READ_CAN_SETUP);
-        CHECK(reply[0].payload.size() == 3 * int(sizeof(ct::ControlCanPayload)));
-        // And the identity is untouched by having been offered. This build sets
-        // no CT_* flags, so it must still read as unprovisioned.
-        const QByteArray zeroed(ct::FLEET_VENDOR_ID_LEN, char(0));
-        CHECK(std::memcmp(fleet_identity()->vendor_id, zeroed.constData(),
-                          size_t(ct::FLEET_VENDOR_ID_LEN))
-              == 0);
-        CHECK(!fleet_identity_is_set());
+        std::memset(g_fakeOtp, 0, sizeof(g_fakeOtp));
+        otpText(fw::kOtpDateAt, fw::kOtpDateLen, "31132026"); // month 13
+        ct::device_session::DeviceInfo info;
+        CHECK(readOtp(&info));
+        CHECK(info.dateText == QStringLiteral("31132026"));
+        CHECK(!info.date.isValid());
+        CHECK(!info.blank());
     }
 
-    // Leave nothing behind: no keys, no version, an erased store and the real
-    // callbacks, so the tests after this one talk to a plain device.
-    engine_set_access_keys(nullptr);
-    engine_set_config_version(0);
-    flashErase();
+    // ---- a serial that is only PARTLY 0xFF is a real serial, not unknown.
+    // The unknown rule is about a whole field; a high byte of 0xFF is data.
+    {
+        std::memset(g_fakeOtp, 0, sizeof(g_fakeOtp));
+        const uint8_t serial[8] = {0xFF, 0, 0, 0, 0, 0, 0, 0x01};
+        std::memcpy(g_fakeOtp + fw::kOtpSerialAt, serial, sizeof(serial));
+        ct::device_session::DeviceInfo info;
+        CHECK(readOtp(&info));
+        CHECK(info.serialKnown);
+        CHECK(info.serialNumber == 0xFF00000000000001ull);
+    }
+
+    // ---- the command is ungated: a device that demands a Get password for its
+    // configuration still answers who built it. An RMA cannot be conditioned on
+    // holding the password of the configuration being returned as faulty.
+    {
+        std::memset(g_fakeOtp, 0, sizeof(g_fakeOtp));
+        otpText(fw::kOtpProductAt, fw::kOtpProductLen, "CAN Triple");
+        AccessKeyRecord keys{};
+        keys.set_mask = uint8_t(fw::kAccessMaskGet | fw::kAccessMaskSend);
+        engine_set_access_keys(&keys);
+
+        ct::device_session::DeviceInfo info;
+        CHECK(readOtp(&info));
+        CHECK(info.product == QStringLiteral("CAN Triple"));
+
+        AccessKeyRecord none{};
+        engine_set_access_keys(&none);
+    }
+
+    // ---- firmware that predates the command reports "not supported" rather
+    // than an error. The record is still in the silicon; only the way to ask for
+    // it is missing, and a caller must be able to say so.
+    {
+        SerialProtoCallbacks noInfo = *restore;
+        noInfo.device_info = nullptr;
+        serial_proto_init(&noInfo);
+        // A NULL callback is not the same as a missing command: this firmware
+        // answers, with virgin OTP, which reads as an unburned part.
+        ct::device_session::DeviceInfo info;
+        CHECK(readOtp(&info));
+        CHECK(info.raw.size() == ct::OTP_INFO_LEN);
+        CHECK(info.blank());
+    }
+
+    std::printf("  OTP device info             : Minton Performance / CAN Triple / 1.05 / "
+                "serial 1001 / 31 Aug 2026; virgin and zeroed both Unknown\n");
     serial_proto_init(restore);
 }
 
-// The configuration's version number â€” the one part of the fleet identity that
-// is NOT compiled in, because it has to move every time a configuration is
-// released. It rides CMD_SAVE_TO_FLASH rather than having a command of its own
-// so the two cannot separate: a version that landed without its configuration,
-// or a configuration that landed without its version, would each make the
-// host's "is this update newer?" check lie, in opposite directions.
+// ------------------------------------------------------- firmware licence
+
+// The two licence pages, modelled in RAM. NOR semantics matter here: a program
+// can only clear bits, so this driver refuses to turn a 0 back into a 1 the way
+// the silicon does. Without that, a bug that programmed a page twice without an
+// erase would pass in the test and fail on the bench.
 //
-// Note the erases scattered through this. They are not housekeeping â€” STM32
-// flash programs each doubleword once between erases, so a second commit needs
-// a virgin header, exactly as on the device where a Send always follows a CLEAR.
+// g_licFailProgram is the torn-write lever: when set, the next program fails
+// after touching nothing, which is what a power cut between erase and program
+// looks like to the store. The atomicity test below leans on it.
+static uint8_t g_licPage[LICENSE_STORE_PAGES][LICENSE_STORE_SIZE];
+static bool g_licFailProgram = false;
+
+static bool licTestErase(uint8_t page)
+{
+    if (page >= LICENSE_STORE_PAGES)
+        return false;
+    std::memset(g_licPage[page], 0xFF, sizeof(g_licPage[page]));
+    return true;
+}
+
+static bool licTestProgram(uint8_t page, uint32_t offset, const uint8_t *data, uint32_t length)
+{
+    if (page >= LICENSE_STORE_PAGES)
+        return false;
+    if ((offset & 7u) || (length & 7u) || offset + length > sizeof(g_licPage[page]))
+        return false;
+    if (g_licFailProgram) {
+        g_licFailProgram = false;
+        return false;
+    }
+    for (uint32_t i = 0; i < length; ++i) {
+        // A doubleword may be programmed once per erase. Programming a bit that
+        // is already 0 back to 1 is what real flash refuses.
+        if ((g_licPage[page][offset + i] & data[i]) != data[i])
+            return false;
+        g_licPage[page][offset + i] = data[i];
+    }
+    return true;
+}
+
+static const uint8_t *licTestData(uint8_t page)
+{
+    return page < LICENSE_STORE_PAGES ? g_licPage[page] : nullptr;
+}
+
+// Both pages to virgin: what a board fresh off the line holds.
+static void licTestWipe()
+{
+    for (uint8_t p = 0; p < LICENSE_STORE_PAGES; ++p)
+        licTestErase(p);
+    g_licFailProgram = false;
+}
+
+// Which page holds the live record, or -1. Mirrors the store's own tie-break so
+// a test can reach the bytes of the record it is about to damage.
+static int licTestLivePage()
+{
+    int live = -1;
+    uint32_t best = 0;
+    for (uint8_t p = 0; p < LICENSE_STORE_PAGES; ++p) {
+        const LicenseRecord *r = reinterpret_cast<const LicenseRecord *>(g_licPage[p]);
+        if (r->magic == LICENSE_STORE_MAGIC && r->version == LICENSE_STORE_VERSION
+            && (live < 0 || r->sequence > best)) {
+            live = p;
+            best = r->sequence;
+        }
+    }
+    return live;
+}
+
+// Build the wire payload for a write, the way the GUI does.
+static QByteArray licenseWritePayload(const QString &manufacturer, const QString &model,
+                                      const QString &version, quint8 keyAction = 0,
+                                      const QByteArray &key = {}, quint8 updaterAction = 0,
+                                      const QByteArray &updaterKey = {})
+{
+    QByteArray payload(ct::LICENSE_MANUFACTURER_LEN + ct::LICENSE_MODEL_LEN
+                           + ct::LICENSE_VERSION_LEN + 2 * (1 + ct::LICENSE_KEY_LEN),
+                       '\0');
+    const auto put = [&payload](int at, int len, const QString &text) {
+        const QByteArray utf8 = text.toUtf8().left(len);
+        std::memcpy(payload.data() + at, utf8.constData(), size_t(utf8.size()));
+    };
+    int at = 0;
+    put(at, ct::LICENSE_MANUFACTURER_LEN, manufacturer);
+    at += ct::LICENSE_MANUFACTURER_LEN;
+    put(at, ct::LICENSE_MODEL_LEN, model);
+    at += ct::LICENSE_MODEL_LEN;
+    put(at, ct::LICENSE_VERSION_LEN, version);
+    at += ct::LICENSE_VERSION_LEN;
+    const auto putSecret = [&](quint8 action, const QByteArray &secret) {
+        payload[at++] = char(action);
+        if (!secret.isEmpty())
+            std::memcpy(payload.data() + at, secret.constData(),
+                        size_t(qMin(secret.size(), qsizetype(ct::LICENSE_KEY_LEN))));
+        at += ct::LICENSE_KEY_LEN;
+    };
+    putSecret(keyAction, key);
+    putSecret(updaterAction, updaterKey);
+    return payload;
+}
+
+static bool readLicenseState(ct::device_session::LicenseState *out)
+{
+    const auto packets = exchange(ct::CMD_READ_LICENSE, QByteArray());
+    if (packets.size() != 1 || packets[0].cmd != ct::CMD_READ_LICENSE)
+        return false;
+    return ct::device_session::parseLicense(packets[0].payload, out);
+}
+
+// Prove a licence secret the way proveLicenseSecret() does: fetch the device's
+// nonce, HMAC it under the secret with the auth label. Either secret goes in;
+// the device decides what it bought.
+static bool proveUpdaterPassword(const QByteArray &key)
+{
+    const auto challenge = exchange(ct::CMD_LICENSE_CHALLENGE, QByteArray());
+    if (challenge.size() != 1 || challenge[0].cmd != ct::CMD_LICENSE_CHALLENGE)
+        return false;
+    const QByteArray answer = ct::licenseAuthResponse(key, challenge[0].payload);
+    if (answer.isEmpty())
+        return false;
+    const auto reply = exchange(ct::CMD_LICENSE_RESPONSE, answer);
+    return reply.size() == 1 && reply[0].cmd == ct::CMD_ACK;
+}
+
+static void testFirmwareLicense(const SerialProtoCallbacks *restore)
+{
+    // The two headers' widths, before anything depends on them.
+    CHECK(ct::CMD_READ_LICENSE == fw::kCmdReadLicense);
+    CHECK(ct::CMD_WRITE_LICENSE == fw::kCmdWriteLicense);
+    CHECK(ct::CMD_LICENSE_CHALLENGE == fw::kCmdLicenseChallenge);
+    CHECK(ct::CMD_LICENSE_RESPONSE == fw::kCmdLicenseResponse);
+    CHECK(ct::LICENSE_MANUFACTURER_LEN == fw::kLicenseManufacturerLen);
+    CHECK(ct::LICENSE_MODEL_LEN == fw::kLicenseModelLen);
+    CHECK(ct::LICENSE_VERSION_LEN == fw::kLicenseVersionLen);
+    CHECK(ct::LICENSE_KEY_LEN == fw::kLicenseKeyLen);
+    CHECK(ct::LICENSE_FLAG_KEY_SET == fw::kLicenseFlagKeySet);
+    CHECK(ct::LICENSE_KEY_KEEP == fw::kLicenseKeyKeep);
+    CHECK(ct::LICENSE_KEY_SET == fw::kLicenseKeySet);
+    CHECK(ct::LICENSE_KEY_CLEAR == fw::kLicenseKeyClear);
+    // The host's derived key must be exactly what the device stores, or every
+    // proof fails for a reason no error message would explain.
+    CHECK(ct::kLicenseKeyBytes == ct::LICENSE_KEY_LEN);
+    // ...and the domain-separation labels byte for byte, for the same reason.
+    CHECK(std::strcmp(ct::kLicenseAuthLabel, fw::kLicenseAuthLabel) == 0);
+    CHECK(std::strcmp(ct::kLicenseProveLabel, fw::kLicenseProveLabel) == 0);
+    CHECK(std::strcmp(fw::kLicenseAuthLabel, fw::kLicenseProveLabel) != 0);
+
+    static const LicenseStoreDriver licDriver = {
+        licTestErase,
+        licTestProgram,
+        licTestData,
+    };
+    license_store_init(&licDriver);
+    licTestWipe(); // virgin pages: nobody has issued anything
+    serial_proto_init(restore);
+
+    // ---- an unlicensed unit answers, rather than refusing
+    {
+        ct::device_session::LicenseState state;
+        CHECK(readLicenseState(&state));
+        CHECK(state.blank());
+        CHECK(!state.keySet);
+    }
+
+    // ---- a first write is accepted with no proof at all. Trust-on-first-use,
+    // exactly as a blank device takes its first access password.
+    {
+        const auto packets = exchange(
+            ct::CMD_WRITE_LICENSE,
+            licenseWritePayload(QStringLiteral("Minton Performance"),
+                                QStringLiteral("CAN Triple TD"), QStringLiteral("1.05"),
+                                ct::LICENSE_KEY_KEEP));
+        CHECK(packets.size() == 1 && packets[0].cmd == ct::CMD_ACK);
+
+        ct::device_session::LicenseState state;
+        CHECK(readLicenseState(&state));
+        CHECK(state.manufacturer == QStringLiteral("Minton Performance"));
+        CHECK(state.model == QStringLiteral("CAN Triple TD"));
+        CHECK(state.firmwareVersion == QStringLiteral("1.05"));
+        CHECK(!state.keySet); // strings without a key
+        CHECK(!state.blank());
+    }
+
+    // ---- issuing a FIRMWARE KEY alone. It is a CLAIM, not a gate: setting it
+    // must leave the record freely writable, which is the distinction the whole
+    // two-secret split exists for and the one easiest to implement backwards.
+    const QByteArray key = ct::deriveLicenseKey(QStringLiteral("correct horse battery"));
+    const QByteArray updater = ct::deriveLicenseKey(QStringLiteral("updater pass phrase"));
+    CHECK(key.size() == ct::LICENSE_KEY_LEN);
+    CHECK(key != updater); // different phrases must not collide
+    {
+        const auto packets =
+            exchange(ct::CMD_WRITE_LICENSE,
+                     licenseWritePayload(QStringLiteral("Minton Performance"),
+                                         QStringLiteral("CAN Triple TD"),
+                                         QStringLiteral("1.05"), ct::LICENSE_KEY_SET, key));
+        CHECK(packets.size() == 1 && packets[0].cmd == ct::CMD_ACK);
+
+        ct::device_session::LicenseState state;
+        CHECK(readLicenseState(&state));
+        CHECK(state.keySet);
+        CHECK(!state.updaterSet);
+
+        // STILL WRITABLE with no proof at all. A Firmware Key authorises nothing.
+        const auto again =
+            exchange(ct::CMD_WRITE_LICENSE,
+                     licenseWritePayload(QStringLiteral("Minton Performance"),
+                                         QStringLiteral("CAN Triple TD"),
+                                         QStringLiteral("1.05a")));
+        CHECK(again.size() == 1 && again[0].cmd == ct::CMD_ACK);
+    }
+
+    // ---- the device proves the Firmware Key against a nonce the HOST picks.
+    // This is the only use a key nobody may read can have.
+    {
+        QByteArray challenge(ct::kAccessChallengeBytes, '\0');
+        for (int i = 0; i < challenge.size(); ++i)
+            challenge[i] = char(0x40 + i);
+        const auto packets = exchange(ct::CMD_LICENSE_KEY_PROVE, challenge);
+        CHECK(packets.size() == 1 && packets[0].cmd == ct::CMD_LICENSE_KEY_PROVE);
+        CHECK(packets[0].payload == ct::licenseProveExpected(key, challenge));
+        // And a DIFFERENT key does not match the same answer, or the check
+        // above would pass for any key at all.
+        CHECK(packets[0].payload != ct::licenseProveExpected(updater, challenge));
+        // Nor does the OTHER DIRECTION's computation under the right key. This
+        // is the property the oracle attack below depends on being false.
+        CHECK(packets[0].payload != ct::licenseAuthResponse(key, challenge));
+    }
+
+    // ---- now the GATE
+    {
+        const auto packets = exchange(
+            ct::CMD_WRITE_LICENSE,
+            licenseWritePayload(QStringLiteral("Minton Performance"),
+                                QStringLiteral("CAN Triple TD"), QStringLiteral("1.05"),
+                                ct::LICENSE_KEY_KEEP, {}, ct::LICENSE_KEY_SET, updater));
+        CHECK(packets.size() == 1 && packets[0].cmd == ct::CMD_ACK);
+
+        ct::device_session::LicenseState state;
+        CHECK(readLicenseState(&state));
+        CHECK(state.updaterSet);
+        CHECK(state.keySet); // KEEP left the Firmware Key alone
+    }
+
+    // ---- NEITHER SECRET EVER COMES BACK. The whole point of the design, so it
+    // is asserted against the raw bytes rather than the parsed struct: a parser
+    // that dropped a key would hide a device that sent one.
+    {
+        const auto packets = exchange(ct::CMD_READ_LICENSE, QByteArray());
+        CHECK(packets.size() == 1);
+        const QByteArray &reply = packets[0].payload;
+        CHECK(reply.size() == ct::LICENSE_MANUFACTURER_LEN + ct::LICENSE_MODEL_LEN
+                                  + ct::LICENSE_VERSION_LEN + 2);
+        CHECK(!reply.contains(key));
+        CHECK(!reply.contains(updater));
+    }
+
+    // ---- with a PASSWORD set, a write without proof is refused
+    {
+        const auto packets = exchange(
+            ct::CMD_WRITE_LICENSE,
+            licenseWritePayload(QStringLiteral("Somebody Else"), QStringLiteral("Their Model"),
+                                QStringLiteral("9.99"), ct::LICENSE_KEY_KEEP));
+        CHECK(packets.size() == 1 && packets[0].cmd == ct::CMD_NACK);
+
+        ct::device_session::LicenseState state;
+        CHECK(readLicenseState(&state));
+        CHECK(state.manufacturer == QStringLiteral("Minton Performance")); // unchanged
+    }
+
+    // ---- a WRONG password does not authorise it.
+    //
+    // The FIRMWARE KEY is deliberately NOT tested as a wrong answer here, and
+    // that changed: it used to be, on the rule that the two secrets were not
+    // interchangeable. They are now, in one direction \u2014 the key is a master key
+    // and opens everything the password opens, plus the access passwords. What
+    // still must not open the gate is a phrase that is neither.
+    {
+        CHECK(!proveUpdaterPassword(ct::deriveLicenseKey(QStringLiteral("wrong phrase"))));
+        const auto packets = exchange(
+            ct::CMD_WRITE_LICENSE,
+            licenseWritePayload(QStringLiteral("Somebody Else"), QStringLiteral("Their Model"),
+                                QStringLiteral("9.99"), ct::LICENSE_KEY_KEEP));
+        CHECK(packets.size() == 1 && packets[0].cmd == ct::CMD_NACK);
+    }
+
+    // ---- the right password authorises it, and KEEP leaves both secrets alone
+    {
+        CHECK(proveUpdaterPassword(updater));
+        const auto packets =
+            exchange(ct::CMD_WRITE_LICENSE,
+                     licenseWritePayload(QStringLiteral("Minton Performance"),
+                                         QStringLiteral("CAN Triple END"),
+                                         QStringLiteral("1.06"), ct::LICENSE_KEY_KEEP));
+        CHECK(packets.size() == 1 && packets[0].cmd == ct::CMD_ACK);
+
+        ct::device_session::LicenseState state;
+        CHECK(readLicenseState(&state));
+        CHECK(state.model == QStringLiteral("CAN Triple END"));
+        CHECK(state.firmwareVersion == QStringLiteral("1.06"));
+        // KEEP is what makes editing a model name bearable: BOTH secrets
+        // survive, and the same passphrases still work.
+        CHECK(state.keySet);
+        CHECK(state.updaterSet);
+        CHECK(proveUpdaterPassword(updater));
+    }
+
+    // ---- a nonce is one-shot: replaying a good answer does not re-authorise
+    {
+        const auto challenge = exchange(ct::CMD_LICENSE_CHALLENGE, QByteArray());
+        CHECK(challenge.size() == 1);
+        const QByteArray answer = ct::licenseAuthResponse(updater, challenge[0].payload);
+        CHECK(exchange(ct::CMD_LICENSE_RESPONSE, answer)[0].cmd == ct::CMD_ACK);
+        // Same answer again, against a nonce that has been consumed.
+        CHECK(exchange(ct::CMD_LICENSE_RESPONSE, answer)[0].cmd == ct::CMD_NACK);
+    }
+
+    // ---- clearing the password, which needs the password
+    {
+        CHECK(proveUpdaterPassword(updater));
+        const auto packets = exchange(
+            ct::CMD_WRITE_LICENSE,
+            licenseWritePayload(QStringLiteral("Minton Performance"),
+                                QStringLiteral("CAN Triple END"), QStringLiteral("1.06"),
+                                ct::LICENSE_KEY_KEEP, {}, ct::LICENSE_KEY_CLEAR));
+        CHECK(packets.size() == 1 && packets[0].cmd == ct::CMD_ACK);
+
+        ct::device_session::LicenseState state;
+        CHECK(readLicenseState(&state));
+        CHECK(!state.updaterSet);
+        CHECK(state.keySet);                                    // the claim survives
+        CHECK(state.model == QStringLiteral("CAN Triple END")); // and so do the strings
+        // Ungated again, which is the point of clearing it.
+        CHECK(exchange(ct::CMD_WRITE_LICENSE,
+                       licenseWritePayload(QStringLiteral("Anyone"), QStringLiteral("At All"),
+                                           QStringLiteral("2.0")))[0]
+                  .cmd
+              == ct::CMD_ACK);
+    }
+
+    // ---- A TORN WRITE KEEPS THE OLD RECORD. This property inverted when the
+    // store went to two pages: it used to pin that a power cut mid-write left an
+    // unlicensed unit, and now it pins that it does not — because an unlicensed
+    // unit is one anyone may license, and the key is the sole install gate.
+    {
+        licTestWipe();
+        CHECK(exchange(ct::CMD_WRITE_LICENSE,
+                       licenseWritePayload(QStringLiteral("Before"), QStringLiteral("Torn"),
+                                           QStringLiteral("1.0"), ct::LICENSE_KEY_SET, key))[0]
+                  .cmd
+              == ct::CMD_ACK);
+        const int firstPage = licTestLivePage();
+        CHECK(firstPage >= 0);
+
+        // The next program fails after touching nothing — the erase of the OTHER
+        // page has happened, the record has not landed.
+        g_licFailProgram = true;
+        CHECK(exchange(ct::CMD_WRITE_LICENSE,
+                       licenseWritePayload(QStringLiteral("After"), QStringLiteral("Torn"),
+                                           QStringLiteral("2.0")))[0]
+                  .cmd
+              == ct::CMD_NACK);
+
+        ct::device_session::LicenseState state;
+        CHECK(readLicenseState(&state));
+        CHECK(!state.blank());
+        CHECK(state.manufacturer == QStringLiteral("Before")); // the old record, intact
+        CHECK(state.keySet);                                    // key included
+        CHECK(licTestLivePage() == firstPage);                  // and on its original page
+
+        // A successful write afterwards lands on the OTHER page and wins.
+        CHECK(exchange(ct::CMD_WRITE_LICENSE,
+                       licenseWritePayload(QStringLiteral("After"), QStringLiteral("Torn"),
+                                           QStringLiteral("2.0")))[0]
+                  .cmd
+              == ct::CMD_ACK);
+        CHECK(readLicenseState(&state));
+        CHECK(state.manufacturer == QStringLiteral("After"));
+        CHECK(licTestLivePage() == 1 - firstPage);
+        // ...and the superseded page was reclaimed, so a third write has
+        // somewhere to go: a store that only ever filled pages would jam.
+        const LicenseRecord *stale =
+            reinterpret_cast<const LicenseRecord *>(g_licPage[firstPage]);
+        CHECK(stale->magic != LICENSE_STORE_MAGIC);
+    }
+
+    // ---- both pages valid picks the higher sequence. This is the instant
+    // between a new record completing and the old page being erased, frozen —
+    // and it must resolve to the NEW record, not the first page scanned.
+    {
+        licTestWipe();
+        CHECK(exchange(ct::CMD_WRITE_LICENSE,
+                       licenseWritePayload(QStringLiteral("Older"), QStringLiteral("Seq"),
+                                           QStringLiteral("1.0")))[0]
+                  .cmd
+              == ct::CMD_ACK);
+        const int p0 = licTestLivePage();
+        // Snapshot the old page, write again, then put the old page BACK so
+        // both are valid at once.
+        uint8_t snapshot[LICENSE_STORE_SIZE];
+        std::memcpy(snapshot, g_licPage[p0], sizeof(snapshot));
+        CHECK(exchange(ct::CMD_WRITE_LICENSE,
+                       licenseWritePayload(QStringLiteral("Newer"), QStringLiteral("Seq"),
+                                           QStringLiteral("2.0")))[0]
+                  .cmd
+              == ct::CMD_ACK);
+        std::memcpy(g_licPage[p0], snapshot, sizeof(snapshot));
+        ct::device_session::LicenseState state;
+        CHECK(readLicenseState(&state));
+        CHECK(state.manufacturer == QStringLiteral("Newer"));
+    }
+
+    // ---- and a record whose CRC does not match is refused rather than shown.
+    {
+        licTestWipe();
+        CHECK(exchange(ct::CMD_WRITE_LICENSE,
+                       licenseWritePayload(QStringLiteral("Acme"), QStringLiteral("Model"),
+                                           QStringLiteral("1.0")))[0]
+                  .cmd
+              == ct::CMD_ACK);
+        ct::device_session::LicenseState good;
+        CHECK(readLicenseState(&good));
+        CHECK(!good.blank());
+        // Flip a bit in the manufacturer without touching the CRC. Programming
+        // can only clear bits, so this is a change real flash could suffer.
+        // Offset 12: past magic, version, flags and the new sequence field.
+        const int live = licTestLivePage();
+        CHECK(live >= 0);
+        g_licPage[live][12] &= uint8_t(~0x01u);
+        ct::device_session::LicenseState damaged;
+        CHECK(readLicenseState(&damaged));
+        CHECK(damaged.blank());
+    }
+
+    // ---- THE MASTER KEY. Proving the Firmware Key lifts the access-password
+    // gate entirely, so a secure package can re-provision a unit whose Send and
+    // Get passwords nobody present knows. This is the most consequential grant
+    // in the protocol and every branch of it is pinned here.
+    {
+        // Reissue both secrets — the clearing case above left no password.
+        CHECK(exchange(ct::CMD_WRITE_LICENSE,
+                       licenseWritePayload(QStringLiteral("Minton Performance"),
+                                           QStringLiteral("CAN Triple END"),
+                                           QStringLiteral("1.06"), ct::LICENSE_KEY_SET, key,
+                                           ct::LICENSE_KEY_SET, updater))[0]
+                  .cmd
+              == ct::CMD_ACK);
+
+        // A device locked on Send and Get, by somebody who is not here.
+        AccessKeyRecord locked{};
+        locked.set_mask = uint8_t(fw::kAccessMaskSend | fw::kAccessMaskGet);
+        for (int fn = 0; fn < ct::ACCESS_FN_COUNT; ++fn)
+            for (int b = 0; b < ct::ACCESS_KEY_LEN; ++b)
+                locked.keys[fn][b] = uint8_t(0x70 + b);
+        engine_set_access_keys(&locked);
+
+        // Build the write that re-keys Send. It must be REFUSED from a fresh
+        // session, or the gate this test is about does not exist.
+        ct::AccessKeyWritePayload rekey{};
+        rekey.function = ct::ACCESS_FN_SEND;
+        rekey.slot = 1;
+        rekey.clear = 0;
+        for (int b = 0; b < ct::ACCESS_KEY_LEN; ++b)
+            rekey.key[b] = uint8_t(0xC0 + b);
+        const QByteArray rekeyPayload(reinterpret_cast<const char *>(&rekey), sizeof(rekey));
+
+        serial_proto_init(restore); // a fresh session has proved nothing
+        CHECK(exchange(ct::CMD_WRITE_ACCESS_KEYS, rekeyPayload)[0].cmd == ct::CMD_NACK);
+
+        // The UPDATER PASSWORD does not lift it. It gates the licence record and
+        // nothing else — if this ever starts passing, the two secrets have
+        // collapsed into one and the distinction is gone.
+        CHECK(proveUpdaterPassword(updater));
+        CHECK(exchange(ct::CMD_WRITE_ACCESS_KEYS, rekeyPayload)[0].cmd == ct::CMD_NACK);
+
+        // The FIRMWARE KEY does lift it, through the same challenge.
+        serial_proto_init(restore);
+        CHECK(proveUpdaterPassword(key)); // same exchange, the other secret
+        CHECK(exchange(ct::CMD_WRITE_ACCESS_KEYS, rekeyPayload)[0].cmd == ct::CMD_ACK);
+
+        // ...and it covers reads too, which is the other half of accessBlocked().
+        CHECK(exchange(ct::CMD_READ_CONFIG_NAME, QByteArray())[0].cmd
+              == ct::CMD_READ_CONFIG_NAME);
+
+        // ...AND IT ENDS WITH THE COMMIT. The grant exists so a package can set
+        // passwords as it installs; the Save-to-Flash that finishes the install
+        // is where it must lapse, or the installer's still-connected laptop
+        // would hold master authority over the unit until somebody unplugged
+        // it.
+        //
+        // Observed through GET, not Send, and the choice is the whole test.
+        // This session re-keyed Send above, and a session that sets a password
+        // holds it — so Send stays open to it with or without the master grant,
+        // and a check on Send would pass for the wrong reason. Get was locked
+        // by "somebody else" (the `locked` record) and this session never
+        // touched it: the ONLY thing opening it was the master grant, so its
+        // refusal after the commit is the grant lapsing and nothing else.
+        CHECK(exchange(ct::CMD_SAVE_TO_FLASH, QByteArray())[0].cmd == ct::CMD_ACK);
+        CHECK(exchange(ct::CMD_READ_CONFIG_NAME, QByteArray())[0].cmd == ct::CMD_NACK);
+        // Proving the key again restores it — the lapse is per install, not
+        // per session.
+        CHECK(proveUpdaterPassword(key));
+        CHECK(exchange(ct::CMD_READ_CONFIG_NAME, QByteArray())[0].cmd
+              == ct::CMD_READ_CONFIG_NAME);
+
+        // THE ORACLE. Found in review, and the single most important case in
+        // this file: the device must not be usable to sign its own challenge.
+        //
+        // Without domain separation, KEY_PROVE answered HMAC(key, X) for any
+        // host-chosen X, and LICENSE_RESPONSE accepted HMAC(key, N) for the
+        // device's own nonce N. So: ask for N, hand N to KEY_PROVE, replay the
+        // answer as the RESPONSE — master-key authority over any licensed unit,
+        // with a cable and no secret at all. This sequence is that attack, and
+        // it must end in a NACK.
+        {
+            serial_proto_init(restore);
+            engine_set_access_keys(&locked);
+            const auto challenge = exchange(ct::CMD_LICENSE_CHALLENGE, QByteArray());
+            CHECK(challenge.size() == 1);
+            const QByteArray nonce = challenge[0].payload;
+            // Step 2: the device signs the nonce it just issued.
+            const auto oracle = exchange(ct::CMD_LICENSE_KEY_PROVE, nonce);
+            CHECK(oracle.size() == 1 && oracle[0].cmd == ct::CMD_LICENSE_KEY_PROVE);
+            // Step 3: replay that signature as the proof.
+            const auto reply = exchange(ct::CMD_LICENSE_RESPONSE, oracle[0].payload);
+            CHECK(reply.size() == 1 && reply[0].cmd == ct::CMD_NACK);
+            // ...and, decisively, nothing was granted.
+            CHECK(exchange(ct::CMD_WRITE_ACCESS_KEYS, rekeyPayload)[0].cmd == ct::CMD_NACK);
+        }
+
+        // A UNIT WITH NO FIRMWARE KEY GRANTS NOTHING. Otherwise the "nothing to
+        // prove" ACK on an unlicensed unit would hand every such device in the
+        // world to anyone who asked for it.
+        licTestWipe();
+        serial_proto_init(restore);
+        engine_set_access_keys(&locked);
+        const auto challenge = exchange(ct::CMD_LICENSE_CHALLENGE, QByteArray());
+        CHECK(challenge.size() == 1);
+        CHECK(exchange(ct::CMD_LICENSE_RESPONSE,
+                       ct::licenseAuthResponse(key, challenge[0].payload))[0]
+                  .cmd
+              == ct::CMD_ACK); // nothing to prove, so the proof "succeeds"...
+        // ...and confers no authority whatsoever.
+        CHECK(exchange(ct::CMD_WRITE_ACCESS_KEYS, rekeyPayload)[0].cmd == ct::CMD_NACK);
+
+        AccessKeyRecord none{};
+        engine_set_access_keys(&none);
+    }
+
+    std::printf("  firmware licence            : key claims, password gates; neither read "
+                "back; nonce one-shot\n");
+    std::printf("  licence master key          : the Firmware Key overwrites access passwords; "
+                "the updater password does not\n");
+    std::printf("  licence ping-pong           : a torn write keeps the old record; higher "
+                "sequence wins\n");
+    licTestWipe();
+    serial_proto_init(restore);
+}
+
+// testFleetIdentityBlock is GONE with the block it tested: the compiled-in
+// vendor/model/serial/key and the two commands that read and proved them. What
+// it guarded that still matters — a version number surviving a commit and a
+// reload — is testConfigVersion, directly below, which now also reads the
+// number back over the wire the way Device Status does.
+
 static void testConfigVersion(const SerialProtoCallbacks *restore)
 {
     CHECK(ct::CMD_SAVE_TO_FLASH == fw::kCmdSaveToFlash);
@@ -1494,6 +2064,18 @@ static void testConfigVersion(const SerialProtoCallbacks *restore)
         CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, &stored, nullptr, nullptr, nullptr));
         CHECK(stored == 1337);
         CHECK(flash_store_config_status() == ct::CONFIG_STATUS_OK);
+    }
+    // ...and the wire reports the same number, little-endian, through the
+    // command Device Status uses. This is the read that replaced the fleet
+    // identity reply, so it is checked end to end rather than assumed.
+    {
+        CHECK(ct::CMD_READ_CONFIG_VERSION == fw::kCmdReadConfigVersion);
+        const auto packets = exchange(ct::CMD_READ_CONFIG_VERSION, QByteArray());
+        CHECK(packets.size() == 1 && packets[0].cmd == ct::CMD_READ_CONFIG_VERSION);
+        CHECK(packets[0].payload == version);
+        ct::device_session::ConfigVersionState state;
+        CHECK(ct::device_session::parseConfigVersion(packets[0].payload, &state));
+        CHECK(state.version == 1337);
     }
     // ...and it comes back with the image. Without that a device could not
     // answer "which revision am I running?" after a power cycle, which is the
@@ -4396,7 +4978,7 @@ static void testReadResponseMatching(const SerialProtoCallbacks *restore)
         {ct::CMD_GET_DEVICE_ID, QByteArray(), "GET_DEVICE_ID"},
         {ct::CMD_READ_ACCESS_KEYS, QByteArray(), "READ_ACCESS_KEYS"},
         {ct::CMD_ACCESS_CHALLENGE, QByteArray(), "ACCESS_CHALLENGE"},
-        {ct::CMD_READ_FLEET_ID, QByteArray(), "READ_FLEET_ID"},
+        {ct::CMD_READ_CONFIG_VERSION, QByteArray(), "READ_CONFIG_VERSION"},
         {ct::CMD_READ_CAN_SETUP, QByteArray(), "READ_CAN_SETUP"},
         {ct::CMD_FW_UPDATE_STATUS, QByteArray(), "FW_UPDATE_STATUS"},
         {ct::CMD_READ_MSG_CFG, rangeReq, "READ_MSG_CFG (range control)"},
@@ -4424,15 +5006,17 @@ static void testReadResponseMatching(const SerialProtoCallbacks *restore)
         CHECK(answered);
     }
 
-    // FLEET_ID_PROVE is the one read whose request HAS four bytes to echo and
-    // deliberately does not echo them â€” it answers an HMAC over the challenge.
+    // LICENSE_KEY_PROVE is the one read whose request HAS four bytes to echo and
+    // deliberately does not echo them — it answers an HMAC over the challenge.
     // If it were ever listed as a range read the guard would compare the HMAC's
     // first four bytes against the challenge's and discard it, so pin it.
-    CHECK(!ct::DeviceLink::echoesRequestRange(ct::CMD_FLEET_ID_PROVE));
+    // (CMD_FLEET_ID_PROVE, retired, had exactly this shape and this test.)
+    CHECK(!ct::DeviceLink::echoesRequestRange(ct::CMD_LICENSE_KEY_PROVE));
     {
-        const auto packets = exchange(ct::CMD_FLEET_ID_PROVE, challenge);
-        // Unprovisioned firmware has no fleet key, so this NACKs rather than
-        // answering â€” which is itself the correct behaviour and worth pinning.
+        const auto packets = exchange(ct::CMD_LICENSE_KEY_PROVE, challenge);
+        // The licence pages were wiped at the end of the licence suite, so this
+        // unit holds no Firmware Key and must NACK rather than answer — an
+        // answer under no key would be one every unlicensed unit could produce.
         CHECK(packets.size() == 1);
         CHECK(packets[0].cmd == ct::CMD_NACK);
         CHECK(quint8(packets[0].payload[0]) == ct::ERR_LOCKED);
@@ -8684,7 +9268,8 @@ int main(int argc, char *argv[])
     // restores the fixture on the way out rather than leaving a locked or
     // re-badged device behind for the next one.
     testDeviceAccess(&protoCb);
-    testFleetIdentityBlock(&protoCb);
+    testOtpDeviceInfo(&protoCb);
+    testFirmwareLicense(&protoCb);
     testConfigVersion(&protoCb);
     testBusSetupReadback(&protoCb);
     testCounterRateMode();

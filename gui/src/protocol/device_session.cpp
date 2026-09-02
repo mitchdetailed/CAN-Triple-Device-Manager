@@ -32,14 +32,6 @@ static_assert(kAccessChallengeBytes == ACCESS_CHALLENGE_LEN, "wire size");
 // left in this file that writes one.
 static_assert(sizeof(AccessKeyWritePayload) == 7, "must match firmware");
 
-// The model layer sizes the two identity strings (kFleet*IdBytes) so the dialogs
-// can clamp a typed name to what the wire can carry. These assertions say the
-// two halves agree about how much room that is. If they drifted, names would be
-// clamped to one width and read back at another, and the mismatch would show up
-// as a fleet that no longer matches itself.
-static_assert(kFleetVendorIdBytes == FLEET_VENDOR_ID_LEN, "wire size");
-static_assert(kFleetModelIdBytes == FLEET_MODEL_ID_LEN, "wire size");
-
 // A NACK of ERR_INVALID_CMD means this firmware predates the command, which is
 // not a failure — it is a device with no access passwords, no fleet identity
 // and no binding. Anything else is a real error the caller should see.
@@ -68,6 +60,48 @@ QString paddedField(const char *p, int len)
     while (used < len && p[used] != '\0')
         ++used;
     return QString::fromUtf8(p, used);
+}
+
+// Is this field a non-answer? Both fill bytes mean the same thing and are kept
+// distinct nowhere: 0xFF is virgin OTP on a part nobody has burned, and 0x00 is
+// a field a programmer zeroed rather than filled. A field is unknown only when
+// EVERY byte is one of them — "Minton Performance" followed by NUL padding is a
+// perfectly good answer, and testing the padding alone would throw it away.
+bool otpFieldUnknown(const char *p, int len)
+{
+    bool allFF = true;
+    bool allZero = true;
+    for (int i = 0; i < len; ++i) {
+        const quint8 b = quint8(p[i]);
+        if (b != 0xFFu)
+            allFF = false;
+        if (b != 0x00u)
+            allZero = false;
+    }
+    return allFF || allZero;
+}
+
+// One OTP text field: unknown, or the bytes up to the first NUL.
+//
+// Anything unprintable is dropped rather than shown. These are ASCII fields by
+// convention and nothing enforces it, so a mis-burned record can hold arbitrary
+// bytes — and a control character reaching a QLabel is at best invisible and at
+// worst reformats the dialog around it. The raw bytes stay on DeviceInfo::raw
+// for anyone who needs to see what is really there.
+QString otpText(const char *p, int len)
+{
+    if (otpFieldUnknown(p, len))
+        return QString();
+    int used = 0;
+    while (used < len && p[used] != '\0')
+        ++used;
+    QString text;
+    text.reserve(used);
+    for (const QChar c : QString::fromUtf8(p, used)) {
+        if (c.isPrint())
+            text.append(c);
+    }
+    return text.trimmed();
 }
 
 // Shared body of writeAccessKey/clearAccessKey. Both send the same record and
@@ -162,42 +196,87 @@ bool parseAccessState(const QByteArray &payload, AccessState *out)
     return true;
 }
 
-bool parseFleetIdentity(const QByteArray &payload, FleetIdentityState *out)
+// The OTP manufacturing record. Field by field, and each one independently
+// allowed to be missing — see the DeviceInfo comment for why a half-burned part
+// is normal rather than broken.
+bool parseDeviceInfo(const QByteArray &payload, DeviceInfo *out)
 {
     if (!out)
         return false;
-    *out = FleetIdentityState{};
-    // FleetIdentityPublic on the wire: char vendor[16], char model[16],
-    // u32 serial, u16 config_version, u16 flags, u8 key_present.
-    constexpr int kVendorAt = 0;
-    constexpr int kModelAt = kVendorAt + FLEET_VENDOR_ID_LEN;
-    constexpr int kSerialAt = kModelAt + FLEET_MODEL_ID_LEN;
-    constexpr int kVersionAt = kSerialAt + 4;
-    constexpr int kFlagsAt = kVersionAt + 2;
-    constexpr int kKeyPresentAt = kFlagsAt + 2;
-    constexpr int kPublicLen = kKeyPresentAt + 1; // 41
+    const bool wasSupported = out->supported;
+    *out = DeviceInfo{};
+    out->supported = wasSupported;
+    if (payload.size() < int(OTP_INFO_LEN))
+        return false;
+    out->raw = payload.left(int(OTP_INFO_LEN));
+
+    const char *p = out->raw.constData();
+    out->manufacturer = otpText(p + OTP_INFO_MANUFACTURER_AT, OTP_INFO_MANUFACTURER_LEN);
+    out->product = otpText(p + OTP_INFO_PRODUCT_AT, OTP_INFO_PRODUCT_LEN);
+    out->hardwareVersion = otpText(p + OTP_INFO_HW_VERSION_AT, OTP_INFO_HW_VERSION_LEN);
+
+    // BIG-endian, unlike every other multi-byte field in this protocol, which is
+    // little. That is the burn tool's convention and not a choice available here
+    // — the record is already in silicon on any part worth reading — so it is
+    // spelled out rather than left to qFromBigEndian to imply.
+    if (!otpFieldUnknown(p + OTP_INFO_SERIAL_AT, OTP_INFO_SERIAL_LEN)) {
+        quint64 serial = 0;
+        for (int i = 0; i < OTP_INFO_SERIAL_LEN; ++i)
+            serial = (serial << 8) | quint8(p[OTP_INFO_SERIAL_AT + i]);
+        out->serialNumber = serial;
+        out->serialKnown = true;
+    }
+
+    out->dateText = otpText(p + OTP_INFO_DATE_AT, OTP_INFO_DATE_LEN);
+    if (!out->dateText.isEmpty()) {
+        // DDMMYYYY. QDate::fromString returns an invalid date for anything that
+        // is not one, which is exactly the signal the dialog wants: it then
+        // shows the characters as burned instead of inventing a day.
+        out->date = QDate::fromString(out->dateText, QStringLiteral("ddMMyyyy"));
+    }
+    return true;
+}
+
+// The public licence record: three NUL-padded strings and a flags word. 74
+// bytes, unpacked by hand for the same reason every wire record here is — the
+// parser must depend on the documented layout, not on this compiler having
+// packed a mirror struct the way it was asked to.
+bool parseLicense(const QByteArray &payload, LicenseState *out)
+{
+    if (!out)
+        return false;
+    const bool wasSupported = out->supported;
+    *out = LicenseState{};
+    out->supported = wasSupported;
+
+    constexpr int kManufacturerAt = 0;
+    constexpr int kModelAt = kManufacturerAt + LICENSE_MANUFACTURER_LEN;
+    constexpr int kVersionAt = kModelAt + LICENSE_MODEL_LEN;
+    constexpr int kFlagsAt = kVersionAt + LICENSE_VERSION_LEN;
+    constexpr int kPublicLen = kFlagsAt + 2; // 74
     if (payload.size() < kPublicLen)
         return false;
 
-    // Read field by field rather than casting the buffer onto the mirror
-    // struct. Forty-one bytes cost nothing to unpack by hand, and doing it this
-    // way means the parser — the half that test_firmware_link feeds real
-    // firmware bytes to — depends only on the documented layout, not on this
-    // compiler having packed the mirror the way it was asked to. The wire is
-    // packed and little-endian; this side is neither, which is why every scalar
-    // goes through qFromLittleEndian and the strings through paddedField.
     const char *p = payload.constData();
-    out->identity.vendorId = paddedField(p + kVendorAt, FLEET_VENDOR_ID_LEN);
-    out->identity.modelId = paddedField(p + kModelAt, FLEET_MODEL_ID_LEN);
-    out->identity.serialNumber = qFromLittleEndian<quint32>(p + kSerialAt);
-    out->identity.configVersion = qFromLittleEndian<quint16>(p + kVersionAt);
-    out->identity.flags = qFromLittleEndian<quint16>(p + kFlagsAt);
-    out->keyPresent = quint8(payload[kKeyPresentAt]) != 0;
-    // The device never hands the fleet key back, so the parsed identity always
-    // carries kNoAccessKey. Setting it explicitly keeps that visible to anyone
-    // reading a call site rather than only to anyone reading the struct.
-    out->identity.fleetKey = kNoAccessKey;
-    out->supported = true;
+    out->manufacturer = paddedField(p + kManufacturerAt, LICENSE_MANUFACTURER_LEN);
+    out->model = paddedField(p + kModelAt, LICENSE_MODEL_LEN);
+    out->firmwareVersion = paddedField(p + kVersionAt, LICENSE_VERSION_LEN);
+    const quint16 flags = qFromLittleEndian<quint16>(p + kFlagsAt);
+    out->keySet = (flags & LICENSE_FLAG_KEY_SET) != 0;
+    out->updaterSet = (flags & LICENSE_FLAG_UPDATER_SET) != 0;
+    return true;
+}
+
+bool parseConfigVersion(const QByteArray &payload, ConfigVersionState *out)
+{
+    if (!out)
+        return false;
+    const bool wasSupported = out->supported;
+    *out = ConfigVersionState{};
+    out->supported = wasSupported;
+    if (payload.size() < 2)
+        return false;
+    out->version = qFromLittleEndian<quint16>(payload.constData());
     return true;
 }
 
@@ -249,29 +328,223 @@ bool readAccessState(DeviceLink *link, AccessState *out, QString *error)
     return true;
 }
 
-bool readFleetIdentity(DeviceLink *link, FleetIdentityState *out, QString *error)
+bool readConfigVersion(DeviceLink *link, ConfigVersionState *out, QString *error)
 {
     if (!link || !out)
         return false;
-    *out = FleetIdentityState{};
+    *out = ConfigVersionState{};
     QByteArray resp;
     quint8 code = 0;
-    if (!link->requestSync(CMD_READ_FLEET_ID, QByteArray(), &resp, error,
+    if (!link->requestSync(CMD_READ_CONFIG_VERSION, QByteArray(), &resp, error,
                            DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
         if (unsupported(code)) {
             if (error)
                 error->clear();
-            // A firmware that does not know the command was built without an
-            // identity to report, so it belongs to no fleet. That is a fact
-            // about the device, not a failure of the read — the uploader shows
-            // it as an unrecognised unit rather than as a broken link.
-            return true;
+            return true; // older firmware: it cannot say
         }
         return false;
     }
-    if (!parseFleetIdentity(resp, out)) {
+    out->supported = true;
+    if (!parseConfigVersion(resp, out)) {
         if (error)
-            *error = QStringLiteral("The device returned a short fleet identity response.");
+            *error = QStringLiteral("The device returned a short configuration version.");
+        return false;
+    }
+    return true;
+}
+
+bool readDeviceInfo(DeviceLink *link, DeviceInfo *out, QString *error)
+{
+    if (!link || !out)
+        return false;
+    *out = DeviceInfo{};
+    QByteArray resp;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_GET_DEVICE_INFO, QByteArray(), &resp, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        if (unsupported(code)) {
+            if (error)
+                error->clear();
+            return true; // older firmware: it cannot read its own OTP for us
+        }
+        return false;
+    }
+    out->supported = true;
+    if (!parseDeviceInfo(resp, out)) {
+        if (error)
+            *error = QStringLiteral("The device returned a short device info response.");
+        return false;
+    }
+    return true;
+}
+
+bool readLicense(DeviceLink *link, LicenseState *out, QString *error)
+{
+    if (!link || !out)
+        return false;
+    *out = LicenseState{};
+    QByteArray resp;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_READ_LICENSE, QByteArray(), &resp, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        if (unsupported(code)) {
+            if (error)
+                error->clear();
+            return true; // firmware older than licensing
+        }
+        return false;
+    }
+    out->supported = true;
+    if (!parseLicense(resp, out)) {
+        if (error)
+            *error = QStringLiteral("The device returned a short licence response.");
+        return false;
+    }
+    return true;
+}
+
+bool proveLicenseSecret(DeviceLink *link, const QByteArray &secret, QString *error,
+                        bool *wrongSecret)
+{
+    if (wrongSecret)
+        *wrongSecret = false;
+    if (!link)
+        return false;
+
+    QByteArray challenge;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_LICENSE_CHALLENGE, QByteArray(), &challenge, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        if (unsupported(code) && error)
+            *error = QStringLiteral("This firmware has no licence to prove.");
+        return false;
+    }
+    const QByteArray answer = licenseAuthResponse(secret, challenge);
+    if (answer.isEmpty()) {
+        // Empty means the derivation produced nothing usable, which for a
+        // non-empty passphrase is a bug and for an empty one is the caller
+        // asking to prove a secret it does not have. Either way, do not put a
+        // malformed response on the wire and call the result a wrong password.
+        if (error)
+            *error = QStringLiteral("No licence secret to prove with.");
+        return false;
+    }
+    QByteArray ignored;
+    if (!link->requestSync(CMD_LICENSE_RESPONSE, answer, &ignored, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        // ERR_LOCKED is the device saying the HMAC did not match. That is a
+        // wrong passphrase, not a broken link, and the two want opposite
+        // reactions from the caller.
+        if (code == ERR_LOCKED) {
+            if (wrongSecret)
+                *wrongSecret = true;
+            if (error)
+                *error = QStringLiteral("The device did not accept that as its FW Updater "
+                                        "Password or its Firmware Key.");
+        }
+        return false;
+    }
+    return true;
+}
+
+bool proveLicenseKey(DeviceLink *link, const QByteArray &expectedKey, QString *error,
+                     bool *mismatch)
+{
+    if (mismatch)
+        *mismatch = false;
+    if (!link || expectedKey.size() != kLicenseKeyBytes)
+        return false;
+
+    // The HOST picks the nonce here. That is the whole value of this exchange:
+    // a device cannot pre-compute an answer to a challenge it has not been
+    // given, so a reply that matches could only have come from a unit holding
+    // the key. From the system CSPRNG, not the default generator, because a
+    // predictable nonce would make a captured reply replayable.
+    QByteArray challenge(kAccessChallengeBytes, Qt::Uninitialized);
+    QRandomGenerator::system()->generate(reinterpret_cast<quint32 *>(challenge.data()),
+                                         reinterpret_cast<quint32 *>(challenge.data()
+                                                                    + challenge.size()));
+
+    QByteArray answer;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_LICENSE_KEY_PROVE, challenge, &answer, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        // ERR_LOCKED is the device saying it holds no Firmware Key at all. That
+        // is a unit with nothing to prove, not a broken link.
+        if (code == ERR_LOCKED && error)
+            *error = QStringLiteral("This unit holds no Firmware Key to prove.");
+        return false;
+    }
+
+    const QByteArray expected = licenseProveExpected(expectedKey, challenge);
+    if (expected.isEmpty() || answer != expected) {
+        if (mismatch)
+            *mismatch = true;
+        if (error)
+            *error = QStringLiteral("The device does not hold the expected Firmware Key.");
+        return false;
+    }
+    return true;
+}
+
+bool writeLicense(DeviceLink *link, const LicenseWrite &write, QString *error)
+{
+    if (!link)
+        return false;
+
+    // Built field by field into a fixed-width, NUL-padded buffer. clipToUtf8Bytes
+    // is deliberately NOT called here: the dialog clamps what can be typed, and a
+    // silent truncation at this layer would put a different name on the device
+    // than the one on screen. What this does guarantee is that an over-long
+    // string cannot overrun its field.
+    QByteArray payload(LICENSE_MANUFACTURER_LEN + LICENSE_MODEL_LEN + LICENSE_VERSION_LEN
+                           + 2 * (1 + LICENSE_KEY_LEN),
+                       '\0');
+    const auto put = [&payload](int at, int len, const QString &text) {
+        const QByteArray utf8 = text.toUtf8().left(len);
+        std::memcpy(payload.data() + at, utf8.constData(), size_t(utf8.size()));
+    };
+    int at = 0;
+    put(at, LICENSE_MANUFACTURER_LEN, write.manufacturer);
+    at += LICENSE_MANUFACTURER_LEN;
+    put(at, LICENSE_MODEL_LEN, write.model);
+    at += LICENSE_MODEL_LEN;
+    put(at, LICENSE_VERSION_LEN, write.firmwareVersion);
+    at += LICENSE_VERSION_LEN;
+
+    // KEEP unless asked otherwise, for both secrets and by the same rule, so
+    // neither can quietly grow a different one. Editing a model name must
+    // disturb neither password.
+    const auto putSecret = [&](const QByteArray &secret, bool clear) {
+        quint8 action = LICENSE_KEY_KEEP;
+        if (clear)
+            action = LICENSE_KEY_CLEAR;
+        else if (secret.size() == kLicenseKeyBytes)
+            action = LICENSE_KEY_SET;
+        payload[at++] = char(action);
+        if (action == LICENSE_KEY_SET)
+            std::memcpy(payload.data() + at, secret.constData(), size_t(kLicenseKeyBytes));
+        at += kLicenseKeyBytes;
+    };
+    putSecret(write.key, write.clearKey);
+    putSecret(write.updaterKey, write.clearUpdater);
+
+    QByteArray resp;
+    quint8 code = 0;
+    // THE LONG TIMEOUT. The device erases and reprograms a page in the bank it
+    // is executing from, so it stalls for tens of milliseconds and answers late.
+    // With the default timeout this reads as a dead device on a write that in
+    // fact succeeded — and the retry would then be refused for want of a proof
+    // the first write consumed.
+    if (!link->requestSync(CMD_WRITE_LICENSE, payload, &resp, error, DeviceLink::kFlashTimeoutMs,
+                           DeviceLink::kDefaultRetries, &code)) {
+        if (unsupported(code) && error) {
+            *error = QStringLiteral("This firmware cannot store a licence \u2014 it is older than "
+                                    "the Firmware License Manager. Update the unit's firmware.");
+        } else if (code == ERR_LOCKED && error) {
+            *error = QStringLiteral("The device refused the write: its FW Updater Password has "
+                                    "not been proved in this session.");
+        }
         return false;
     }
     return true;
@@ -404,57 +677,10 @@ bool clearAccessKey(DeviceLink *link, AccessFunction fn, QString *error, int slo
     return sendAccessKeyWrite(link, fn, kNoAccessKey, true, error, slot);
 }
 
-// There is deliberately no writeFleetIdentity() to match the reader. Every
-// field of the identity except config_version is compiled into the firmware, so
-// the wire has no command that could change one — CMD_WRITE_UPDATE_ID was
-// deleted rather than left NACKing, and 0x30 is free. config_version does still
-// move, and it moves where it belongs: as the optional payload of
-// CMD_SAVE_TO_FLASH, so it commits with the tables it describes (see
-// config_transfer.cpp).
-
-bool proveFleetIdentity(DeviceLink *link, AccessKey expectedKey, QString *error, bool *mismatch)
-{
-    if (mismatch)
-        *mismatch = false;
-    if (!link || expectedKey == kNoAccessKey) {
-        if (error)
-            *error = QStringLiteral("There is no fleet key to check the device against.");
-        return false;
-    }
-
-    // The one exchange that runs the other way, so the HOST supplies the nonce.
-    // That is what the check is worth anything for: a look-alike replaying a
-    // captured answer would have had to see these exact bytes before, and the
-    // system generator is what makes that not worth attempting.
-    static_assert(ACCESS_CHALLENGE_LEN % 4 == 0, "challenge must be a whole number of words");
-    quint32 words[ACCESS_CHALLENGE_LEN / 4];
-    QRandomGenerator::system()->fillRange(words);
-    const QByteArray challenge(reinterpret_cast<const char *>(words), ACCESS_CHALLENGE_LEN);
-
-    QByteArray reply;
-    quint8 code = 0;
-    if (!link->requestSync(CMD_FLEET_ID_PROVE, challenge, &reply, error,
-                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
-        if (unsupported(code) && error)
-            *error = QStringLiteral("This firmware cannot prove a fleet identity.");
-        return false;
-    }
-
-    // The size test is not redundant with the constant-time compare: without it
-    // a device that answered with nothing at all would match an expectation
-    // that was also empty, and silence would read as proof.
-    const QByteArray expected = accessResponse(expectedKey, challenge);
-    if (expected.isEmpty() || reply.size() != expected.size()
-        || !constantTimeEquals(reply, expected)) {
-        if (mismatch)
-            *mismatch = true;
-        if (error)
-            *error = QStringLiteral("The device did not prove the fleet key. It belongs to a "
-                                    "different fleet, or holds a different key for this one.");
-        return false;
-    }
-    return true;
-}
+// The configuration version has no writer of its own, and that is deliberate:
+// it moves as the optional payload of CMD_SAVE_TO_FLASH, so it commits with the
+// tables it describes and can never name a revision the unit is not running.
+// See ConfigTransfer::send and its configVersion parameter.
 
 bool writeBinding(DeviceLink *link, const QByteArray &uid, QString *error)
 {

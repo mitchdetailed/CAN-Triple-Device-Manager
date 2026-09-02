@@ -180,12 +180,12 @@ same password. Set one on the unit to match the configuration's, under
 Comms slots will do.</li>
 <li><b>The configuration carries no Protected Comms password of its own</b> —
 there is nothing to match against. Give it one with
-<b>File&nbsp;→ Save Secure Config…</b>, or remove the markings.</li>
+<b>File&nbsp;→ Secure Configuration Builder…</b>, or remove the markings.</li>
 <li><b>The two disagree.</b> This is the case the rule exists for.</li>
 </ul>
 
 <p class="note">The unit holds up to <b>four</b> Protected Comms passwords —
-<a href="fleet-identity.html">Set Access Passwords</a> shows them as Slot 1 to
+<a href="licensing.html">Set Access Passwords</a> shows them as Slot 1 to
 Slot 4 — and confirming <em>any</em> of them satisfies this check. Four slots
 are what let one device accept sealed configurations from more than one
 supplier without any of them sharing a password.</p>
@@ -232,7 +232,7 @@ and selects them, so they are ready to reorder or think better of.</p>
 <tr><td><code>Communications Templates</code></td><td>Templates (*.ct3t). Both
 <b>Save…</b> and <b>Load…</b> start here.</td></tr>
 <tr><td><code>Configurations</code></td><td>Configurations (*.ct3, *.ct3s).
-<b>File&nbsp;&rarr;&nbsp;Open</b>, <b>Save As</b> and <b>Save Secure Config</b>
+<b>File&nbsp;&rarr;&nbsp;Open</b>, <b>Save As</b> and the <b>Secure Configuration Builder</b>
 start here when the document has no file of its own yet.</td></tr>
 </table>
 
@@ -448,7 +448,7 @@ plain <code>.ct3</code> is scrambled rather than legible, which stops a text
 editor reading a marking straight out of it — but the key to a .ct3 travels
 inside the .ct3, and opening one in this program gives back every marked
 message in full. The marking that survives being handed to somebody else is
-<b>File &gt; Save Secure Config…</b> (<code>.ct3s</code>). If a protocol must
+<b>File &gt; Secure Configuration Builder…</b> (<code>.ct3s</code>). If a protocol must
 stay secret from a determined reader, do not ship it to them.</p>
 
 <p class="warn"><b>Read Only is accident prevention, not security.</b> The

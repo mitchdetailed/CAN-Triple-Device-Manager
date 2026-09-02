@@ -14,7 +14,7 @@ device until you send it, and nothing on the device changes the document until
 you get it. If no serial connection is open, commands that talk to the device
 first open Connection Settings so you can connect. Monitor Channels and the
 CAN Viewer open without prompting — they simply show nothing until a device
-is connected — and Fleet Identity… is deliberately usable offline.</p>
+is connected — and the Firmware License Manager is deliberately usable offline, because composing a licence is desk work.</p>
 
 <table>
 <tr><th>Command</th><th>Shortcut</th><th>What it does</th></tr>
@@ -26,14 +26,13 @@ running its configuration; the live windows simply stop updating.</td></tr>
 <tr><td>Send Configuration</td><td>F5</td><td>Programs the open document onto the device and saves it to flash.</td></tr>
 <tr><td>Send Secure Configuration…</td><td></td><td>Installs a sealed <code>.ct3s</code> package without opening or displaying it.</td></tr>
 <tr><td>Get Configuration</td><td></td><td>Reads the device's configuration back into the editor.</td></tr>
-<tr><td>Verify Configuration</td><td></td><td>Reads the device's tables and compares them with the document.</td></tr>
 <tr><td>Monitor Channels…</td><td>F3</td><td>Live channel values — see <a href="monitor.html">Monitoring Live Values</a>.</td></tr>
 <tr><td>CAN Viewer…</td><td>F4</td><td>Raw frame monitor and inject-frame form, with Vector <code>.asc</code> export.</td></tr>
 <tr><td>Reset Device</td><td></td><td>Reboots the device; it reloads its saved configuration.</td></tr>
 <tr><td>Device Status…</td><td></td><td>Uptime, bus counters, identity, passwords and fleet information.</td></tr>
-<tr><td>Set Access Passwords…</td><td></td><td>Device-held function passwords — see <a href="fleet-identity.html">Fleet Identity &amp; Access Keys</a>.</td></tr>
-<tr><td>Upload Configuration…</td><td></td><td>Dealer-facing installer that refuses packages not built for the unit — see <a href="fleet-identity.html">Fleet Identity &amp; Access Keys</a>.</td></tr>
-<tr><td>Fleet Identity…</td><td></td><td>Reads the unit's identity and edits the document's fleet block — see <a href="fleet-identity.html">Fleet Identity &amp; Access Keys</a>.</td></tr>
+<tr><td>Get Device Info…</td><td></td><td>The manufacturing record burned into the unit at build: maker, product, hardware version, serial and date.</td></tr>
+<tr><td>Set Access Passwords…</td><td></td><td>Device-held function passwords — see <a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</td></tr>
+<tr><td>Firmware License Manager…</td><td></td><td>Writes the unit's licence: manufacturer, model, version, Firmware Key and FW Updater Password — see <a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 </table>
 
 <h2>Send Configuration (F5)</h2>
@@ -120,16 +119,26 @@ read it.</p>
 
 <ul>
 <li>A plain <code>.ct3</code> is refused by name — open it and use Online →
-Send Configuration, or seal it with File → Save Secure Config… first. See
-<a href="files.html">Configuration Files (.ct3)</a>.</li>
-<li>A package saved with "Require access password for use" asks for its
-Protected Comms password before anything is sent — without it the file cannot
-be decoded at all.</li>
-<li>The fleet identity rules are checked <b>before the device is touched</b>,
-and a failure refuses with no override. If the package names a fleet and the
-connected device cannot be asked for its identity (older firmware, or a failed
-read), the install is refused rather than performed on faith. A package that
-names no fleet and pins no serial installs anywhere.</li>
+Send Configuration, or build a package with File → Secure Configuration
+Builder… first. See <a href="files.html">Configuration Files (.ct3)</a>.</li>
+<li>A package with <b>no install policy</b> is also refused. "This package makes
+no demands" is not something a package is allowed to be; rebuild it with the
+Secure Configuration Builder.</li>
+<li>The policy is checked <b>before the device is touched</b>, before the Send
+password is asked for, and before a single record goes out — a package that does
+not belong on this unit must never get as far as partially overwriting it. A
+failure refuses with no override, and names the field and both values so you can
+tell whether you picked up the wrong file or the wrong unit.</li>
+<li>The Firmware Key is not a string comparison: the device must <b>prove</b> it
+by answering a challenge, so a look-alike reporting the right manufacturer and
+model still fails. A unit with no licence cannot match anything, so it takes no
+packages at all — issue a licence first. See
+<a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</li>
+<li>If the package sets device passwords, they are written <b>before</b> the
+configuration goes out, so they commit to flash with it rather than sitting in
+RAM until the next power cycle. A password that cannot be set aborts the whole
+install, so a unit is never left running a new configuration under passwords that
+are half old and half new.</li>
 <li>The install verifies and saves to flash under the same rules as Send
 Configuration: firmware too old to save reports that the configuration is
 running but will be lost at power-off, and a device that guards Get a
@@ -238,18 +247,6 @@ device and writing a fresh message over the top. Enforcement that cannot hold
 is worse than an honest convention, and the help is written to match what the
 product does.</p>
 
-<h2>Verify Configuration</h2>
-
-<p>Maps the open document to device tables, reads the connected device's
-tables back (gated by the "Get a Configuration" password, since it is a read),
-and compares them record by record — every table kind: messages, channels,
-math channels, User Conditions, counters, timers, constants, relays, lookup
-tables, integrators and the compiled device script. Extra active entries on the device beyond
-what the document defines — leftovers from an older configuration — count as
-differences too. The result is either "Device configuration matches the
-document." or a count of differing table entries with the advice to use Send
-Configuration to update the device.</p>
-
 <h2>Reset Device</h2>
 
 <p>Reboots the unit after proving the "Send a Configuration" password. It
@@ -278,10 +275,55 @@ after it came back with no passwords at all.</p>
 unit (which is why an apparently inert device shows 0 active messages).</li>
 <li>Which access passwords are set — never their values. This tells you in
 advance that a Send or Get will ask for a password.</li>
-<li>The fleet identity (vendor, model, serial), the configuration version on
-the unit, and whether a fleet key is present — see
-<a href="fleet-identity.html">Fleet Identity &amp; Access Keys</a>.</li>
+<li>The firmware licence (manufacturer, model, version) and which of its two
+secrets the unit holds, plus the configuration version it is running — see
+<a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</li>
 </ul>
+
+<h2 id="device-info">Get Device Info…</h2>
+
+<p>Who built this board, what it is, and when. Five values, burned into the
+STM32's one-time-programmable area during manufacture:</p>
+
+<table>
+<tr><th>Field</th><th>Example</th></tr>
+<tr><td>Manufacturer</td><td>Minton Performance</td></tr>
+<tr><td>Product</td><td>CAN Triple</td></tr>
+<tr><td>HW Version</td><td>1.05</td></tr>
+<tr><td>HW Serial Number</td><td>1001</td></tr>
+<tr><td>Date of Manufacture</td><td>31 August 2026</td></tr>
+</table>
+
+<p><b>None of it can ever change.</b> OTP memory is programmed once and has no
+erase, so what a unit reports here it reports for the life of the part — which
+is what makes it worth quoting on a warranty claim, and why this application has
+no way to write it. Burning the record is a manufacturing step performed once by
+a separate tool.</p>
+
+<p>It is a separate dialog from Device Status for that reason. Device Status
+answers <i>what is this device doing</i>, and every line of it can differ between
+two readings a second apart. This answers <i>what is this device</i>, and no line
+of it can differ at all.</p>
+
+<p class="note"><b>Unknown</b> means that field was never burned. Each field
+occupies a whole number of double-words and OTP is programmed one double-word at
+a time, so a board can carry a manufacturer and no serial number — that is what
+one looks like between two stages of provisioning, and each field is reported on
+its own. An unburned field reads back as all 0x00 or all 0xFF; neither is a
+value, so neither is shown as one. A unit whose OTP was never touched at all
+says so in a sentence rather than as five Unknown rows.</p>
+
+<p>The date is read as DDMMYYYY. A field that is not a readable date is shown
+exactly as it was burned and labelled as such, rather than corrected to the
+nearest plausible day — a wrong date presented as a right one is worse than one
+that visibly does not parse.</p>
+
+<p>No password is needed, deliberately. Nothing here describes a configuration,
+and an RMA cannot be conditioned on holding the password of the configuration
+being returned as faulty — so a locked-down unit still answers this. On firmware
+older than the command the dialog says so and points out that the record is in
+the chip either way, so nobody concludes the board was never provisioned and
+burns a second one over the top of it.</p>
 
 <h2>After a firmware update</h2>
 
