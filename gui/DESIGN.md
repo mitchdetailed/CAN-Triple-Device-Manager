@@ -25,7 +25,7 @@ dash-manager layout and navigation.
   larger than the buffer would be lapped by. The two moved together, and must
   keep moving together. One command in flight (stop-and-wait), timeout
   250 ms (**4000 ms** for flash ops — sized on CLEAR_CONFIG, which erases the
-  whole 128 KB region before it ACKs and measures about 1.43 s), 5 retries,
+  whole configuration region before it ACKs and measures about 1.43 s), 5 retries,
   after which the command fails and the queue moves on immediately. There is no
   quiet period: the firmware auto-recovers UART faults on its own 1 Hz tick,
   which the host does not wait for.
@@ -62,30 +62,15 @@ dash-manager layout and navigation.
   ceiling in §3), signals **1000**, math 100, conditions **200**, counters 50,
   timers **50**, constants 100, relays 32, 2x16 tables 8, 8x8 tables **8**
   (and therefore 64 grid-row records — table `t` owns rows `t*8 .. t*8+7`),
-  integrators 8, transmit-CRC8 rules 20, and 384 script chunks of 64 B. That is
-  the whole of `FLASH_TABLE_LIST`, fifteen tables; together with the 256-byte
-  header they are 129,888 B of the 131,072 B (128 KB) config region, leaving
-  **1,184 B**; `CFG_TOTAL` in `flash_store.c` is generated from `FLASH_TABLE_LIST`
-  and `_Static_assert`ed against the region size, so that total is derived
-  rather than quoted.
-- **Conditions went 100 → 250, and then back to 200** — one of the two
-  capacities here ever reduced, and the only one that paid for growth in its own
-  table; `MAX_SCRIPT_CHUNKS` 512 → 384 below is the other, and it paid for
-  someone else's. `ConditionConfig` is
-  62 B, `PAD8(62)` is 64, so the table costs 12,800 B where 250 of the older
-  56-byte records cost 14,000: dropping 250 → 200 is what paid for the per-side
-  "for" qualifier, and it came in 1,200 B under what it replaced. The margin,
-  not the conditions table, is the budget story — store v18's message label cost
-  8,000 B (500 slots going 16 → 32) plus 512 for the relay label, 8,512 in all,
-  and `MAX_SCRIPT_CHUNKS` 512 → 384 returned 8,192 of it. The remaining 320 B
-  came out of the margin, which is how it went 1,504 → 1,184 B. What caps a
-  raise back up is not flash anyway: every condition owns an output slot, so 200
-  of them claim up to 200 of the 1000 signal slots, and 250 would claim a
-  quarter of the signal table for boolean outputs alone.
-  (`flash_store.c`'s `CFG_TOTAL` comment is the source for these figures, and it
-  says outright that where it and the `_Static_assert` disagree, the assert is
-  right. The prose block above `#define MAX_CONDITIONS` in `protocol.h` still
-  tells the old 250 story — take the number from the define.)
+  integrators 8, transmit-CRC8 rules 20, and 384 script chunks of 64 B. The GUI
+  enforces each of these before a Send, so a configuration that would not fit is
+  refused at the desk rather than part-written to a device.
+- **A capacity is bounded by the device's storage, and the shared channel
+  pool.** The second is the one that binds more often and is visible from here:
+  a condition, a counter, a timer, a constant, an integrator and a lookup table
+  each own an output slot out of the 1000 signals, so the calculation tables and
+  the message tables compete for the same pool. What the firmware spends in
+  flash to hold them is the firmware's business and is not published.
 
 Commands (see `../include/protocol.h`): GET_STATUS 0x01, WRITE/READ
 MSG 0x02/0x03, SIG 0x04/0x05, MATH 0x06/0x07, COND 0x08/0x09,
@@ -186,14 +171,12 @@ The two numbers have not stayed together since, and that asymmetry is the
 point. `PROTOCOL_VERSION` is **still 1** — the length check
 (`4 + count*item_size`) is what makes a version mismatch fail cleanly, so the
 wire number buys nothing a record size does not. A stored *layout*, on the
-other hand, really does move, and `FLASH_STORE_VERSION` is **18**: most
-recently for `CanMessageConfig` 14 → 32 B, the message label. Messages are the
-first table in the region, so that shifts every table below them and would
-otherwise have a v17 image misread record-for-record
-before its CRC ever ran. The GUI's `EXPECTED_STORE_VERSION` is the same
-number, and Send Configuration checks it against the unit **before it writes
-anything**, so a mismatch is named up front rather than discovered as a
-part-written device.
+other hand, really does move, and the store version is **18**. What changed at
+each bump is the firmware's business; what matters to a host is that an image
+written by a build with a different store version is REJECTED rather than
+misread. The GUI's `EXPECTED_STORE_VERSION` is that number, and Send
+Configuration checks it against the unit **before it writes anything**, so a
+mismatch is named up front rather than discovered as a part-written device.
 
 **The `.ct3` FILE schema was deliberately NOT reset with it.**
 `kConfigSchemaVersion` keeps counting — it is **20** (17 let a transmit section
@@ -486,12 +469,11 @@ is on the unit. A section the device stored no name for (an older store, or a
 message nobody named) still falls through to the snapshot, which is the only
 record in that case.
 
-It was bought, not found. The config region is fixed at 131,072 B and stood
-1,504 B from full, so `MAX_SCRIPT_CHUNKS` went 512 -> 384 to return 8,192 B
-against the 8,000 the message table needed (500 slots, 16 -> 32); the relay
-table took the same field for another 512. The margin ended at 1,184 B. See the
-budget comment in `flash_store.c`, which frames every such request as "which
-table is paying" — this is the first one to answer it deliberately.
+It was bought, not found. The device's storage is fixed, so the room for a name
+on every message and relay came out of another table — the script region gave up
+a quarter of its chunk count to pay for it. That trade is why `MAX_SCRIPT_CHUNKS`
+is the number it is, and it is the shape every such request takes: not "is there
+room" but "which table is paying".
 
 A name longer than 17 bytes is clipped on the way out and `mapToDevice` warns,
 because a name that survives a Get as a DIFFERENT name than the one on screen,
@@ -694,10 +676,10 @@ serial number and date, burned once at manufacture. There is deliberately no
 write command to go with that read.
 
 **The record.** Manufacturer (32 B), Model (32 B), Version (8 B), and two
-16-byte derived secrets. It lives in two 2 KB pages of its own in flash bank 1,
-ping-ponged by a sequence number so a power cut mid-write leaves the previous
-licence intact rather than a blank, re-licensable unit, and it survives a Send, a
-Clear and a firmware update because it is nowhere near the configuration store.
+16-byte derived secrets. It is stored apart from the configuration, so it
+survives a Send, a Clear and a firmware update, and the write is arranged so that
+losing power part-way leaves the previous licence intact rather than a blank,
+re-licensable unit.
 
 **Two secrets, and they are not alike.**
 
@@ -1311,11 +1293,11 @@ shrinking `label` 32 → 16 B (the firmware never reads it; it exists only so a
 Get can rebuild channel names, so 44% of the record did no runtime work),
 hand-bit-packing the eight small fields behind accessors in both `protocol.h`
 and `wire_structs.h`, and narrowing `mux_id`/`mux_mask` to 16 bits. The
-bit-packing and the narrow mux fields stay. The label does not: the config
-region grew to 96 KB, which bought the 16 bytes back and 232 signal slots with
-them, and 32 + 20 + 8 + 4 = **64** happens to be exactly `PAD8(64)` — the
-record fills its flash slot with no padding waste, which is the arithmetic that
-made 32 the right number to go back to rather than 24 or 48.
+bit-packing and the narrow mux fields stay. The label does not: the device's
+storage grew, which bought the 16 bytes back and 232 signal slots with them, and
+32 + 20 + 8 + 4 = **64** is a whole number of 8-byte units — the record wastes
+nothing to padding, which is the arithmetic that made 32 the right label length
+to go back to rather than 24 or 48.
 
 Because the packing is duplicated in two headers, `test_firmware_link` packs
 with the GUI's setters and reads back with the firmware's — the only place both
@@ -1445,7 +1427,8 @@ taken **in place** from three of the four bytes of the retired per-message key,
 so triggered transmit itself cost **zero config flash**: at the time
 `CanMessageConfig` stayed 14 bytes, no table offset moved and every chunk
 constant stood. The record has grown since — store v18 appended the 18-byte
-message label, so it is **32 bytes** today, `PAD8(32)` is 32, and the message
+message label, so it is **32 bytes** today, already a whole number of 8-byte
+units, and the message
 table went 8,000 → 16,000 B with the script region paying for it.
 `PROTOCOL_VERSION` still stays 1, but no longer for that reason: the record is
 NOT the same size any more, and a host built against the 14-byte record fails the
@@ -1549,18 +1532,16 @@ see it. Adding the table bumped the protocol and flash-image versions to 6.
 
 **Flash-resident config (v7, firmware-internal):** the firmware runs its config
 tables directly out of flash instead of a RAM copy, reclaiming ~40 KB of RAM
-(use fell from ~62% to ~32%). The bank-2 region — 48 KB with a 64-byte header
-when this landed, **128 KB with a 256-byte header** today — holds that header
-then fixed, 8-byte-padded record slots per table; each `WRITE_*` programs its
+(use fell from ~62% to ~32%). The region holds a header, then fixed,
+8-byte-padded record slots per table; each `WRITE_*` programs its
 records in place, `SAVE` commits the header (per-table counts + bus setup + a
 CRC over the header and every live record) which marks the image valid, and
 boot validates it and sets the engine's iteration bounds. The engine reads
 records through pointers into the memory-mapped image and iterates only the
 written/validated prefix, so an un-programmed (0xFF) slot is never mistaken for
 an active record; an interrupted upload leaves no valid header and boots to
-defaults. Config lives in bank 2 while code runs from bank 1, so programming
-never stalls execution, and the cooperative main loop never reads the region
-mid-program. The flash header also carries a 32-byte **configuration title**
+defaults. Configuration is stored where programming it cannot stall running
+code, and the cooperative main loop never reads the region mid-program. The flash header also carries a 32-byte **configuration title**
 (`CMD_WRITE_CONFIG_NAME` / `CMD_READ_CONFIG_NAME`): the Send dialog requires a
 non-empty title (≤32 bytes, defaulting to the document's Save/SaveAs base name),
 stored on the document as `configTitle` and written to the header; Get reads it
@@ -1638,15 +1619,15 @@ different splits:
 - The 8x8 is `Table8x8Def` (**73 B** — `x`/`y_signal_idx`, `dest_signal_idx`,
   `flags`, `x_count`, `y_count`, `x_sites[8]`, `y_sites[8]`, commands 0x34/0x35)
   plus **one `Table8x8Row` record per grid row** (**32 B** — eight floats,
-  commands 0x36/0x37). A combined record would be 329 bytes: over the payload
-  cap even at 496, and over `MAX_PADDED_RECORD` (112), so it could be neither
-  sent nor stored. Table `t` owns Def index `t` and Row indices `t*8 .. t*8+7`,
+  commands 0x36/0x37). A combined record would be 329 bytes: over the payload cap
+  even at 496, and larger than the device will store as one record, so it could
+  be neither sent nor stored. Table `t` owns Def index `t` and Row indices `t*8 .. t*8+7`,
   so the row table holds `MAX_TABLES_8X8 * TABLE_8X8_SITES` = **64** records.
 
   **The row split is chosen for one property, and it is the whole reason for
-  this shape:** `PAD8(32)` is 32, so a table's eight row slots are
-  byte-contiguous in the device's flash. The engine takes a single pointer at
-  row `t*8` and indexes `grid[y*8 + x]`, exactly as the 4x4 indexed
+  this shape:** a 32-byte record is a whole number of 8-byte units, so a table's
+  eight row slots end up adjacent on the device. The engine takes a single
+  pointer at row `t*8` and indexes `grid[y*8 + x]`, exactly as the 4x4 indexed
   `outputs[y*4 + x]` — no reassembly buffer, no cross-record arithmetic, no RAM.
   Any other chunking loses that, and a row record that grew by one byte would
   pad to 40 and turn that pointer into a walk across the wrong memory.
@@ -1687,13 +1668,7 @@ already the DOCUMENT row — one whole table, one line in the Tables dialog — 
 `Table8x8GridRow`. `test_firmware_link` asserts the pair byte for byte, which is
 where the two names are reconciled.
 
-Flash: the region is **128 KB** (`FLASH_STORE_CAPACITY` 131072 — kept a multiple
-of 4096 so the 4 KB page-erase arithmetic stays aligned; it went 52 → 96 KB at the
-capacity revision and 96 → 128 KB at flash map v2, for the script table), store
-version **18**, `FLASH_NUM_TABLES` **15** (the 4x4 out; the 8x8's Def and Row, the
-script chunk table and the transmit-CRC8 rules in),
-`MAX_PADDED_RECORD` still 112 (the 8x8 Def pads to 80, a row to 32; the retired
-4x4's 112 was the peak and nothing has replaced it). `.ct3` files save the
+`.ct3` files save the
 1-axis table under a `tables2x16` key and still load the older `tables2x8` key,
 and save the 2-axis table under `tables8x8` while still loading `tables4x4`.
 
@@ -1714,7 +1689,7 @@ forwards the *non-matching* frames instead. The GUI models this as
 forward set reuses `routeBusMask`); the section editor shows a **Message Relay**
 group (Message Bitmask in 0x%03X/0x%08X width matching the address, Invert Result,
 and Forward-to checkboxes for the other two buses) and hides the message framing
-controls. This grew the flash-image version to 11 (`FLASH_NUM_TABLES` 8).
+controls. This grew the store version to 11, the relay table being new.
 
 **Per-bus termination resistor (v9):** `ControlCanPayload` gained a `termination`
 byte (10 → 11 bytes; flash-image version → 9). Each bus has a **Termination
