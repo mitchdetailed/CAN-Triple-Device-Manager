@@ -397,6 +397,16 @@ LicenseLabel3=Please read the following License Agreement. You must accept its t
 ; Unchecked by default. A desktop icon is a preference, not a default.
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+; Offered ONLY on a per-user install, because an admin install already does this
+; silently in [Run] and a second prompt for the same thing reads as a bug.
+; CHECKED by default: a machine that will program a board needs the driver, and
+; the one extra UAC prompt is the honest price of a per-user install. Declining
+; is safe - the Manager talks to a programmed device over the serial port with
+; no driver at all - so what is lost is SWD programming, which is what the text
+; says rather than "recommended".
+Name: "drivers"; Description: "Install the ST-Link USB drivers (needed to program a blank board; asks for administrator)"; \
+    GroupDescription: "Device drivers:"; Check: not IsAdminInstallMode
+
 
 [InstallDelete]
 ; Clear the Qt plugin directories before laying down the new ones.
@@ -565,6 +575,14 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 ; opens its own window and the tool waits for Enter before closing, so
 ; double-click works.
 Name: "{group}\CAN Triple Initial Programming Tool"; Filename: "{app}\Firmware\CANTripleInitialProgramming.exe"; WorkingDir: "{app}\Firmware"
+; The way back for every case the automatic install cannot cover: a per-user
+; install whose UAC prompt was declined, a machine whose operator only got admin
+; rights afterwards, or a driver store an ST tool later overwrote. dpinst's
+; manifest asks for elevation itself, so a plain shortcut raises the prompt.
+; Deliberately NOT /S here: run by hand, from a menu, the operator should see
+; dpinst report what it did rather than watch a window flash.
+Name: "{group}\Install ST-Link USB Drivers"; Filename: "{app}\Drivers\stlink\dpinst_amd64.exe"; \
+    WorkingDir: "{app}\Drivers\stlink"; Comment: "Install the USB drivers the initial programming tool needs (asks for administrator)"
 ; Apps & Features is the canonical way to uninstall, but this tool lives on
 ; offline bench machines whose operators go to the Start Menu for everything,
 ; so the entry earns its place.
@@ -773,3 +791,51 @@ Type: dirifempty; Name: "{autopf}\{#MyAppVendor}"
 ;      uninsdeletevalue flags on every one of them so uninstalling does not
 ;      leave dead ProgIDs behind.
 ; ---------------------------------------------------------------------------
+
+
+[Code]
+
+{ THE PER-USER DRIVER PATH.
+
+  A driver goes in the machine's driver store, and Windows does not let an
+  unelevated process write it. That is an OS boundary, not something an
+  installer can arrange around: there is no per-user driver install, for anyone,
+  by any method.
+
+  What is possible is to ASK. dpinst_amd64.exe carries
+  requestedExecutionLevel="highestAvailable", so ShellExecute raises the UAC
+  prompt for it; Inno's ordinary Exec would fail with ERROR_ELEVATION_REQUIRED
+  instead, which is why this goes through ShellExec rather than a [Run] entry.
+
+  The result is ignored ON PURPOSE, and this is the part worth stating plainly.
+  A user who declines the prompt, or who has no administrator to call on, has
+  made a decision - the Manager works over the serial port without the driver,
+  and only SWD programming of a blank board is affected. Failing the install
+  over that would be wrong. The Start Menu entry is the way back. }
+
+procedure InstallStLinkDriversElevated;
+var
+  ResultCode: Integer;
+begin
+  if not ShellExec('', ExpandConstant('{app}\Drivers\stlink\dpinst_amd64.exe'),
+                   '/S', ExpandConstant('{app}\Drivers\stlink'),
+                   SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode) then
+  begin
+    { Declined, or no administrator available. Say so once, without ceremony,
+      and name the way back rather than leaving the operator to find it. }
+    MsgBox('The ST-Link USB drivers were not installed.' + #13#10 + #13#10 +
+           'CAN Triple Device Manager works without them over the serial port. ' +
+           'They are needed only to program a blank board with the Initial ' +
+           'Programming Tool.' + #13#10 + #13#10 +
+           'To install them later, use "Install ST-Link USB Drivers" in the ' +
+           'Start Menu group.', mbInformation, MB_OK);
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and (not IsAdminInstallMode)
+     and WizardIsTaskSelected('drivers') then
+    InstallStLinkDriversElevated;
+end;
+
