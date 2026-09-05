@@ -527,6 +527,14 @@ constexpr uint8_t INTEGFLAG_COUNT_DOWN  = 0x04; // subtract instead of add (a "d
 constexpr uint8_t INTEGFLAG_PRESERVE    = 0x08; // retain across power cycles (shares the
                                                 // counters' 20-entry ring; works in both
                                                 // of the device's flash modes)
+constexpr uint8_t INTEGFLAG_ROLL        = 0x10; // v21: wrap at min/max instead of holding
+                                                // there. Same meaning and range convention
+                                                // as COUNTERFLAG_ROLL - the value lands in
+                                                // [min, max), so max is never sent. NOT the
+                                                // same as max <= min, which turns limiting
+                                                // off and lets a float32 total freeze past
+                                                // 2^24. Accumulation only; reset seeds are
+                                                // still clamped.
 
 // Signal value types
 enum SignalDataType : uint8_t {

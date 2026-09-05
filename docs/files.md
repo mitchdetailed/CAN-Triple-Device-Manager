@@ -71,7 +71,7 @@ What a package does have instead is an **install policy**, sealed inside it alon
 
 ## Version compatibility
 
-Every .ct3 records the schema version it was written at (currently **18**). Older files keep loading — fields a newer schema added simply take their defaults. A file whose version is *ahead* of the program is refused rather than half-read, with a message saying it was saved by a newer version of CAN Triple Device Manager; update the program to open it.
+Every .ct3 records the schema version it was written at (currently **21**). Older files keep loading — fields a newer schema added simply take their defaults. A file whose version is *ahead* of the program is refused rather than half-read, with a message saying it was saved by a newer version of CAN Triple Device Manager; update the program to open it.
 
 Refusing is deliberate, and the reason is worth knowing: a setting an older program does not recognise is not always a setting it can safely ignore. A message set to transmit only on a [User Condition](communications.md#triggered) looks like an ordinary message to a program written before that existed, and sending it from there would put a continuously transmitting message on the bus. A [User Condition](conditions.md#modes) with a mode is the same hazard in its sharpest form: a program written before the modes finds none of the keys it expects, reads every condition as a single empty comparison — because a missing key has always been a legal way to say "default" — and would send a configuration whose logic is simply absent. Refusing the file names the real remedy instead.
 

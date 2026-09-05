@@ -56,6 +56,7 @@ constexpr unsigned kIntegFlagActive = INTEGFLAG_ACTIVE;
 constexpr unsigned kIntegFlagConstInput = INTEGFLAG_CONST_INPUT;
 constexpr unsigned kIntegFlagCountDown = INTEGFLAG_COUNT_DOWN;
 constexpr unsigned kIntegFlagPreserve = INTEGFLAG_PRESERVE;
+constexpr unsigned kIntegFlagRoll = INTEGFLAG_ROLL;
 constexpr int kPreserveKeyIntegratorBase = PRESERVE_KEY_INTEGRATOR_BASE;
 constexpr int kPreserveKeyCount = PRESERVE_KEY_COUNT;
 // v19 per-function access keys. Snapshotted here for the same reason as the
@@ -466,6 +467,7 @@ constexpr unsigned kLicenseKeyClear = LICENSE_KEY_CLEAR;
 #undef INTEGFLAG_CONST_INPUT
 #undef INTEGFLAG_COUNT_DOWN
 #undef INTEGFLAG_PRESERVE
+#undef INTEGFLAG_ROLL
 #undef CMD_WRITE_CRC8_CFG
 #undef CMD_READ_CRC8_CFG
 #undef CRC8FLAG_ACTIVE
@@ -6718,7 +6720,8 @@ int main(int argc, char *argv[])
         g.start_value = 91.5f; // v17 â€” distinct from reset_value, they are separate fields
         g.rate_hz = 37;
         g.flags = ct::INTEGFLAG_ACTIVE | ct::INTEGFLAG_CONST_INPUT
-                  | ct::INTEGFLAG_COUNT_DOWN | ct::INTEGFLAG_PRESERVE;
+                  | ct::INTEGFLAG_COUNT_DOWN | ct::INTEGFLAG_PRESERVE
+                  | ct::INTEGFLAG_ROLL;
 
         ::IntegratorConfig f;
         std::memcpy(&f, &g, sizeof(f));
@@ -6733,19 +6736,22 @@ int main(int argc, char *argv[])
         CHECK(f.start_value == 91.5f);
         CHECK(f.rate_hz == 37);
         CHECK(f.flags == (fw::kIntegFlagActive | fw::kIntegFlagConstInput
-                          | fw::kIntegFlagCountDown | fw::kIntegFlagPreserve));
+                          | fw::kIntegFlagCountDown | fw::kIntegFlagPreserve
+                          | fw::kIntegFlagRoll));
         // The two headers must also agree on the flag bits, the table capacity
         // and the rate ceiling â€” all of which bound what the GUI will send.
         CHECK(ct::INTEGFLAG_ACTIVE == fw::kIntegFlagActive);
         CHECK(ct::INTEGFLAG_CONST_INPUT == fw::kIntegFlagConstInput);
         CHECK(ct::INTEGFLAG_COUNT_DOWN == fw::kIntegFlagCountDown);
         CHECK(ct::INTEGFLAG_PRESERVE == fw::kIntegFlagPreserve);
+        CHECK(ct::INTEGFLAG_ROLL == fw::kIntegFlagRoll);
         CHECK(ct::MAX_INTEGRATORS == fw::kMaxIntegrators);
         CHECK(ct::INTEGRATOR_MAX_HZ == fw::kIntegratorMaxHz);
         // Every flag must be a distinct bit â€” two colliding values would make
         // "count down" and "preserve" the same switch.
         CHECK((ct::INTEGFLAG_ACTIVE | ct::INTEGFLAG_CONST_INPUT
-               | ct::INTEGFLAG_COUNT_DOWN | ct::INTEGFLAG_PRESERVE) == 0x0F);
+               | ct::INTEGFLAG_COUNT_DOWN | ct::INTEGFLAG_PRESERVE
+               | ct::INTEGFLAG_ROLL) == 0x1F);
     }
 
     // ---- CounterConfig crosses the wire too, and it just grew rate_hz. The
@@ -8907,6 +8913,60 @@ int main(int argc, char *argv[])
         for (int t = 0; t < 100; ++t)
             engine_tick(10);
         CHECK(qAbs(engine_signal_value(kOutGated) - 20.0f) < 0.01f);
+    }
+
+    // ---- v21: INTEGFLAG_ROLL. Two integrators identical but for the flag, so
+    // the only thing the comparison can be measuring is the flag. Limits 0..7
+    // with a step of 2 so the wrap lands mid-range and a clamped row cannot
+    // coincidentally match it. Separate engine so the totals above stand. ----
+    {
+        engine_clear_config();
+        constexpr quint16 kIn = 0, kHold = 1, kRoll = 2, kRollDown = 3;
+        ct::IntegratorConfig base{};
+        base.input_signal_idx = kIn;
+        base.reset_signal_idx = 0xFFFF;
+        base.enable_signal_idx = 0xFFFF;
+        base.min_value = 0.0f;
+        base.max_value = 7.0f;
+        base.rate_hz = 10;
+        base.flags = ct::INTEGFLAG_ACTIVE;
+        ct::IntegratorConfig hold = base;
+        hold.dest_signal_idx = kHold;
+        ct::IntegratorConfig roll = base;
+        roll.dest_signal_idx = kRoll;
+        roll.flags = quint8(ct::INTEGFLAG_ACTIVE | ct::INTEGFLAG_ROLL);
+        // Down + roll exercises clampRoll's negative branch: fmodf keeps the
+        // dividend's sign, so the span has to be added back.
+        ct::IntegratorConfig down = base;
+        down.dest_signal_idx = kRollDown;
+        down.flags = quint8(ct::INTEGFLAG_ACTIVE | ct::INTEGFLAG_ROLL
+                            | ct::INTEGFLAG_COUNT_DOWN);
+        const ct::IntegratorConfig all[3] = {hold, roll, down};
+        CHECK(engine_table_write(ENGINE_TABLE_INTEGRATORS, 0, 3,
+                                 reinterpret_cast<const uint8_t *>(all)));
+        ct::ConstantConfig kc{};
+        kc.dest_signal_idx = kIn;
+        kc.value = 2.0f;
+        kc.is_active = 1;
+        CHECK(engine_table_write(ENGINE_TABLE_CONSTANTS, 0, 1,
+                                 reinterpret_cast<const uint8_t *>(&kc)));
+        // One second at 10 Hz is ten steps of +2 (or -2).
+        for (int t = 0; t < 100; ++t)
+            engine_tick(10);
+        // Clamped: 2,4,6,7,7,7,7,7,7,7 - pinned at the ceiling, which is the
+        // behaviour every integrator had from v16 to v20.
+        CHECK(qAbs(engine_signal_value(kHold) - 7.0f) < 0.01f);
+        // Rolled: 2,4,6,1,3,5,0,2,4,6. Note 7 is never a value it takes - the
+        // result lands in [min, max), the same half-open range a counter uses.
+        CHECK(qAbs(engine_signal_value(kRoll) - 6.0f) < 0.01f);
+        // Down and rolled: -2 wraps to 5, then 3,1,6,4,2,0,5,3,1.
+        CHECK(qAbs(engine_signal_value(kRollDown) - 1.0f) < 0.01f);
+        // The ceiling itself must never appear on a rolling row.
+        for (int t = 0; t < 200; ++t) {
+            engine_tick(10);
+            CHECK(engine_signal_value(kRoll) < 7.0f);
+            CHECK(engine_signal_value(kRoll) >= 0.0f);
+        }
     }
 
     // ---- v16: clamping and edge-triggered reset. Separate engine so the

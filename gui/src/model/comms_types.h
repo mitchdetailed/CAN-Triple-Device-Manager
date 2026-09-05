@@ -733,6 +733,11 @@ struct IntegratorRow {
     double resetValue = 0;
     double minValue = 0;
     double maxValue = 1000000;   // max <= min disables clamping
+    // v21: wrap at the limits instead of holding there — INTEGFLAG_ROLL, the
+    // same option counters expose as rollAtLimits. NOT the same as disabling
+    // clamping: an unclamped float32 total stops changing past 2^24 and
+    // freezes at a garbage value, which is worse than holding at the limit.
+    bool rollover = false;
     // Retain the running total across power cycles. Shares the device's
     // 20-entry preserve ring with counters — see CounterRow::preserveValue.
     bool preserveValue = false;

@@ -1580,6 +1580,8 @@ MappingResult mapToDevice(const Configuration &config)
             cfg.flags |= INTEGFLAG_COUNT_DOWN;
         if (g.preserveValue)
             cfg.flags |= INTEGFLAG_PRESERVE;
+        if (g.rollover)
+            cfg.flags |= INTEGFLAG_ROLL;
         cfg.reset_signal_idx = resolveBoolInput(g.resetChannel, where, QStringLiteral("reset"));
         cfg.enable_signal_idx = resolveBoolInput(g.enableChannel, where, QStringLiteral("enable"));
         cfg.dest_signal_idx = quint16(signalFor(g.outputChannel));
@@ -2723,6 +2725,7 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         g.minValue = cfg.min_value;
         g.maxValue = cfg.max_value;
         g.preserveValue = cfg.flags & INTEGFLAG_PRESERVE;
+        g.rollover = cfg.flags & INTEGFLAG_ROLL;
         config.integratorRows.append(g);
     }
 

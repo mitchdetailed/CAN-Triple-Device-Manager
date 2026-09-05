@@ -729,7 +729,10 @@ ReportBuilder buildReport(const Configuration &config)
             // it is load-bearing rather than cosmetic on those rows.
             detail += QStringLiteral(", starts at %1").arg(num(g.startValue));
             if (g.maxValue > g.minValue)
-                detail += QStringLiteral(", clamped %1..%2").arg(num(g.minValue), num(g.maxValue));
+                detail += QStringLiteral(", %1 %2..%3")
+                              .arg(g.rollover ? QStringLiteral("rolls")
+                                              : QStringLiteral("clamped"),
+                                   num(g.minValue), num(g.maxValue));
             else
                 detail += QStringLiteral(", unclamped");
             if (g.preserveValue)

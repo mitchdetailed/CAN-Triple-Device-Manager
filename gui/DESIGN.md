@@ -177,10 +177,11 @@ Configuration checks it against the unit **before it writes anything**, so a
 mismatch is named up front rather than discovered as a part-written device.
 
 **The `.ct3` FILE schema was deliberately NOT reset with it.**
-`kConfigSchemaVersion` keeps counting — it is **20** (17 let a transmit section
+`kConfigSchemaVersion` keeps counting — it is **21** (17 let a transmit section
 name the User Condition that triggers it, 18 made a User Condition Momentary or
 Set/Reset, 19 added `clampToRange`, 20 gave a timer's Start and Stop full
-comparison rows) — and files written at 2 through 19 are on people's disks right
+comparison rows, 21 gave an integrator a rollover flag) — and files written at
+2 through 20 are on people's disks right
 now. Each bump is additive, and the bump is
 mandatory for the familiar reason: `"cyclic": false` has been a legal, inert
 value in every file since the beginning, so an older Manager reads a Triggered
@@ -1134,6 +1135,16 @@ different guarantee, offered as itself.
   **freezes** the step phase rather than dropping steps; an optional Reset
   channel reloads its value on a rising edge, even while disabled. Min/max clamp
   the value (max ≤ min turns clamping off).
+
+  **Roll over at the limits** (v21) wraps instead of holding, the same option
+  the counter and timer tables have always carried — an integrator holding at
+  its ceiling is the wrong answer for a distance, a fuel total or a rolling
+  angle. The wrapped value lands in `[min, max)`, so the maximum itself is never
+  sent. It is **not** interchangeable with turning clamping off: the accumulator
+  is a `float32`, so an unlimited total stops changing once it passes 2²⁴ and
+  freezes at a garbage value — a worse failure than the clamp it replaced. The
+  flag governs accumulation only; a reset still clamps its seed, for the reason
+  the counter's reset branch gives.
 
   **Preserve value** retains the running total across power cycles, restoring it
   in place of the Starting value at the next boot. It shares the counters'

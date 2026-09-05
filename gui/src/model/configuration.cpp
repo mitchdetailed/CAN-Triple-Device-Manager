@@ -865,6 +865,7 @@ QJsonObject IntegratorRow::toJson() const
     o["resetValue"] = resetValue;
     o["min"] = minValue;
     o["max"] = maxValue;
+    o["rollover"] = rollover;
     o["preserveValue"] = preserveValue;
     o["active"] = active;
     return o;
@@ -885,6 +886,7 @@ IntegratorRow IntegratorRow::fromJson(const QJsonObject &o)
     g.resetValue = o["resetValue"].toDouble(0);
     g.minValue = o["min"].toDouble(0);
     g.maxValue = o["max"].toDouble(1000000);
+    g.rollover = o["rollover"].toBool(false);
     g.preserveValue = o["preserveValue"].toBool(false);
     g.active = o["active"].toBool(true);
     return g;
@@ -1703,7 +1705,14 @@ bool Configuration::setCommsPassword(const QString &password)
 // direction. A build that predates the flag would drop it on load and Send a
 // configuration that clamps where the author asked it to roll over: a silent
 // behaviour change on a real bus. Refusing to open the file says so instead.
-static constexpr int kConfigSchemaVersion = 20;
+// 20 -> 21 adds IntegratorRow::rollover. Additive and unambiguous on the way
+// in — a file without the key predates the option and clamped — so nothing
+// migrates. The bump is for the guard ABOVE, in the direction that bites: a
+// build predating the flag drops it on load and Sends a configuration that
+// HOLDS at the limit where the author asked it to wrap. A distance or fuel
+// total silently pinned at its ceiling is the same class of quiet behaviour
+// change that earned v19 its bump for clampToRange, so it earns one too.
+static constexpr int kConfigSchemaVersion = 21;
 
 // The one accessor, so nothing outside this file has to hold a second copy of
 // the number. Communications templates stamp it into the file they write and

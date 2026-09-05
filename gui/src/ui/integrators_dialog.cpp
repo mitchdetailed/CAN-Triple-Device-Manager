@@ -242,10 +242,25 @@ public:
             m_maxSpin->setRange(-1e9, 1e9);
             m_maxSpin->setDecimals(6);
             form->addRow(QObject::tr("Maximum :"), m_maxSpin);
+
+            m_rollCheck = new QCheckBox(
+                QObject::tr("Roll over at the limits"), group);
+            m_rollCheck->setToolTip(
+                QObject::tr("Wraps at Minimum/Maximum instead of holding there, so a\n"
+                            "total that runs past the end comes round again - what a\n"
+                            "distance, a fuel total or a rolling angle usually want.\n\n"
+                            "The value lands in [Minimum, Maximum), so Maximum itself\n"
+                            "is never sent - the same convention a counter uses.\n\n"
+                            "Not the same as setting Maximum below Minimum, which turns\n"
+                            "limiting off entirely: an unlimited total stops changing\n"
+                            "once it passes 16,777,216 and freezes there.\n\n"
+                            "A reset still clamps its seed rather than wrapping it."));
+            form->addRow(QString(), m_rollCheck);
             auto *note = new QLabel(
-                QObject::tr("The value holds at these limits — for a count-down "
-                            "integrator the minimum is the floor it stops at. A maximum "
-                            "that does not exceed the minimum turns clamping off entirely."),
+                QObject::tr("Unless Roll over at the limits is ticked, the value holds "
+                            "at these limits — for a count-down integrator the minimum "
+                            "is the floor it stops at. A maximum that does not exceed "
+                            "the minimum turns clamping off entirely."),
                 group);
             note->setWordWrap(true);
             form->addRow(QString(), note);
@@ -289,6 +304,7 @@ public:
         m_resetValueSpin->setValue(m_row.resetValue);
         m_minSpin->setValue(m_row.minValue);
         m_maxSpin->setValue(m_row.maxValue);
+        m_rollCheck->setChecked(m_row.rollover);
         m_preserveCheck->setChecked(m_row.preserveValue);
         m_activeCheck->setChecked(m_row.active);
         updateInputMode();
@@ -384,6 +400,7 @@ private:
         m_row.resetValue = m_resetValueSpin->value();
         m_row.minValue = m_minSpin->value();
         m_row.maxValue = m_maxSpin->value();
+        m_row.rollover = m_rollCheck->isChecked();
         m_row.preserveValue = m_preserveCheck->isChecked();
         m_row.active = m_activeCheck->isChecked();
         accept();
@@ -410,6 +427,7 @@ private:
     QDoubleSpinBox *m_minSpin = nullptr;
     QDoubleSpinBox *m_maxSpin = nullptr;
     QCheckBox *m_preserveCheck = nullptr;
+    QCheckBox *m_rollCheck = nullptr;
     QCheckBox *m_activeCheck = nullptr;
 };
 

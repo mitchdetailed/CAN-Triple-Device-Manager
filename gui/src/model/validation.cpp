@@ -965,6 +965,14 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
             add(ValidationIssue::Warning, loc,
                 QStringLiteral("maximum does not exceed minimum, so the value is never "
                                "clamped and can run away"));
+        // Roll over needs limits to wrap against. With limiting off the flag
+        // does nothing, and the row the author wanted to wrap instead runs
+        // away and freezes once a float32 stops resolving 1 - so this reads as
+        // "roll over" while behaving like the one case it cannot survive.
+        if (g.rollover && !clamped)
+            add(ValidationIssue::Warning, loc,
+                QStringLiteral("rolls over at the limits, but maximum does not exceed "
+                               "minimum, so there are no limits to roll at"));
         // A count-down integrator that starts at or below its floor is already
         // finished before it begins — the classic "forgot to set the peak".
         if (g.countDown && clamped && g.startValue <= g.minValue)

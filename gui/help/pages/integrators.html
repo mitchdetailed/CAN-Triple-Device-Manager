@@ -80,9 +80,17 @@ a reset edge.</td></tr>
 running total in flash and restores it at the next power-up instead of the
 starting value — see below.</td></tr>
 <tr><td>Limits</td><td>Minimum : / Maximum :</td><td>The value holds at these
-limits — for a count-down integrator the minimum is the floor it stops at. A
-maximum that does not exceed the minimum turns clamping off entirely, and the
-value can then run away; validation warns about it.</td></tr>
+limits — for a count-down integrator the minimum is the floor it stops at — unless
+<b>Roll over at the limits</b> is ticked. A maximum that does not exceed the
+minimum turns clamping off entirely, and the value can then run away; validation
+warns about it.</td></tr>
+<tr><td></td><td>Roll over at the limits</td><td>Ticked, the total wraps within the
+Minimum–Maximum range instead of stopping at it, which is usually what a distance,
+a fuel total or a rolling angle wants. The value lands in [Minimum, Maximum), so
+Maximum itself is never sent — the same convention <a href="counters.html">Roll at
+limits</a> uses. This is not the same as turning limiting off: an unlimited total
+stops changing once it passes 16,777,216 and freezes there. A reset still clamps
+its seed rather than wrapping it.</td></tr>
 <tr><td></td><td>Active</td><td>Only active integrators run on the
 device.</td></tr>
 </table>

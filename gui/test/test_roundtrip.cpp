@@ -49,7 +49,7 @@ static int failures = 0;
 // re-reading something this build just WROTE passes it: the pre-14 legacy
 // protection keys migrate only when the file actually predates 14, so handing
 // such a call a stale number would ratchet a Read Only section into Hidden.
-static constexpr int kCurrentSchemaVersion = 20;
+static constexpr int kCurrentSchemaVersion = 21;
 // A .ct3 fileVersion this build has never heard of, for checking that a file
 // from a NEWER release is refused rather than half-read. DERIVED, not typed:
 // it was the literal 14 until 2.3.0, the 13 -> 14 schema bump caught it up, and
@@ -1288,6 +1288,7 @@ static void testIntegrators()
     dec.maxValue = 60;
     dec.rateHz = 20;
     dec.preserveValue = true;
+    dec.rollover = true;
     config.integratorRows.append(dec);
 
     CHECK(config.generatedChannelNames().contains(QStringLiteral("Fuel Used")));
@@ -1332,10 +1333,12 @@ static void testIntegrators()
         const IntegratorRow &back = roundTrip.integratorRows[2];
         CHECK(back.countDown);
         CHECK(back.preserveValue);
+        CHECK(back.rollover);            // v21, through mapToDevice + mapFromDevice
         CHECK(qAbs(back.startValue - 60.0) < 1e-4);
         CHECK(qAbs(back.resetValue - 55.0) < 1e-4);
         CHECK(!roundTrip.integratorRows[0].countDown);
         CHECK(!roundTrip.integratorRows[0].preserveValue);
+        CHECK(!roundTrip.integratorRows[0].rollover);   // and stays clear where unset
     }
     if (roundTrip.integratorRows.size() == 3) {
         const IntegratorRow &r = roundTrip.integratorRows[0];
@@ -1372,6 +1375,7 @@ static void testIntegrators()
             CHECK(qAbs(loaded.integratorRows[1].inputValue - 0.5) < 1e-6);
             CHECK(loaded.integratorRows[2].countDown);
             CHECK(loaded.integratorRows[2].preserveValue);
+            CHECK(loaded.integratorRows[2].rollover);      // v21, through the file
             CHECK(qAbs(loaded.integratorRows[2].startValue - 60.0) < 1e-6);
             CHECK(qAbs(loaded.integratorRows[2].resetValue - 55.0) < 1e-6);
         }

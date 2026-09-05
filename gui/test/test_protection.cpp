@@ -83,7 +83,7 @@ static int failures = 0;
 // re-reading something this build just WROTE has to be handed this number:
 // passing a stale one re-runs the pre-14 migration and ratchets a Read Only
 // section into Hidden, which is property 2 above failing silently.
-static constexpr int kCurrentSchemaVersion = 20;
+static constexpr int kCurrentSchemaVersion = 21;
 // The last schema that spelled protection with the legacy boolean keys.
 static constexpr int kLegacySchemaVersion = 13;
 
