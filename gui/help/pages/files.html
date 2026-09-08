@@ -161,7 +161,8 @@ if the Builder was asked, an editable copy wrapped under a package password.</p>
 
 <p class="warn">Be clear about the limits. Whoever holds the Firmware Key
 passphrase can decrypt anything built under it. A device holds the key in its
-flash, so an ST-Link with readout protection off recovers both. And a package
+flash, so an ST-Link with readout protection off recovers both — which is why a
+licensed unit sets that protection itself from firmware 1.0.9. And a package
 built by an older Manager (format 2) still opens and installs the way it always
 did — its key rides inside the file — until it is rebuilt.</p>
 

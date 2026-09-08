@@ -255,6 +255,34 @@ always used.</p>
 is decrypted in this process. For a format-2 package it still is, because that
 format has no other way to be sent.</p>
 
+<h2 id="readout">Readout protection</h2>
+
+<p>Everything above lives in the unit's flash: the configuration store, the
+access keys, and the licence page with the Firmware Key that decrypts every
+package built for the fleet. The STM32's on-board ST-LINK can read all of it
+back unless the chip's <b>readout protection</b> is set. From device firmware
+1.0.9, <b>a unit that holds a Firmware Key sets readout protection level 1
+itself</b> at boot, once, and resets; a unit with no licence — a bare
+development board — is left open. Device Status reports the level.</p>
+
+<p>What level 1 means, stated plainly:</p>
+<ul>
+<li>The flash cannot be read over the debug port. Firmware updates through the
+Manager keep working, because they run on the chip itself.</li>
+<li>It is undone only by a <b>mass erase</b>: bootloader, firmware,
+configuration, passwords and licence all go, and the unit comes back blank.
+That is the protection, and it applies to you as much as to anyone else.</li>
+<li>The initial programming tool cannot program a locked unit until it is
+unlocked. Run it with <code>--unlock</code>, which performs that erase first
+and then programs the bootloader and firmware as usual; the unit then needs
+its licence issued again before it will take packages.</li>
+<li>Level 2 is permanent and is never set by anything here.</li>
+</ul>
+
+<p class="note">The order of provisioning therefore matters: program the
+firmware, then issue the licence. The unit locks at its next power-up after the
+licence is written, so there is nothing else to do — and nothing to forget.</p>
+
 <h2>What this is — and is not</h2>
 
 <ul>
@@ -268,10 +296,9 @@ update.</li>
 conventions of this application. Any other serial tool talking to the device
 defeats them, and the device enforces nothing about them. See
 <a href="communications.html">Communications</a>.</li>
-<li>None of it stops an ST-Link reading a device's flash directly — and the
-flash holds the Firmware Key as well as the configuration. The backstop for that
-is STM32G4 readout protection, a device programming decision rather than a code
-one.</li>
+<li>An ST-Link reading a device's flash directly is stopped only by readout
+protection — and the flash holds the Firmware Key as well as the configuration.
+A licensed unit sets it itself; see <a href="#readout">Readout protection</a>.</li>
 </ul>
 
 <p class="footer">CAN Triple Device Manager — this documentation is part of the program and licensed under the MIT License. See <a href="license.html">License</a>.</p>

@@ -94,6 +94,7 @@ One read-only report of what the unit is and what it is doing:
 - Active table counts (messages, channels, math, User Conditions).
 - Firmware protocol version.
 - MCU ID and whether the stored configuration is locked to a different unit (which is why an apparently inert device shows 0 active messages).
+- Readout protection: whether the flash can be read over the debug port. A licensed unit locks itself at boot from firmware 1.0.9 — see [Readout protection](licensing.md#readout).
 - Which access passwords are set — never their values. This tells you in advance that a Send or Get will ask for a password.
 - The firmware licence (manufacturer, model, version) and which of its two secrets the unit holds, plus the configuration version it is running — see [Firmware Licensing &amp; Access Keys](licensing.md).
 

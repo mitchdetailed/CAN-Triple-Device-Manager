@@ -279,6 +279,9 @@ after it came back with no passwords at all.</p>
 <li>Firmware protocol version.</li>
 <li>MCU ID and whether the stored configuration is locked to a different
 unit (which is why an apparently inert device shows 0 active messages).</li>
+<li>Readout protection: whether the flash can be read over the debug port.
+A licensed unit locks itself at boot from firmware 1.0.9 — see
+<a href="licensing.html#readout">Readout protection</a>.</li>
 <li>Which access passwords are set — never their values. This tells you in
 advance that a Send or Get will ask for a password.</li>
 <li>The firmware licence (manufacturer, model, version) and which of its two

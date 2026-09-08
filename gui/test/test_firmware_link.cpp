@@ -214,6 +214,7 @@ static_assert(commandIdsDistinct(),
 // would read the serial number out of the date field — a plausible-looking
 // answer, on a record that cannot be corrected afterwards.
 constexpr unsigned kCmdGetDeviceInfo = CMD_GET_DEVICE_INFO;
+constexpr unsigned kCmdGetProtection = CMD_GET_PROTECTION;
 constexpr int kOtpInfoLen = OTP_INFO_LEN;
 constexpr int kOtpManufacturerAt = OTP_INFO_MANUFACTURER_AT;
 constexpr int kOtpManufacturerLen = OTP_INFO_MANUFACTURER_LEN;
@@ -311,6 +312,7 @@ constexpr unsigned kLicenseKeyClear = LICENSE_KEY_CLEAR;
 #undef CMD_GET_DEVICE_ID
 #undef CMD_WRITE_CONFIG_BINDING
 #undef CMD_GET_DEVICE_INFO
+#undef CMD_GET_PROTECTION
 #undef OTP_INFO_LEN
 #undef OTP_INFO_MANUFACTURER_AT
 #undef OTP_INFO_MANUFACTURER_LEN
@@ -6518,6 +6520,46 @@ static void testSealedInstallAgainstTheDevice(const SerialProtoCallbacks *restor
     engine_set_access_keys(nullptr); // leave the gates as this test found them
 }
 
+// CMD_GET_PROTECTION. The level comes through a callback — reading FLASH->OPTR
+// on a desktop would fault — so this checks the wiring both ways: a build with
+// no callback says "cannot tell you", which is what older firmware is to a
+// host, and one with it answers the byte the host's reader parses.
+static uint8_t fakeReadoutLevel(void)
+{
+    return 1u;
+}
+
+static void testReadoutProtection(const SerialProtoCallbacks *restore)
+{
+    CHECK(ct::CMD_GET_PROTECTION == fw::kCmdGetProtection);
+    SerialProtoCallbacks cb = *restore;
+    cb.readout_level = nullptr;
+    serial_proto_init(&cb);
+    CHECK(expectNack(ct::CMD_GET_PROTECTION, QByteArray(), ct::ERR_INVALID_CMD));
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        ct::device_session::ReadoutProtection rp;
+        QString err;
+        CHECK(ct::device_session::readReadoutProtection(&link, &rp, &err));
+        CHECK(!rp.supported && err.isEmpty());
+    }
+    cb.readout_level = fakeReadoutLevel;
+    serial_proto_init(&cb);
+    {
+        const auto p = exchange(ct::CMD_GET_PROTECTION, QByteArray());
+        CHECK(p.size() == 1 && p[0].cmd == ct::CMD_GET_PROTECTION && p[0].payload.size() == 1
+              && quint8(p[0].payload[0]) == 1);
+    }
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        ct::device_session::ReadoutProtection rp;
+        QString err;
+        CHECK(ct::device_session::readReadoutProtection(&link, &rp, &err));
+        CHECK(rp.supported && rp.level == 1);
+    }
+    serial_proto_init(restore);
+}
+
 static void testConfigTransferRefusesToSwallowAFatalStep(const SerialProtoCallbacks *restore)
 {
     EngineCallbacks cb{};
@@ -9498,6 +9540,7 @@ int main(int argc, char *argv[])
     // re-badged device behind for the next one.
     testDeviceAccess(&protoCb);
     testOtpDeviceInfo(&protoCb);
+    testReadoutProtection(&protoCb);
     testFirmwareLicense(&protoCb);
     testConfigVersion(&protoCb);
     testSealedInstallAgainstTheDevice(&protoCb);

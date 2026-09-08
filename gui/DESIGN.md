@@ -781,6 +781,25 @@ documented trap: access keys live in the write-once header, so a password set
 through Set Access Passwords on an already-configured unit only ever lasted until
 the next power cycle. A package install re-commits that header anyway.
 
+### Readout protection
+
+`lockReadoutIfLicensed()` in `user_code.c` (firmware 1.0.9) runs right after
+`license_store_init()`: a unit whose licence page holds a Firmware Key and
+whose option bytes say RDP level 0 programs level 1 through the pre-existing
+`setRDP()` and resets in the option-byte launch; every later boot returns at
+the first test. The gate is the key rather than "always" because level 1 is
+undone only by a mass erase that takes the bootloader, the licence and the
+configuration with it: a production unit is licensed and should lock, a bare
+development board is not and should stay open until it is. Level 2 is never
+written. `CMD_GET_PROTECTION` (0x4F, ungated, one byte) reports the level for
+Device Status through a `readout_level` callback, like every other MCU register
+this protocol layer reaches, so the host test suite can wire a fake one. The
+initial programming tool grew `--unlock` for the way back: OpenOCD's
+`stm32l4x unlock` then `option_load`, which is the erase, followed by the
+ordinary programming pass. The threat this closes is the one the sealed
+package leaves open by design — a unit in someone else's hands giving up its
+flash, key included, over the debug port.
+
 ## Send Secure Configuration
 
 **Online → Send Secure Configuration…** (`MainWindow::onSendSecureConfiguration()`),

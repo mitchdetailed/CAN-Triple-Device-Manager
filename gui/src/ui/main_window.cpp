@@ -2271,6 +2271,27 @@ void MainWindow::onDeviceStatus()
                          "these details.");
     }
 
+    // Whether the flash can be read over the debug port. This is the backstop
+    // behind everything above: the licence page holds the key that decrypts
+    // every package for the fleet and the config store holds the configuration,
+    // and readout protection is what keeps an ST-LINK from lifting both. A
+    // licensed unit sets it itself at boot from firmware 1.0.9.
+    device_session::ReadoutProtection readout;
+    if (device_session::readReadoutProtection(&m_link, &readout, &sessionError)) {
+        if (!readout.supported)
+            text += tr("\n\nReadout protection: not reported by this firmware. Firmware 1.0.9 "
+                       "or newer reports it, and locks a licensed unit at boot.");
+        else if (readout.level == 0)
+            text += tr("\n\nReadout protection: off. The flash can be read over the debug "
+                       "port; a unit locks itself at its next power-up once it holds a "
+                       "Firmware Key.");
+        else if (readout.level == 1)
+            text += tr("\n\nReadout protection: level 1. The flash cannot be read over the "
+                       "debug port, and removing the protection erases the unit.");
+        else
+            text += tr("\n\nReadout protection: level 2 (permanent).");
+    }
+
     // The configuration version: the revision of the configuration THIS unit is
     // running, stamped by the package that installed it. A plain Send leaves it
     // alone, so it stays the last release's number rather than becoming zero.

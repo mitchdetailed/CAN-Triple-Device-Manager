@@ -119,8 +119,22 @@ A `.ct3s` with no policy is refused. "This package makes no demands" is not some
 
 > **Note:** The honest boundary: for a package built by this Builder, nothing is decrypted in this process. For a format-2 package it still is, because that format has no other way to be sent.
 
+<a id="readout"></a>
+
+## Readout protection
+
+Everything above lives in the unit's flash: the configuration store, the access keys, and the licence page with the Firmware Key that decrypts every package built for the fleet. The STM32's on-board ST-LINK can read all of it back unless the chip's **readout protection** is set. From device firmware 1.0.9, **a unit that holds a Firmware Key sets readout protection level 1 itself** at boot, once, and resets; a unit with no licence — a bare development board — is left open. Device Status reports the level.
+
+What level 1 means, stated plainly:
+- The flash cannot be read over the debug port. Firmware updates through the Manager keep working, because they run on the chip itself.
+- It is undone only by a **mass erase**: bootloader, firmware, configuration, passwords and licence all go, and the unit comes back blank. That is the protection, and it applies to you as much as to anyone else.
+- The initial programming tool cannot program a locked unit until it is unlocked. Run it with `--unlock`, which performs that erase first and then programs the bootloader and firmware as usual; the unit then needs its licence issued again before it will take packages.
+- Level 2 is permanent and is never set by anything here.
+
+> **Note:** The order of provisioning therefore matters: program the firmware, then issue the licence. The unit locks at its next power-up after the licence is written, so there is nothing else to do — and nothing to forget.
+
 ## What this is — and is not
 - A Firmware Key is **shared across everything built under it**. One recovered key compromises every unit that holds it, and revocation means re-issuing licences.
 - None of this is a signature and none of it is DRM. It stops the wrong file reaching the wrong product, and a look-alike collecting someone else's update.
 - The message protection tiers — Read Only, Hidden, Protected — are conventions of this application. Any other serial tool talking to the device defeats them, and the device enforces nothing about them. See [Communications](communications.md).
-- None of it stops an ST-Link reading a device's flash directly — and the flash holds the Firmware Key as well as the configuration. The backstop for that is STM32G4 readout protection, a device programming decision rather than a code one.
+- An ST-Link reading a device's flash directly is stopped only by readout protection — and the flash holds the Firmware Key as well as the configuration. A licensed unit sets it itself; see [Readout protection](#readout).

@@ -17,7 +17,8 @@
 // What it deliberately does NOT do:
 //   - touch the configuration store, retained values, or access keys — this
 //     tool reinstates the PROGRAM, not the device's data (the erase is
-//     bounded to the pages the two images occupy, all in bank 1);
+//     bounded to the pages the two images occupy, all in bank 1). The one
+//     exception is --unlock, below, which is a mass erase by definition;
 //   - upload configurations. Configuration transfer belongs to the serial
 //     protocol, where the device's own gates — access passwords, upload
 //     policy, per-device binding — are enforced. An SWD write would bypass
@@ -36,8 +37,19 @@
 // and it works on any machine with the ST-LINK driver (which the same folder's
 // parent install provides).
 //
-//   CANTripleInitialProgramming [--yes] [--bootloader FILE] [--firmware FILE]
-//                               [--openocd EXE]
+//   CANTripleInitialProgramming [--yes] [--unlock] [--bootloader FILE]
+//                               [--firmware FILE] [--openocd EXE]
+//
+// --unlock is the way back from readout protection. A licensed unit sets RDP
+// level 1 on itself at boot (firmware 1.0.9, lockReadoutIfLicensed() in the
+// firmware), after which the debug port can neither read nor program the
+// flash, and the plain run of this tool fails at the first verify. Regressing
+// to level 0 makes the chip MASS-ERASE itself — bootloader, application,
+// configuration, retained values, access keys and the licence page all go —
+// which is precisely what level 1 promises. So --unlock does that erase first,
+// waits for the reset it causes, and then programs both images exactly as a
+// plain run does. The unit comes back blank and unlicensed: issue its licence
+// again in the Manager, and it locks itself at the next power-up.
 //
 // Exit 0 on success, 1 on any failure, so it can gate a provisioning script.
 
@@ -175,9 +187,7 @@ bool validateBootloader(const std::vector<uint8_t> &img, uint32_t *version_out)
 // images, said "programming...", and then refused at the log file before
 // OpenOCD ever ran. So an unwritable first choice falls back to %TEMP%, and
 // the path reported to the user is the one actually used.
-bool runOpenocd(const std::string &ocd, const std::string &scripts,
-                const std::string &blPath, const std::string &appPath,
-                std::string &logPath)
+std::string openocdPrefix(const std::string &ocd, const std::string &scripts)
 {
     std::string cmd;
     cmd += "\"" + ocd + "\"";
@@ -185,11 +195,26 @@ bool runOpenocd(const std::string &ocd, const std::string &scripts,
     cmd += " -f interface/stlink.cfg";
     cmd += " -c \"transport select swd\"";
     cmd += " -f stm32g4x_512k.cfg";
-    cmd += " -c \"program {" + tclPath(blPath) + "} 0x08000000 verify\"";
-    cmd += " -c \"program {" + tclPath(appPath) + "} 0x08004000 verify\"";
-    cmd += " -c \"reset run\"";
-    cmd += " -c \"shutdown\"";
+    return cmd;
+}
 
+// Print roughly the last 25 lines of an OpenOCD log — where ST-LINK
+// enumeration failures, target voltage problems and verify mismatches all
+// land.
+void printLogTail(const std::string &text)
+{
+    size_t start = text.size();
+    for (int lines = 0; start > 0 && lines < 25; --start)
+        if (text[start - 1] == '\n')
+            ++lines;
+    std::fwrite(text.data() + start, 1, text.size() - start, stdout);
+}
+
+// Run one command line with its output captured to logPath (which may move,
+// see runOpenocd) and hand the log text back. Returns the exit code, or -1 when
+// the process could not be started or the log could not be written.
+int runLogged(const std::string &cmd, std::string &logPath, std::string &text)
+{
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
@@ -207,7 +232,7 @@ bool runOpenocd(const std::string &ocd, const std::string &scripts,
     if (log == INVALID_HANDLE_VALUE) {
         std::printf("  FAILED  cannot write a log file (tried %s)\n",
                     logPath.c_str());
-        return false;
+        return -1;
     }
 
     STARTUPINFOA si{};
@@ -229,7 +254,7 @@ bool runOpenocd(const std::string &ocd, const std::string &scripts,
     if (!ok) {
         CloseHandle(log);
         std::printf("  FAILED  could not start OpenOCD (%lu)\n", GetLastError());
-        return false;
+        return -1;
     }
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD exitCode = 1;
@@ -238,12 +263,30 @@ bool runOpenocd(const std::string &ocd, const std::string &scripts,
     CloseHandle(pi.hThread);
     CloseHandle(log);
 
+    std::vector<uint8_t> raw;
+    readFile(logPath, raw);
+    text.assign(raw.begin(), raw.end());
+    return int(exitCode);
+}
+
+bool runOpenocd(const std::string &ocd, const std::string &scripts,
+                const std::string &blPath, const std::string &appPath,
+                std::string &logPath)
+{
+    std::string cmd = openocdPrefix(ocd, scripts);
+    cmd += " -c \"program {" + tclPath(blPath) + "} 0x08000000 verify\"";
+    cmd += " -c \"program {" + tclPath(appPath) + "} 0x08004000 verify\"";
+    cmd += " -c \"reset run\"";
+    cmd += " -c \"shutdown\"";
+
+    std::string text;
+    const int exitCode = runLogged(cmd, logPath, text);
+    if (exitCode < 0)
+        return false;
+
     // Success is BOTH the exit code and two explicit verifications in the log
     // — one per image. OpenOCD has been known to exit 0 from a shutdown that
     // never programmed anything, so the words are checked, not just the code.
-    std::vector<uint8_t> raw;
-    readFile(logPath, raw);
-    const std::string text(raw.begin(), raw.end());
     int verified = 0;
     for (size_t at = 0; (at = text.find("** Verified OK **", at)) != std::string::npos; ++at)
         ++verified;
@@ -251,16 +294,52 @@ bool runOpenocd(const std::string &ocd, const std::string &scripts,
     if (exitCode == 0 && verified >= 2)
         return true;
 
-    std::printf("\n  FAILED  OpenOCD exit code %lu, %d of 2 images verified.\n"
+    std::printf("\n  FAILED  OpenOCD exit code %d, %d of 2 images verified.\n"
                 "  The tail of its log (%s):\n\n",
                 exitCode, verified, logPath.c_str());
-    // Print roughly the last 25 lines — where ST-LINK enumeration failures,
-    // target voltage problems and verify mismatches all land.
-    size_t start = text.size();
-    for (int lines = 0; start > 0 && lines < 25; --start)
-        if (text[start - 1] == '\n')
-            ++lines;
-    std::fwrite(text.data() + start, 1, text.size() - start, stdout);
+    printLogTail(text);
+    if (text.find("RDP") != std::string::npos || text.find("protect") != std::string::npos
+        || text.find("Error: failed erasing") != std::string::npos
+        || text.find("Error: error writing") != std::string::npos)
+        std::printf("\n  If this unit has readout protection set - a licensed unit running\n"
+                    "  firmware 1.0.9 or newer locks itself - run this tool again with\n"
+                    "  --unlock, which erases the chip first and then programs it.\n");
+    return false;
+}
+
+// --unlock: take the chip back from readout-protection level 1. Writing level 0
+// into the option bytes and reloading them makes the chip mass-erase itself,
+// which is what level 1 means and why a licensed unit sets it. The two OpenOCD
+// commands are the L4/G4 family's documented sequence: "stm32l4x unlock" writes
+// the option byte, "stm32l4x option_load" reloads the option bytes, and the
+// reload resets the target and drops the debug connection. OpenOCD is expected
+// to complain after that point, so success is read from the driver's own
+// "unlocked" line rather than from the exit code. The tool then waits out the
+// reset before the ordinary programming pass reconnects.
+//
+// Written from the OpenOCD reference for the stm32l4x driver; the first unit
+// to go through it for real is the one to watch.
+bool runOpenocdUnlock(const std::string &ocd, const std::string &scripts, std::string &logPath)
+{
+    std::string cmd = openocdPrefix(ocd, scripts);
+    cmd += " -c \"init\"";
+    cmd += " -c \"reset halt\"";
+    cmd += " -c \"stm32l4x unlock 0\"";
+    cmd += " -c \"stm32l4x option_load 0\"";
+    cmd += " -c \"shutdown\"";
+
+    std::string text;
+    const int exitCode = runLogged(cmd, logPath, text);
+    if (exitCode < 0)
+        return false;
+    if (text.find("unlocked") != std::string::npos) {
+        Sleep(2000); // the option-byte reload resets the chip and runs the mass erase
+        return true;
+    }
+    std::printf("\n  FAILED  the unlock did not take (OpenOCD exit code %d).\n"
+                "  The tail of its log (%s):\n\n",
+                exitCode, logPath.c_str());
+    printLogTail(text);
     return false;
 }
 
@@ -277,12 +356,15 @@ int main(int argc, char **argv)
     std::string ocdPath = dir + "\\openocd\\bin\\openocd.exe";
     std::string scripts = dir + "\\openocd\\scripts";
     bool assumeYes = false;
+    bool unlock = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const bool hasNext = i + 1 < argc;
         if (a == "--yes")
             assumeYes = true;
+        else if (a == "--unlock")
+            unlock = true;
         else if (a == "--bootloader" && hasNext)
             blPath = argv[++i];
         else if (a == "--firmware" && hasNext)
@@ -290,7 +372,7 @@ int main(int argc, char **argv)
         else if (a == "--openocd" && hasNext)
             ocdPath = argv[++i];
         else {
-            std::printf("usage: CANTripleInitialProgramming [--yes] "
+            std::printf("usage: CANTripleInitialProgramming [--yes] [--unlock] "
                         "[--bootloader FILE] [--firmware FILE] [--openocd EXE]\n");
             return 1;
         }
@@ -395,6 +477,14 @@ int main(int argc, char **argv)
                 "  firmware you want inside the CAN Triple Device Manager\n"
                 "  (Online > Update Firmware) once the device is running.\n"
                 "  Safe to re-run at any time, including after a failed attempt.\n\n");
+    if (unlock)
+        std::printf("  --unlock: readout protection is removed FIRST, and that is a mass\n"
+                    "  erase of the whole chip. The bootloader, the firmware, the stored\n"
+                    "  configuration, retained values, access passwords and the firmware\n"
+                    "  licence are all erased before the two images are programmed. The\n"
+                    "  unit comes back blank and unlicensed: issue its licence again in\n"
+                    "  the Manager (Online > Firmware License Manager), and it locks itself\n"
+                    "  at the next power-up.\n\n");
 
     if (!assumeYes) {
         std::printf("  Type YES to program the device: ");
@@ -402,6 +492,19 @@ int main(int argc, char **argv)
         if (!std::fgets(answer, sizeof(answer), stdin)
             || std::strncmp(answer, "YES", 3) != 0) {
             std::printf("  Nothing done.\n");
+            return 1;
+        }
+    }
+
+    if (unlock) {
+        std::printf("\n  removing readout protection (this erases the chip)...\n");
+        std::string unlockLog = dir + "\\initial-programming-unlock.log";
+        if (!runOpenocdUnlock(ocdPath, scripts, unlockLog)) {
+            std::printf("\n  Nothing was programmed. Fix the cause above and run again.\n");
+            if (!assumeYes) {
+                std::printf("\n  Press Enter to close.");
+                std::getchar();
+            }
             return 1;
         }
     }
@@ -425,6 +528,10 @@ int main(int argc, char **argv)
                 "  the CAN Triple Device Manager and use Online > Update Firmware.\n",
                 blVersion, hdr->fw_version_major, hdr->fw_version_minor,
                 hdr->fw_version_patch);
+    if (unlock)
+        std::printf("\n  The unit is blank and unlicensed. Issue its licence in the Manager\n"
+                    "  (Online > Firmware License Manager); it locks itself at the next\n"
+                    "  power-up after that.\n");
     if (!assumeYes) {
         std::printf("\n  Press Enter to close.");
         std::getchar();

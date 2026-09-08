@@ -65,7 +65,7 @@ Good reasons to choose it anyway: keeping a configuration in git where the histo
 
 A package built by the Secure Configuration Builder is sealed under keys derived from the Firmware Key, and the key does not travel in the file: the device derives the same keys from its licence and decrypts the install itself, frame by frame, while the Manager only relays. The package carries a proof the installer can check a unit against, an **install policy** — the manufacturer, model, version and hardware it demands, and which passwords it sets — and, only if the Builder was asked, an editable copy wrapped under a package password.
 
-> **Warning:** Be clear about the limits. Whoever holds the Firmware Key passphrase can decrypt anything built under it. A device holds the key in its flash, so an ST-Link with readout protection off recovers both. And a package built by an older Manager (format 2) still opens and installs the way it always did — its key rides inside the file — until it is rebuilt.
+> **Warning:** Be clear about the limits. Whoever holds the Firmware Key passphrase can decrypt anything built under it. A device holds the key in its flash, so an ST-Link with readout protection off recovers both — which is why a licensed unit sets that protection itself from firmware 1.0.9. And a package built by an older Manager (format 2) still opens and installs the way it always did — its key rides inside the file — until it is rebuilt.
 
 The policy stops a package being *used* where it should not be; the seal stops it being *read*. They are different guarantees and the file now offers both. See [Firmware Licensing &amp; Access Keys](licensing.md).
 

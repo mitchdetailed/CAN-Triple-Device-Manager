@@ -141,6 +141,15 @@ struct DeviceInfo {
     }
 };
 
+// The STM32's readout-protection level, as the unit's option bytes report it
+// (CMD_GET_PROTECTION, firmware 1.0.9). 0 = off, 1 = the flash cannot be read
+// over the debug port, 2 = permanent. A licensed unit sets level 1 itself at
+// boot, so on current firmware "off" means "holds no Firmware Key yet".
+struct ReadoutProtection {
+    bool supported = false; // false on firmware without the command
+    int level = 0;
+};
+
 // Parsing, deliberately separated from the I/O. Both wire formats are defined
 // by the firmware, and the only way to prove this side reads them correctly is
 // to feed it the bytes the firmware actually emitted — which test_firmware_link
@@ -153,6 +162,7 @@ bool parseDeviceInfo(const QByteArray &payload, DeviceInfo *out);
 bool parseLicense(const QByteArray &payload, LicenseState *out);
 
 bool readIdentity(DeviceLink *link, Identity *out, QString *error);
+bool readReadoutProtection(DeviceLink *link, ReadoutProtection *out, QString *error);
 bool readAccessState(DeviceLink *link, AccessState *out, QString *error);
 bool readConfigVersion(DeviceLink *link, ConfigVersionState *out, QString *error);
 bool readDeviceInfo(DeviceLink *link, DeviceInfo *out, QString *error);

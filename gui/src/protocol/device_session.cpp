@@ -292,6 +292,32 @@ bool readIdentity(DeviceLink *link, Identity *out, QString *error)
     return true;
 }
 
+bool readReadoutProtection(DeviceLink *link, ReadoutProtection *out, QString *error)
+{
+    if (!link || !out)
+        return false;
+    *out = ReadoutProtection{};
+    QByteArray resp;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_GET_PROTECTION, QByteArray(), &resp, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        if (unsupported(code)) {
+            if (error)
+                error->clear();
+            return true; // older firmware: not reported, not an error
+        }
+        return false;
+    }
+    if (resp.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("The device returned an empty protection response.");
+        return false;
+    }
+    out->supported = true;
+    out->level = quint8(resp[0]);
+    return true;
+}
+
 bool readAccessState(DeviceLink *link, AccessState *out, QString *error)
 {
     if (!link || !out)

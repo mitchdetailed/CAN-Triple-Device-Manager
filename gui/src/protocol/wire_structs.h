@@ -162,6 +162,10 @@ constexpr uint8_t CMD_READ_CONFIG_VERSION = 0x4B;
 constexpr uint8_t CMD_SEAL_BEGIN = 0x4C; // salt[16]
 constexpr uint8_t CMD_SEAL_FRAME = 0x4D; // u32le index || ciphertext || tag[16]
 constexpr uint8_t CMD_SEAL_END   = 0x4E;
+// v23 (firmware 1.0.9): the STM32 readout-protection level, one byte
+// (0 off, 1 the flash cannot be read over the debug port, 2 permanent).
+// A licensed unit sets level 1 itself at boot.
+constexpr uint8_t CMD_GET_PROTECTION = 0x4F;
 
 constexpr int LICENSE_MANUFACTURER_LEN = 32;
 constexpr int LICENSE_MODEL_LEN        = 32;
