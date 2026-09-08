@@ -73,10 +73,14 @@ A **Package version** (0–65535) is stamped on the unit when the package instal
 <tr><td>Match FW Manufacturer</td><td>The device's licence. Optional.</td></tr>
 <tr><td>Match FW Model</td><td>The device's licence. Optional.</td></tr>
 <tr><td>Match FW Version</td><td>The device's licence. Optional.</td></tr>
+<tr><td>Match MCU ID</td><td>The unit itself: the STM32's 96-bit unique ID, the 24 hex
+digits Device Status shows and copies. Optional.</td></tr>
+<tr><td>Match HW Serial</td><td>The unit itself: the serial number burned into the OTP
+manufacturing record, as Get Device Info shows it (decimal, or hex with 0x). Optional.</td></tr>
 <tr><td><b>Match FW Key</b></td><td><b>Always.</b> No tick box, because it is not optional.</td></tr>
 </table>
 
-The three string matches are exact. The key is not a string compare at all: the host picks a nonce and the device answers under the key it holds, so this proves the unit really carries the licence rather than merely reporting one. A look-alike echoing the right manufacturer and model still fails.
+The three licence matches are exact. The two hardware matches name one unit rather than a fleet, and a unit that cannot report an ID (older firmware) or a serial (an unburned record) fails them by name rather than being waved through. The key is not a string compare at all: the host picks a nonce and the device answers under the key it holds, so this proves the unit really carries the licence rather than merely reporting one. A look-alike echoing the right manufacturer and model still fails.
 
 > **Warning:** **An unlicensed unit takes no packages.** Every package names a key and every target must prove it, so a board that has never been given a licence cannot match anything. The provisioning order follows from that: flash the firmware, issue a licence with the Firmware License Manager — which needs only a serial connection — and only then can packages be installed. There is no deadlock in it, because issuing a licence needs no package.
 

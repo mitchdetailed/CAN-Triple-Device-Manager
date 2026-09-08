@@ -1,4 +1,5 @@
 #include "axis_setup_dialog.h"
+#include "hex_input.h"
 
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -259,7 +260,7 @@ void AxisSetupDialog::onGenerate()
     }
     fromSpin->setValue(cur.isEmpty() ? qBound(s.lo, 0.0, s.hi) : cur.first());
     toSpin->setValue(cur.isEmpty() ? qBound(s.lo, 100.0, s.hi) : cur.last());
-    auto *countSpin = new QSpinBox(&dlg);
+    auto *countSpin = new ct::HexSpinBox(&dlg);
     countSpin->setRange(2, m_axis.maxSites);
     countSpin->setValue(cur.size() >= 2 ? cur.size() : m_axis.maxSites);
     form->addRow(tr("From:"), fromSpin);

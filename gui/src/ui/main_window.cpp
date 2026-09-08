@@ -1099,9 +1099,31 @@ void MainWindow::onSendSecureConfiguration()
         device_session::readLicense(&m_link, &deviceLicense, &licenseError);
     }
 
-    const InstallVerdict verdict = packageInstallVerdict(
-        policy, deviceLicense.supported, deviceLicense.manufacturer, deviceLicense.model,
-        deviceLicense.firmwareVersion);
+    // The hardware facts, read only when the package asks for them: a policy
+    // that names no MCU ID or serial gets the one round trip it always had,
+    // and a firmware that cannot answer either question is reported as such
+    // by the verdict rather than failing the read here.
+    DeviceMatchFacts facts;
+    facts.licensed = deviceLicense.supported;
+    facts.manufacturer = deviceLicense.manufacturer;
+    facts.model = deviceLicense.model;
+    facts.version = deviceLicense.firmwareVersion;
+    if (policy.wantsHardwareMatch()) {
+        BusyScope busy(this);
+        device_session::Identity identity;
+        device_session::DeviceInfo info;
+        QString ignored;
+        if (device_session::readIdentity(&m_link, &identity, &ignored) && identity.supported) {
+            facts.identityKnown = true;
+            facts.mcuId = identity.uidText();
+        }
+        if (device_session::readDeviceInfo(&m_link, &info, &ignored) && info.supported
+            && info.serialKnown) {
+            facts.serialKnown = true;
+            facts.serial = info.serialNumber;
+        }
+    }
+    const InstallVerdict verdict = packageInstallVerdict(policy, facts);
     if (verdict.noPolicy) {
         QMessageBox::critical(
             this, title,
@@ -1128,12 +1150,23 @@ void MainWindow::onSendSecureConfiguration()
                 return tr("Manufacturer");
             if (field == QLatin1String("model"))
                 return tr("Model");
+            if (field == QLatin1String("mcuId"))
+                return tr("MCU ID");
+            if (field == QLatin1String("hwSerial"))
+                return tr("HW Serial");
             return tr("Version");
         };
         QStringList lines;
-        for (const InstallMismatch &m : verdict.mismatches)
-            lines << tr("%1: package wants \"%2\", device says \"%3\"")
-                         .arg(fieldLabel(m.field), m.wanted, m.actual);
+        for (const InstallMismatch &m : verdict.mismatches) {
+            // An empty "actual" is a unit that could not answer — no licence
+            // field, no identity command, no serial burned — and 'device says
+            // ""' would read as a value.
+            lines << (m.actual.isEmpty()
+                          ? tr("%1: package wants \"%2\", device reports none")
+                                .arg(fieldLabel(m.field), m.wanted)
+                          : tr("%1: package wants \"%2\", device says \"%3\"")
+                                .arg(fieldLabel(m.field), m.wanted, m.actual));
+        }
         QMessageBox::critical(this, title,
                               tr("This package was not built for the connected device, so it "
                                  "has NOT been sent.\n\n%1")
@@ -2068,7 +2101,7 @@ void MainWindow::onDeviceStatus()
     QString deviceId; // kept for the Copy button below
     if (device_session::readIdentity(&m_link, &identity, &sessionError) && identity.supported) {
         deviceId = identity.uidText();
-        text += tr("\n\nDevice ID: %1").arg(deviceId);
+        text += tr("\n\nMCU ID: %1").arg(deviceId);
         switch (identity.configStatus) {
         case CONFIG_STATUS_OK:
             break;
@@ -2143,14 +2176,14 @@ void MainWindow::onDeviceStatus()
     if (device_session::readConfigVersion(&m_link, &configVersion, &sessionError)
         && configVersion.supported)
         text += tr("\n\nConfiguration version on this unit: %1").arg(configVersion.version);
-    // Built rather than QMessageBox::information, for the Device ID. It is a
+    // Built rather than QMessageBox::information, for the MCU ID. It is a
     // 24-character hex string that has to be typed into Lock to Device somewhere
     // else — reading it off the screen and retyping it is exactly the kind of
     // transcription nobody gets right first time.
     //
     // Two ways out, because they suit different moments: the whole report is
     // selectable, so right-click gives the standard Copy on any part of it
-    // (QLabel's selectable text brings its own context menu), and a Copy Device
+    // (QLabel's selectable text brings its own context menu), and a Copy MCU
     // ID button takes just the UID with no selecting at all.
     QMessageBox box(QMessageBox::Information, tr("Device Status"), text, QMessageBox::Ok, this);
     box.setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
@@ -2158,12 +2191,12 @@ void MainWindow::onDeviceStatus()
     if (!deviceId.isEmpty()) {
         // ActionRole so it does not close the box: copying is something you do
         // ALONGSIDE reading the rest, not instead of it.
-        copyId = box.addButton(tr("Copy Device ID"), QMessageBox::ActionRole);
+        copyId = box.addButton(tr("Copy MCU ID"), QMessageBox::ActionRole);
         connect(copyId, &QPushButton::clicked, this, [this, deviceId, copyId]() {
             QApplication::clipboard()->setText(deviceId);
             // Say so on the button itself; a status bar message would be behind
             // this modal box, and a message box on top of it would be absurd.
-            copyId->setText(tr("Device ID copied"));
+            copyId->setText(tr("MCU ID copied"));
         });
     }
     box.exec();
@@ -2180,7 +2213,7 @@ void MainWindow::onDeviceStatus()
 // facts into the volatile ones would have made the whole report look like a
 // snapshot — and this is the half somebody quotes in a warranty claim.
 //
-// Not gated by a password, like the Device ID beside it and for the same reason:
+// Not gated by a password, like the MCU ID beside it and for the same reason:
 // nothing here describes a configuration. An RMA cannot be conditioned on
 // holding the password of the configuration being returned as faulty.
 void MainWindow::onGetDeviceInfo()
@@ -2232,6 +2265,20 @@ void MainWindow::onGetDeviceInfo()
     text += tr("HW Version: %1\n").arg(shown(info.hardwareVersion));
     text += info.serialKnown ? tr("HW Serial: %1\n").arg(info.serialNumber)
                              : tr("HW Serial: %1\n").arg(unknown);
+    // The MCU ID is silicon too — the STM32's 96-bit unique ID, which Device
+    // Status also shows — and it belongs with the permanent facts: it is what a
+    // package's "Match MCU ID" is checked against, and beside the HW Serial is
+    // where somebody building such a package will look for it. Read by its own
+    // command rather than out of the OTP record, so a firmware that predates
+    // that command says so instead of printing an empty line.
+    {
+        device_session::Identity identity;
+        QString identityError;
+        const bool haveIdentity =
+            device_session::readIdentity(&m_link, &identity, &identityError) && identity.supported;
+        text += haveIdentity ? tr("MCU ID: %1\n").arg(identity.uidText())
+                             : tr("MCU ID: %1\n").arg(tr("not reported by this firmware"));
+    }
     if (info.dateText.isEmpty())
         text += tr("Manufactured: %1").arg(unknown);
     else if (info.date.isValid())

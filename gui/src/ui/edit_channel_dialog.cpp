@@ -1,5 +1,6 @@
 // Implementation of the "Edit Custom Channel" dialog.
 #include "edit_channel_dialog.h"
+#include "hex_input.h"
 
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -106,7 +107,7 @@ EditChannelDialog::EditChannelDialog(Configuration *config, const Channel &initi
     for (const DataTypeInfo &t : kDataTypes)
         m_dataTypeCombo->addItem(QLatin1String(t.name));
 
-    m_decimalsSpin = new QSpinBox(detailsGroup);
+    m_decimalsSpin = new ct::HexSpinBox(detailsGroup);
     m_decimalsSpin->setRange(0, 8);
 
     m_resolutionSpin = new TrimmedDoubleSpinBox(detailsGroup);

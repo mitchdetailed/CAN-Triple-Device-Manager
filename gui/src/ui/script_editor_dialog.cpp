@@ -1,4 +1,5 @@
 #include "script_editor_dialog.h"
+#include "hex_input.h"
 
 #include <QDialogButtonBox>
 #include <QDir>
@@ -231,7 +232,7 @@ void ScriptEditorDialog::buildUi()
     compileButton->setToolTip(tr("Compile the script (Ctrl+Enter)"));
     m_stepButton = new QPushButton(tr("&Step"), this);
     m_runButton = new QPushButton(tr("&Run"), this);
-    m_tickCount = new QSpinBox(this);
+    m_tickCount = new ct::HexSpinBox(this);
     m_tickCount->setRange(1, 100000);
     m_tickCount->setValue(100);
     m_tickCount->setSuffix(tr(" ticks"));

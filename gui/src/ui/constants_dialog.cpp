@@ -1,5 +1,6 @@
 // Calculations > Constants — grid editor for Configuration::constantRows.
 #include "constants_dialog.h"
+#include "hex_input.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -123,7 +124,7 @@ public:
         for (const DataTypeInfo &t : kDataTypes)
             m_dataTypeCombo->addItem(QLatin1String(t.name));
 
-        m_decimalsSpin = new QSpinBox(detailsGroup);
+        m_decimalsSpin = new ct::HexSpinBox(detailsGroup);
         m_decimalsSpin->setRange(0, 8);
 
         m_resolutionSpin = new TrimmedDoubleSpinBox(detailsGroup);

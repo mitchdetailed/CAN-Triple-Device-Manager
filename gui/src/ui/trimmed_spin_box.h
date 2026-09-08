@@ -6,9 +6,17 @@
 // setTrimTrailingZeros(false) switches it back to fixed-width decimals, for the
 // fields where the decimal count is meaningful rather than incidental — see the
 // comment on the setter.
+//
+// Built on HexDoubleSpinBox, so every one of these also reads a 0x spelling —
+// see hex_input.h. That is the whole reason the hex support lives in a base
+// rather than here: this class is the box behind nearly every decimal field in
+// the editors, and the few that are not it are the plain Qt boxes hex_input.h
+// replaces one by one.
 #pragma once
 
 #include <QDoubleSpinBox>
+
+#include "hex_input.h"
 
 namespace ct {
 
@@ -27,10 +35,10 @@ inline QString trimmedNumber(double value, int decimals)
     return text;
 }
 
-class TrimmedDoubleSpinBox : public QDoubleSpinBox
+class TrimmedDoubleSpinBox : public HexDoubleSpinBox
 {
 public:
-    using QDoubleSpinBox::QDoubleSpinBox;
+    using HexDoubleSpinBox::HexDoubleSpinBox;
 
     // Trimming is right when setDecimals() only states the widest precision the
     // field will ACCEPT — a DBC factor allowed 8 places should read "1", not

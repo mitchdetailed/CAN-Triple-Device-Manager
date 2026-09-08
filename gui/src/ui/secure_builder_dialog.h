@@ -10,9 +10,11 @@
 // ---------------------------------------------------------------------------
 // The policy has two halves and they are not alike.
 //
-// The MATCH half decides where the package may install. Manufacturer, model and
-// version are each optional; the Firmware Key is not, and has no checkbox for
-// that reason. Every package names a key and every target must prove it, which
+// The MATCH half decides where the package may install. Manufacturer, model,
+// version, MCU ID and HW Serial are each optional; the Firmware Key is not, and
+// has no checkbox for that reason. The first three name a fleet through its
+// licence; the last two name one unit through its silicon. Every package
+// names a key and every target must prove it, which
 // means an unlicensed unit takes no packages at all — issue a licence with the
 // Firmware License Manager first.
 //
@@ -73,6 +75,10 @@ private:
     QLineEdit *m_matchModel = nullptr;
     QCheckBox *m_matchVersionCheck = nullptr;
     QLineEdit *m_matchVersion = nullptr;
+    QCheckBox *m_matchMcuIdCheck = nullptr;
+    QLineEdit *m_matchMcuId = nullptr;
+    QCheckBox *m_matchSerialCheck = nullptr;
+    QLineEdit *m_matchSerial = nullptr;
     // No checkbox: the key always applies.
     QLineEdit *m_key = nullptr;
 

@@ -1,4 +1,5 @@
 #include "add_channel_dialog.h"
+#include "hex_input.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -129,7 +130,7 @@ AddChannelDialog::AddChannelDialog(Configuration *config, const CommsChannelRow 
     // very ambiguity this exists to prevent.
     const bool adding = m_row.channelName.isEmpty();
     grid->addWidget(new QLabel(tr("Start Bit :")), r, 0);
-    m_startBitSpin = new QSpinBox;
+    m_startBitSpin = new ct::HexSpinBox;
     if (adding) {
         m_startBitSpin->setRange(-1, 511); // -1 = not yet entered, shown blank
         m_startBitSpin->setSpecialValueText(QStringLiteral(" "));
@@ -145,7 +146,7 @@ AddChannelDialog::AddChannelDialog(Configuration *config, const CommsChannelRow 
            "continue into lower bytes."));
     grid->addWidget(m_startBitSpin, r, 1);
     grid->addWidget(new QLabel(tr("Bit Length :")), r, 2);
-    m_bitLengthSpin = new QSpinBox;
+    m_bitLengthSpin = new ct::HexSpinBox;
     if (adding) {
         m_bitLengthSpin->setRange(0, 64); // 0 = not yet entered, shown blank
         m_bitLengthSpin->setSpecialValueText(QStringLiteral(" "));

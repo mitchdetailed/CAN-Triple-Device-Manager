@@ -6,6 +6,7 @@
 
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
@@ -113,14 +114,20 @@ public:
             m_inputValueSpin->setDecimals(6);
             form->addRow(m_inputValueRadio, m_inputValueSpin);
 
-            m_rateSpin = new QSpinBox(group);
-            m_rateSpin->setRange(1, INTEGRATOR_MAX_HZ);
-            m_rateSpin->setSuffix(QObject::tr(" Hz"));
-            m_rateSpin->setToolTip(
+            // The same steps the transmit rate offers, up to the engine's 100 Hz
+            // tick: an integrator cannot add more often than the evaluation
+            // pass runs, so the transmit list's 200 Hz has no counterpart here.
+            // A list rather than a typed number, like the rate counter, because
+            // every entry then divides 100 exactly — a whole number of ticks per
+            // step, which is the only kind of rate worth offering.
+            m_rateCombo = new QComboBox(group);
+            for (int hz : ct::kCounterRateChoices)
+                m_rateCombo->addItem(QObject::tr("%1 Hz").arg(hz), hz);
+            m_rateCombo->setToolTip(
                 QObject::tr("How many times a second the input is applied.\n"
                             "The engine evaluates at %1 Hz, which is the ceiling.")
                     .arg(INTEGRATOR_MAX_HZ));
-            form->addRow(QObject::tr("Rate :"), m_rateSpin);
+            form->addRow(QObject::tr("Rate :"), m_rateCombo);
 
             // Direction. "Count down" is what makes this row a decrementor:
             // same input, same rate, subtracted from a starting value instead.
@@ -154,7 +161,7 @@ public:
                              [this](bool) { updateInputMode(); });
             QObject::connect(m_inputValueSpin, &QDoubleSpinBox::valueChanged, this,
                              [this](double) { updateSummary(); });
-            QObject::connect(m_rateSpin, &QSpinBox::valueChanged, this,
+            QObject::connect(m_rateCombo, &QComboBox::currentIndexChanged, this,
                              [this](int) { updateSummary(); });
 
             mainLayout->addWidget(group);
@@ -293,7 +300,7 @@ public:
             m_inputChannelRadio->setChecked(true);
         else
             m_inputValueRadio->setChecked(true);
-        m_rateSpin->setValue(qBound(1, m_row.rateHz, INTEGRATOR_MAX_HZ));
+        selectRate(qBound(1, m_row.rateHz, INTEGRATOR_MAX_HZ));
         if (m_row.countDown)
             m_countDownRadio->setChecked(true);
         else
@@ -335,7 +342,7 @@ private:
     {
         const QString outName = ct::channelField(m_outputEdit);
         const QString out = outName.isEmpty() ? QObject::tr("the output") : outName;
-        const int rate = m_rateSpin->value();
+        const int rate = m_rateCombo->currentData().toInt();
         const bool down = m_countDownRadio->isChecked();
         const QString op = down ? QStringLiteral("-=") : QStringLiteral("+=");
         QString text;
@@ -392,7 +399,7 @@ private:
         m_row.inputIsChannel = m_inputChannelRadio->isChecked();
         m_row.inputChannel = inputName;
         m_row.inputValue = m_inputValueSpin->value();
-        m_row.rateHz = m_rateSpin->value();
+        m_row.rateHz = m_rateCombo->currentData().toInt();
         m_row.countDown = m_countDownRadio->isChecked();
         m_row.startValue = m_startValueSpin->value();
         m_row.enableChannel = ct::channelField(m_enableEdit);
@@ -416,7 +423,21 @@ private:
     QLineEdit *m_inputEdit = nullptr;
     QPushButton *m_inputSelect = nullptr;
     QDoubleSpinBox *m_inputValueSpin = nullptr;
-    QSpinBox *m_rateSpin = nullptr;
+    // Show `hz`, adding it to the list first when it is not a preset. A rate
+    // outside the list — an older file, or a device Get carrying an odd
+    // period — is inserted in order rather than snapped to a neighbour, so
+    // opening the editor never changes a row by itself.
+    void selectRate(int hz)
+    {
+        if (m_rateCombo->findData(hz) < 0) {
+            int pos = 0;
+            while (pos < m_rateCombo->count() && m_rateCombo->itemData(pos).toInt() < hz)
+                ++pos;
+            m_rateCombo->insertItem(pos, QObject::tr("%1 Hz").arg(hz), hz);
+        }
+        m_rateCombo->setCurrentIndex(m_rateCombo->findData(hz));
+    }
+    QComboBox *m_rateCombo = nullptr;
     QRadioButton *m_countUpRadio = nullptr;
     QRadioButton *m_countDownRadio = nullptr;
     QLabel *m_summary = nullptr;

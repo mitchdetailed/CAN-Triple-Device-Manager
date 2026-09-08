@@ -11,12 +11,14 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpressionValidator>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
 #include "../model/access_keys.h"
 #include "../protocol/wire_structs.h"
 #include "name_limits.h"
+#include "hex_input.h"
 
 namespace ct {
 
@@ -93,6 +95,25 @@ SecureBuilderDialog::SecureBuilderDialog(const QString &openDocumentPath, QWidge
     m_matchVersionCheck = r.check;
     m_matchVersion = r.edit;
 
+    // The two hardware matches: which UNIT, where the three above say which
+    // fleet. Both are copied off the device — the MCU ID from Device Status's
+    // Copy button, the serial from Get Device Info — so the validators keep
+    // out only what could never match: the ID is hex digits or nothing, the
+    // serial a number (decimal, or hex with 0x). refreshEnabled() checks the
+    // shape a validator cannot while the text is still being typed.
+    r = addRow(matchForm, tr("Match MCU ID:"), matchGroup, false);
+    m_matchMcuIdCheck = r.check;
+    m_matchMcuId = r.edit;
+    m_matchMcuId->setValidator(new QRegularExpressionValidator(
+        QRegularExpression(QStringLiteral("[0-9A-Fa-f]{0,24}")), this));
+    m_matchMcuId->setPlaceholderText(tr("24 hex digits, as Device Status shows it"));
+    r = addRow(matchForm, tr("Match HW Serial:"), matchGroup, false);
+    m_matchSerialCheck = r.check;
+    m_matchSerial = r.edit;
+    m_matchSerial->setValidator(new QRegularExpressionValidator(
+        QRegularExpression(QStringLiteral("[0-9]{0,20}|0[xX][0-9A-Fa-f]{0,16}")), this));
+    m_matchSerial->setPlaceholderText(tr("as Get Device Info shows it, or 0x hex"));
+
     // The key has no checkbox and is always enabled. Every package names one and
     // every target proves it — see the header for why that is not negotiable.
     m_key = new QLineEdit(matchGroup);
@@ -142,13 +163,14 @@ SecureBuilderDialog::SecureBuilderDialog(const QString &openDocumentPath, QWidge
     connect(m_buttons, &QDialogButtonBox::accepted, this, &SecureBuilderDialog::build);
     connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-    for (QLineEdit *e : {m_source, m_matchManufacturer, m_matchModel, m_matchVersion, m_key,
-                         m_setSend, m_setGet, m_setSlot[0], m_setSlot[1], m_setSlot[2],
-                         m_setSlot[3]})
+    for (QLineEdit *e : {m_source, m_matchManufacturer, m_matchModel, m_matchVersion,
+                         m_matchMcuId, m_matchSerial, m_key, m_setSend, m_setGet,
+                         m_setSlot[0], m_setSlot[1], m_setSlot[2], m_setSlot[3]})
         connect(e, &QLineEdit::textChanged, this, &SecureBuilderDialog::refreshEnabled);
     for (QCheckBox *c : {m_matchManufacturerCheck, m_matchModelCheck, m_matchVersionCheck,
-                         m_setSendCheck, m_setGetCheck, m_setSlotCheck[0], m_setSlotCheck[1],
-                         m_setSlotCheck[2], m_setSlotCheck[3]})
+                         m_matchMcuIdCheck, m_matchSerialCheck, m_setSendCheck, m_setGetCheck,
+                         m_setSlotCheck[0], m_setSlotCheck[1], m_setSlotCheck[2],
+                         m_setSlotCheck[3]})
         connect(c, &QCheckBox::toggled, this, &SecureBuilderDialog::refreshEnabled);
 
     refreshEnabled();
@@ -172,6 +194,18 @@ bool SecureBuilderDialog::collectPolicy(SecurePackagePolicy *out, QString *why) 
         p.matchModel = m_matchModel->text();
     if (m_matchVersionCheck->isChecked())
         p.matchVersion = m_matchVersion->text();
+    if (m_matchMcuIdCheck->isChecked())
+        p.matchMcuId = m_matchMcuId->text().trimmed().toUpper();
+    if (m_matchSerialCheck->isChecked()) {
+        bool ok = false;
+        p.matchSerial = parseUnsignedText(m_matchSerial->text(), &ok);
+        p.matchSerialSet = ok;
+        if (!ok) {
+            if (why)
+                *why = tr("Match HW Serial is not a number.");
+            return false;
+        }
+    }
 
     if (m_key->text().isEmpty()) {
         if (why)
@@ -224,6 +258,20 @@ void SecureBuilderDialog::refreshEnabled()
     emptyTicked(m_matchManufacturerCheck, m_matchManufacturer, tr("Match FW Manufacturer"));
     emptyTicked(m_matchModelCheck, m_matchModel, tr("Match FW Model"));
     emptyTicked(m_matchVersionCheck, m_matchVersion, tr("Match FW Version"));
+    emptyTicked(m_matchMcuIdCheck, m_matchMcuId, tr("Match MCU ID"));
+    emptyTicked(m_matchSerialCheck, m_matchSerial, tr("Match HW Serial"));
+    // Shape checks the validators cannot make while the text is still being
+    // typed: a short ID and an unparsable serial are both packages nothing
+    // could ever install.
+    if (m_matchMcuIdCheck->isChecked() && !m_matchMcuId->text().isEmpty()
+        && m_matchMcuId->text().trimmed().size() != 24)
+        problems << tr("Match MCU ID must be the 24 hex digits Device Status shows.");
+    if (m_matchSerialCheck->isChecked() && !m_matchSerial->text().isEmpty()) {
+        bool ok = false;
+        parseUnsignedText(m_matchSerial->text(), &ok);
+        if (!ok)
+            problems << tr("Match HW Serial must be a number (decimal, or hex with 0x).");
+    }
 
     // The same password policy the other dialogs apply, and worth more here: a
     // package sets the same password on every unit it installs on, so a weak
@@ -298,6 +346,10 @@ void SecureBuilderDialog::build()
         matched << tr("model");
     if (!policy.matchVersion.isEmpty())
         matched << tr("version");
+    if (!policy.matchMcuId.isEmpty())
+        matched << tr("MCU ID");
+    if (policy.matchSerialSet)
+        matched << tr("HW serial");
     matched << tr("Firmware Key");
     summary << tr("It installs only on devices matching: %1.").arg(matched.join(QStringLiteral(", ")));
     if (policy.changesPasswords())

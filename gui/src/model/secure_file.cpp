@@ -413,6 +413,12 @@ QJsonObject SecurePackagePolicy::toJson() const
         o[QStringLiteral("matchModel")] = matchModel;
     if (!matchVersion.isEmpty())
         o[QStringLiteral("matchVersion")] = matchVersion;
+    if (!matchMcuId.isEmpty())
+        o[QStringLiteral("matchMcuId")] = matchMcuId;
+    // As a string: a JSON number is a double, and a 64-bit serial does not
+    // survive the trip through one.
+    if (matchSerialSet)
+        o[QStringLiteral("matchHwSerial")] = QString::number(matchSerial);
     o[QStringLiteral("key")] = toHex(key);
     o[QStringLiteral("configVersion")] = int(configVersion);
     // Written only when selected, so "leave this password alone" and "clear it"
@@ -435,6 +441,9 @@ SecurePackagePolicy SecurePackagePolicy::fromJson(const QJsonObject &o)
     p.matchManufacturer = o[QStringLiteral("matchManufacturer")].toString();
     p.matchModel = o[QStringLiteral("matchModel")].toString();
     p.matchVersion = o[QStringLiteral("matchVersion")].toString();
+    p.matchMcuId = o[QStringLiteral("matchMcuId")].toString().toUpper();
+    p.matchSerialSet = o.contains(QStringLiteral("matchHwSerial"));
+    p.matchSerial = o[QStringLiteral("matchHwSerial")].toString().toULongLong();
     p.key = QByteArray::fromHex(o[QStringLiteral("key")].toString().toLatin1());
     p.configVersion = quint16(o[QStringLiteral("configVersion")].toInt());
     // contains(), not "is the key non-zero": a zero key means CLEAR it, which is
@@ -454,16 +463,15 @@ SecurePackagePolicy SecurePackagePolicy::fromJson(const QJsonObject &o)
     return p;
 }
 
-InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy, bool deviceSupported,
-                                     const QString &deviceManufacturer,
-                                     const QString &deviceModel, const QString &deviceVersion)
+InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,
+                                     const DeviceMatchFacts &device)
 {
     InstallVerdict v;
     if (!policy.isValid()) {
         v.noPolicy = true;
         return v; // nothing below means anything without a policy
     }
-    if (!deviceSupported) {
+    if (!device.licensed) {
         v.deviceUnlicensed = true;
         return v; // and nothing below can be compared against a unit that cannot answer
     }
@@ -474,10 +482,38 @@ InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy, bool dev
         if (!want.isEmpty() && want != have)
             v.mismatches.append({QString::fromLatin1(field), want, have});
     };
-    check("manufacturer", policy.matchManufacturer, deviceManufacturer);
-    check("model", policy.matchModel, deviceModel);
-    check("version", policy.matchVersion, deviceVersion);
+    check("manufacturer", policy.matchManufacturer, device.manufacturer);
+    check("model", policy.matchModel, device.model);
+    check("version", policy.matchVersion, device.version);
+
+    // The hardware matches. The ID compares without regard to case — it is a
+    // hex number, and the Builder upper-cases what it stores — and a unit that
+    // cannot report one has an empty "actual", which the window words as
+    // "device reports none". A serial compares as a number, never as text.
+    if (!policy.matchMcuId.isEmpty()) {
+        const QString have = device.identityKnown ? device.mcuId.toUpper() : QString();
+        if (policy.matchMcuId.toUpper() != have)
+            v.mismatches.append({QStringLiteral("mcuId"), policy.matchMcuId, have});
+    }
+    if (policy.matchSerialSet) {
+        const QString have = device.serialKnown ? QString::number(device.serial) : QString();
+        if (!device.serialKnown || device.serial != policy.matchSerial)
+            v.mismatches.append(
+                {QStringLiteral("hwSerial"), QString::number(policy.matchSerial), have});
+    }
     return v;
+}
+
+InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy, bool deviceSupported,
+                                     const QString &deviceManufacturer,
+                                     const QString &deviceModel, const QString &deviceVersion)
+{
+    DeviceMatchFacts facts;
+    facts.licensed = deviceSupported;
+    facts.manufacturer = deviceManufacturer;
+    facts.model = deviceModel;
+    facts.version = deviceVersion;
+    return packageInstallVerdict(policy, facts);
 }
 
 bool isSecureFile(const QString &path)

@@ -1,4 +1,5 @@
 #include "section_editor_dialog.h"
+#include "hex_input.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -386,7 +387,7 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
     ++r;
 
     paramGrid->addWidget(new QLabel(tr("Receive Timeout :")), r, 0);
-    m_timeoutSpin = new QSpinBox;
+    m_timeoutSpin = new ct::HexSpinBox;
     m_timeoutSpin->setRange(0, 60000);
     m_timeoutSpin->setSuffix(tr(" ms"));
     m_timeoutSpin->setValue(m_section.receiveTimeoutMs);
@@ -468,7 +469,7 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
     canGrid->addWidget(m_lengthLabel, r, 0);
     m_lengthEdit = new QLineEdit(QString::number(m_section.messageLengthBytes));
     m_lengthEdit->setValidator(new QRegularExpressionValidator(
-        QRegularExpression(QStringLiteral("[0-9]{1,2}")), this));
+        QRegularExpression(QStringLiteral("[0-9]{1,2}|0[xX][0-9A-Fa-f]{1,2}")), this));
     // Live, per keystroke: the layout map is how you judge whether a length is
     // the right one, so it has to follow the field as it is typed.
     connect(m_lengthEdit, &QLineEdit::textChanged, this, &SectionEditorDialog::refreshBitTable);
@@ -1454,7 +1455,7 @@ void SectionEditorDialog::syncParametersFromUi()
     m_section.baseAddress = text.toUInt(nullptr, 16);
     m_section.fd = m_fdCheck->isChecked();
     bool lengthOk = false;
-    const int length = m_lengthEdit->text().toInt(&lengthOk);
+    const int length = ct::parseIntText(m_lengthEdit->text(), &lengthOk);
     if (lengthOk) // keep the previous value while the field is cleared mid-edit
         m_section.messageLengthBytes = length;
     m_section.cyclic = m_cyclicRadio->isChecked();
@@ -1800,7 +1801,7 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
 
     auto *countRow = new QHBoxLayout;
     countRow->addWidget(new QLabel(tr("Element Count :")));
-    m_crcCountSpin = new QSpinBox;
+    m_crcCountSpin = new ct::HexSpinBox;
     m_crcCountSpin->setRange(0, kCrcElementSlots);
     // Typed, not spun — the arrows are off by request, this is a number you
     // know, not one you nudge. The range starts at ZERO: an element-less
@@ -2007,7 +2008,7 @@ void SectionEditorDialog::refreshBitTable()
     const bool transmit =
         device == SectionDevice::TransmitMessage || device == SectionDevice::TransmitCrc8;
     bool lengthOk = false;
-    const int typed = m_lengthEdit->text().toInt(&lengthOk);
+    const int typed = ct::parseIntText(m_lengthEdit->text(), &lengthOk);
     const int length = qBound(0, lengthOk ? typed : m_section.messageLengthBytes, 64);
 
     // A transmit message IS the frame it composes, so its Message Length is the
@@ -2452,7 +2453,7 @@ void SectionEditorDialog::accept()
         }
     }
     bool lengthOk = false;
-    const int length = m_lengthEdit->text().toInt(&lengthOk);
+    const int length = ct::parseIntText(m_lengthEdit->text(), &lengthOk);
     static const QList<int> kFdLengths = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64};
     const bool fd = m_fdCheck->isChecked();
     if (!relay && (!lengthOk || (fd ? !kFdLengths.contains(length) : (length < 0 || length > 8)))) {

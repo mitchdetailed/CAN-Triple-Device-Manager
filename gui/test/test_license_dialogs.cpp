@@ -83,7 +83,7 @@ void testBuilderRefusesWhatCannotInstall()
     if (!build)
         return;
 
-    // Creation order: source, three match fields, the key, six password
+    // Creation order: source, five match fields, the key, six password
     // fields. Cross-checked by what is visible so a reordered form is caught.
     //
     // The Package version QSpinBox owns a QLineEdit of its own, which
@@ -93,13 +93,13 @@ void testBuilderRefusesWhatCannotInstall()
     for (QLineEdit *e : dlg.findChildren<QLineEdit *>())
         if (!(e->parent() && e->parent()->inherits("QAbstractSpinBox")))
             edits << e;
-    CHECK(edits.size() == 11);
-    if (edits.size() != 11)
+    CHECK(edits.size() == 13);
+    if (edits.size() != 13)
         return;
     QLineEdit *source = edits[0];
     QLineEdit *matchModel = edits[2];
-    QLineEdit *key = edits[4];
-    QLineEdit *sendPassword = edits[5];
+    QLineEdit *key = edits[6];
+    QLineEdit *sendPassword = edits[7];
     CHECK(source->placeholderText() == QStringLiteral("Choose a .ct3 to package"));
     CHECK(key->echoMode() == QLineEdit::Password);
     CHECK(key->isEnabled()); // the one secret with no checkbox: always live
@@ -233,6 +233,64 @@ void testLicenseDialogOfflineAndTheClearBox()
 
 } // namespace
 
+// The two hardware matches are shape-checked before Build is offered: a
+// package asking for a 23-digit MCU ID or a serial of "0x" could never install
+// anywhere, and refused at install it would look like a device fault.
+void testBuilderHardwareMatches()
+{
+    SecureBuilderDialog dlg{QString()};
+    QAbstractButton *build = buttonWithRole(&dlg, QDialogButtonBox::AcceptRole);
+    CHECK(build != nullptr);
+    if (!build)
+        return;
+    QList<QLineEdit *> edits;
+    for (QLineEdit *e : dlg.findChildren<QLineEdit *>())
+        if (!(e->parent() && e->parent()->inherits("QAbstractSpinBox")))
+            edits << e;
+    CHECK(edits.size() == 13);
+    if (edits.size() != 13)
+        return;
+    QLineEdit *source = edits[0];
+    QLineEdit *mcuId = edits[4];
+    QLineEdit *serial = edits[5];
+    QLineEdit *key = edits[6];
+    source->setText(QStringLiteral("C:/anything.ct3"));
+    key->setText(QStringLiteral("fleet master phrase"));
+    CHECK(build->isEnabled());
+
+    QCheckBox *mcuCheck = checkboxNamed(&dlg, QStringLiteral("Match MCU ID:"));
+    QCheckBox *serialCheck = checkboxNamed(&dlg, QStringLiteral("Match HW Serial:"));
+    CHECK(mcuCheck != nullptr && serialCheck != nullptr);
+    if (!mcuCheck || !serialCheck)
+        return;
+
+    mcuCheck->setChecked(true);
+    CHECK(mcuId->isEnabled());
+    CHECK(!build->isEnabled()); // ticked but empty
+    CHECK(labelStartingWith(&dlg, QStringLiteral("Match MCU ID is ticked but empty")) != nullptr);
+    mcuId->setText(QStringLiteral("0123456789ABCDEF0123456")); // 23 digits
+    CHECK(!build->isEnabled());
+    CHECK(labelStartingWith(&dlg, QStringLiteral("Match MCU ID must be the 24 hex digits"))
+          != nullptr);
+    mcuId->setText(QStringLiteral("0123456789abcdef01234567"));
+    CHECK(build->isEnabled()); // case is normalised on the way out, not refused
+
+    serialCheck->setChecked(true);
+    CHECK(!build->isEnabled()); // ticked but empty
+    serial->setText(QStringLiteral("0x3E9"));
+    CHECK(build->isEnabled());
+    serial->setText(QStringLiteral("1001"));
+    CHECK(build->isEnabled());
+    // The validator keeps letters out of a decimal serial, so the one shape
+    // it lets through that still does not parse is a bare prefix.
+    serial->setText(QStringLiteral("0x"));
+    CHECK(!build->isEnabled());
+    CHECK(labelStartingWith(&dlg, QStringLiteral("Match HW Serial must be a number")) != nullptr);
+    serialCheck->setChecked(false);
+    mcuCheck->setChecked(false);
+    CHECK(build->isEnabled()); // unticked: not asked for, whatever the fields hold
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -240,6 +298,7 @@ int main(int argc, char **argv)
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     testBuilderRefusesWhatCannotInstall();
+    testBuilderHardwareMatches();
     testLicenseDialogOfflineAndTheClearBox();
 
     if (fails == 0)

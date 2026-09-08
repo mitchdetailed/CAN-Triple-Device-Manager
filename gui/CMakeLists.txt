@@ -1055,6 +1055,15 @@ target_include_directories(test_name_limits PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_name_limits PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
     ct_device_core) # device_mapper.cpp - see test_roundtrip
 
+# The hex-aware spin boxes behind every decimal field, driven offscreen: a 0x
+# spelling reads as the value, an incomplete one can be typed through, an
+# out-of-range one lands on the limit, and decimal is untouched. Header-only
+# classes, so nothing but Qt links.
+qt_add_executable(test_hex_input
+    test/test_hex_input.cpp
+)
+target_link_libraries(test_hex_input PRIVATE Qt6::Widgets Qt6::Core)
+
 # The two licensing dialogs, driven offscreen with no device: which inputs
 # enable Build/Apply, which refuse them and why, and the clear-password box's
 # gating. The device-facing halves cannot run here and are not pretended to.

@@ -24,8 +24,10 @@ step — a channel's current value, or a fixed number. The input channel cannot
 be the output channel: the value would double every step instead of
 accumulating, and the editor refuses the combination.</td></tr>
 <tr><td>Accumulate</td><td>Rate :</td><td>How many times a second the input is
-applied, 1–100 Hz. The engine evaluates at 100 Hz, which is the
-ceiling. A rate that does not divide evenly into the tick still averages
+applied, chosen from the same steps a transmit rate offers — 1, 2, 5, 10, 20,
+50 or 100 Hz. The engine evaluates at 100 Hz, which is the ceiling,
+so the transmit list's 200 Hz has no counterpart here. A rate that does
+not divide evenly into the tick still averages
 exactly the configured steps per second — nothing drifts.</td></tr>
 <tr><td>Accumulate</td><td>Direction : (Count up / Count down)</td><td>
 <b>Count down</b> subtracts each step instead of adding — same input, same

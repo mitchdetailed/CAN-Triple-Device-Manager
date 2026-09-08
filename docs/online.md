@@ -16,7 +16,7 @@ running its configuration; the live windows simply stop updating.</td></tr>
 <tr><td>CAN Viewer…</td><td>F4</td><td>Raw frame monitor and inject-frame form, with Vector <code>.asc</code> export.</td></tr>
 <tr><td>Reset Device</td><td></td><td>Reboots the device; it reloads its saved configuration.</td></tr>
 <tr><td>Device Status…</td><td></td><td>Uptime, bus counters, identity, passwords and fleet information.</td></tr>
-<tr><td>Get Device Info…</td><td></td><td>The manufacturing record burned into the unit at build: maker, product, hardware version, serial and date.</td></tr>
+<tr><td>Get Device Info…</td><td></td><td>The manufacturing record burned into the unit at build: maker, product, hardware version, serial and date, plus the chip's MCU ID.</td></tr>
 <tr><td>Set Access Passwords…</td><td></td><td>Device-held function passwords — see <a href="licensing.md">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 <tr><td>Firmware License Manager…</td><td></td><td>Writes the unit's licence: manufacturer, model, version, Firmware Key and FW Updater Password — see <a href="licensing.md">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 </table>
@@ -92,7 +92,7 @@ One read-only report of what the unit is and what it is doing:
 - Uptime and per-bus receive/transmit frame counters.
 - Active table counts (messages, channels, math, User Conditions).
 - Firmware protocol version.
-- Device ID and whether the stored configuration is locked to a different unit (which is why an apparently inert device shows 0 active messages).
+- MCU ID and whether the stored configuration is locked to a different unit (which is why an apparently inert device shows 0 active messages).
 - Which access passwords are set — never their values. This tells you in advance that a Send or Get will ask for a password.
 - The firmware licence (manufacturer, model, version) and which of its two secrets the unit holds, plus the configuration version it is running — see [Firmware Licensing &amp; Access Keys](licensing.md).
 
@@ -100,7 +100,7 @@ One read-only report of what the unit is and what it is doing:
 
 ## Get Device Info…
 
-Who built this board, what it is, and when. Five values, burned into the STM32's one-time-programmable area during manufacture:
+Who built this board, what it is, and when. Five values, burned into the STM32's one-time-programmable area during manufacture, with the chip's own 96-bit MCU ID beside them — the same ID Device Status shows, and the one a package's Match MCU ID is checked against:
 
 <table>
 <tr><th>Field</th><th>Example</th></tr>
@@ -108,6 +108,7 @@ Who built this board, what it is, and when. Five values, burned into the STM32's
 <tr><td>Product</td><td>CAN Triple</td></tr>
 <tr><td>HW Version</td><td>1.05</td></tr>
 <tr><td>HW Serial Number</td><td>1001</td></tr>
+<tr><td>MCU ID</td><td>0123456789ABCDEF01234567</td></tr>
 <tr><td>Date of Manufacture</td><td>31 August 2026</td></tr>
 </table>
 

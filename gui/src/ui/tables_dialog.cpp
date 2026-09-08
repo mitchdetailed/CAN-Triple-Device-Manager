@@ -1,5 +1,6 @@
 // Calculations > Tables — 2x16 (1-axis) and 8x8 (2-axis) lookup tables.
 #include "tables_dialog.h"
+#include "hex_input.h"
 
 #include <QButtonGroup>
 #include <QComboBox>
@@ -144,7 +145,7 @@ OutputControls buildOutputGroup(QWidget *parent, const QString &name,
         oc.typeCombo->addItem(QLatin1String(t.name));
     oc.typeCombo->setCurrentIndex(qMax(0, oc.typeCombo->findText(dataType)));
     form->addRow(QObject::tr("Data Type:"), oc.typeCombo);
-    oc.decimalsSpin = new QSpinBox(group);
+    oc.decimalsSpin = new ct::HexSpinBox(group);
     oc.decimalsSpin->setRange(0, 8);
     oc.decimalsSpin->setValue(decimals);
     form->addRow(QObject::tr("Decimal Places:"), oc.decimalsSpin);

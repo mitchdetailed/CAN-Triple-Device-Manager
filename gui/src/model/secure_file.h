@@ -181,6 +181,17 @@ struct SecurePackagePolicy
     QString matchModel;
     QString matchVersion;
 
+    // Optional matches against the HARDWARE rather than the licence. The MCU
+    // ID is the STM32's 96-bit unique ID as Device Status prints it (24 hex
+    // digits, most significant byte first); the HW Serial is the number
+    // burned into the OTP manufacturing record, as Get Device Info shows it.
+    // Neither can be re-issued the way a licence can, which is what makes
+    // them worth having beside it: a licence says which FLEET a unit belongs
+    // to, these say which UNIT. Empty / unset = not checked.
+    QString matchMcuId;
+    bool matchSerialSet = false;
+    quint64 matchSerial = 0;
+
     // The revision this package stamps on the unit when it installs, read back
     // by Device Status. 0 means unversioned. Lives here because a PACKAGE is
     // the deployable revision — it used to be a document field, edited in a
@@ -214,6 +225,8 @@ struct SecurePackagePolicy
     AccessKey commsSlotKey[4] = {kNoAccessKey, kNoAccessKey, kNoAccessKey, kNoAccessKey};
 
     bool isValid() const { return key.size() == kLicenseKeyBytes; }
+    // Whether installing needs the two hardware round trips at all.
+    bool wantsHardwareMatch() const { return !matchMcuId.isEmpty() || matchSerialSet; }
     bool changesPasswords() const
     {
         return setSend || setGet || setCommsSlot[0] || setCommsSlot[1] || setCommsSlot[2]
@@ -237,7 +250,7 @@ struct SecurePackagePolicy
 // load-bearing: a package refused here never touches the device at all.
 struct InstallMismatch
 {
-    QString field;  // "manufacturer", "model" or "version" — a key for the UI to word
+    QString field;  // "manufacturer", "model", "version", "mcuId" or "hwSerial" — a key for the UI to word
     QString wanted; // what the package demands
     QString actual; // what the device reports
 };
@@ -259,7 +272,32 @@ struct InstallVerdict
     bool ok() const { return !noPolicy && !deviceUnlicensed && mismatches.isEmpty(); }
 };
 
-// `deviceSupported` is LicenseState::supported; the three strings are the
+// Everything about the connected unit the verdict compares against, gathered
+// by the window from three commands and passed as values for the same reason
+// the licence strings are: the decision must not drag a serial port into the
+// test that pins it. `identityKnown` / `serialKnown` are false when the
+// firmware cannot answer (pre-v18) or the record was never burned — a package
+// that asks for either is then refused BY NAME, with the device reporting
+// none, rather than by a special case.
+struct DeviceMatchFacts
+{
+    bool licensed = false; // LicenseState::supported
+    QString manufacturer;
+    QString model;
+    QString version;
+    bool identityKnown = false;
+    QString mcuId; // Identity::uidText()
+    bool serialKnown = false;
+    quint64 serial = 0;
+};
+
+InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,
+                                     const DeviceMatchFacts &device);
+
+// The licence-only form, kept for every caller that knows nothing about the
+// hardware: a policy asking for an MCU ID or serial is refused by it exactly
+// as a unit that cannot answer would be. `deviceSupported` is
+// LicenseState::supported; the three strings are the
 // device's licence fields (empty when it holds none). Passed as values rather
 // than as a LicenseState because that type lives beside the serial link, and a
 // decision over strings should not drag QSerialPort into the test that pins it.

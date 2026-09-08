@@ -4634,6 +4634,11 @@ static void testSecureFile()
         // could hold one, which is the compile-time half of this guarantee.
         const AccessKey sendKey = deriveAccessKey(QStringLiteral("new-send-secret"));
         const AccessKey slotKey = deriveAccessKey(QStringLiteral("slot-three"));
+        // The two hardware matches ride in the same sealed policy. The serial
+        // is written as a string, so a 64-bit value must come back whole.
+        po.policy.matchMcuId = QStringLiteral("0123456789abcdef01234567");
+        po.policy.matchSerialSet = true;
+        po.policy.matchSerial = quint64(0xFFFFFFFFFFFFFFF1ull);
         po.policy.setSend = true;
         po.policy.sendKey = sendKey;
         // Ticked with kNoAccessKey means CLEAR, and that is a different
@@ -4657,6 +4662,10 @@ static void testSecureFile()
         CHECK(got.matchManufacturer == QStringLiteral("Minton Performance"));
         CHECK(got.matchModel == QStringLiteral("CAN Triple TD"));
         CHECK(got.matchVersion.isEmpty());
+        CHECK(got.matchMcuId == QStringLiteral("0123456789ABCDEF01234567")); // upper-cased
+        CHECK(got.matchSerialSet);
+        CHECK(got.matchSerial == quint64(0xFFFFFFFFFFFFFFF1ull));
+        CHECK(got.wantsHardwareMatch());
         CHECK(got.setSend);
         CHECK(got.sendKey == sendKey);
         CHECK(got.setGet);                   // ticked...
@@ -4755,6 +4764,66 @@ static void testSecureFile()
         CHECK(!v.ok());
         CHECK(v.mismatches.size() == 2);
         CHECK(v.mismatches[0].actual.isEmpty());
+    }
+
+    // ---- the hardware matches: which UNIT, not which fleet ----
+    {
+        SecurePackagePolicy demands;
+        demands.key = deriveLicenseKey(QStringLiteral("fleet master phrase"));
+        demands.matchMcuId = QStringLiteral("0123456789abcdef01234567");
+        demands.matchSerialSet = true;
+        demands.matchSerial = 1001;
+        CHECK(demands.wantsHardwareMatch());
+
+        DeviceMatchFacts unit;
+        unit.licensed = true;
+        unit.identityKnown = true;
+        unit.mcuId = QStringLiteral("0123456789ABCDEF01234567");
+        unit.serialKnown = true;
+        unit.serial = 1001;
+
+        // The good case, and the ID compares without regard to case: it is a
+        // hex number, and Device Status prints it upper-case.
+        InstallVerdict v = packageInstallVerdict(demands, unit);
+        CHECK(v.ok());
+
+        // The wrong unit, both ways, and both named.
+        DeviceMatchFacts other = unit;
+        other.mcuId = QStringLiteral("00000000000000000000FFFF");
+        other.serial = 1002;
+        v = packageInstallVerdict(demands, other);
+        CHECK(!v.ok());
+        CHECK(v.mismatches.size() == 2);
+        CHECK(v.mismatches[0].field == QStringLiteral("mcuId"));
+        CHECK(v.mismatches[0].wanted == QStringLiteral("0123456789abcdef01234567"));
+        CHECK(v.mismatches[0].actual == QStringLiteral("00000000000000000000FFFF"));
+        CHECK(v.mismatches[1].field == QStringLiteral("hwSerial"));
+        CHECK(v.mismatches[1].wanted == QStringLiteral("1001"));
+        CHECK(v.mismatches[1].actual == QStringLiteral("1002"));
+
+        // A unit that cannot answer — pre-v18 firmware for the ID, an unburned
+        // OTP for the serial — is refused by name with an empty "actual", not
+        // waved through and not reported as a fault of the firmware.
+        DeviceMatchFacts mute;
+        mute.licensed = true;
+        v = packageInstallVerdict(demands, mute);
+        CHECK(!v.ok());
+        CHECK(!v.deviceUnlicensed);
+        CHECK(v.mismatches.size() == 2);
+        CHECK(v.mismatches[0].actual.isEmpty());
+        CHECK(v.mismatches[1].actual.isEmpty());
+
+        // The licence-only form is the same decision with nothing known about
+        // the hardware, so a package asking for it is refused there too.
+        v = packageInstallVerdict(demands, true, QString(), QString(), QString());
+        CHECK(!v.ok());
+        CHECK(v.mismatches.size() == 2);
+
+        // And a package that asks for neither never notices any of this.
+        SecurePackagePolicy fleetOnly;
+        fleetOnly.key = demands.key;
+        CHECK(!fleetOnly.wantsHardwareMatch());
+        CHECK(packageInstallVerdict(fleetOnly, mute).ok());
     }
 
     // ---- a file with NO policy is still a valid file ----

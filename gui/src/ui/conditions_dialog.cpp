@@ -3,6 +3,7 @@
 // Momentary pulses the output on the rising edge of Set and drops it again by
 // itself, Set/Reset latches it between Set and Reset. See ConditionRow.
 #include "conditions_dialog.h"
+#include "hex_input.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -401,7 +402,7 @@ private:
         auto *qualifyRow = new QHBoxLayout;
         e.qualifyCheck = new QCheckBox(tr("Only when true for :"), e.box);
         qualifyRow->addWidget(e.qualifyCheck);
-        e.qualifySpin = new QDoubleSpinBox(e.box);
+        e.qualifySpin = new ct::HexDoubleSpinBox(e.box);
         // 655.35 s is the device's ceiling, not a taste: the duration travels as
         // centiseconds in a u16. The 0.01 s step matches the calculation tick,
         // so what is typed here is exactly what the device counts.

@@ -116,7 +116,7 @@ rules, 8 integrators, and
   useless for anything issued after manufacture.
 - **Online → Get Device Info…** — the manufacturing record burned into the
   STM32's one-time-programmable area: manufacturer, product, hardware version,
-  serial number and date. It is the one thing on the device that cannot change,
+  serial number and date, with the chip's 96-bit MCU ID shown beside them. It is the one thing on the device that cannot change,
   which is why there is deliberately **no write command** to go with the read —
   burning it is a manufacturing step. An unburned part reads as Unknown
   throughout, and so does a read that faults, rather than resetting the unit.
@@ -148,7 +148,8 @@ rules, 8 integrators, and
   opens, so they can deploy and update a configuration without ever reading its
   CAN layout. A plain `.ct3` is binary too, but confers no concealment. The
   package also carries the rules for its own installation: optional matches on
-  the licence's Manufacturer, Model and Version, a **Firmware Key the device
+  the licence's Manufacturer, Model and Version, optional matches on the unit's
+  own MCU ID and HW Serial, a **Firmware Key the device
   must prove** — mandatory, so an unlicensed unit takes nothing — the access
   passwords the install sets as it lands, and the configuration version it
   stamps on the unit. See `DESIGN.md` for the container format and an honest
