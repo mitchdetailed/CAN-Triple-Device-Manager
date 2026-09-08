@@ -6,6 +6,7 @@
 #include <QPointer>
 
 #include "../model/configuration.h"
+#include "../model/secure_file.h"
 #include "../protocol/device_link.h"
 
 class QLabel;
@@ -64,6 +65,12 @@ private:
     // This is the path you hand a dealer — the one where "install it" does not
     // imply "and now you can read it".
     void onSendSecureConfiguration();
+    // The policy pre-checks a package makes before a device is touched, shared
+    // by the format-2 path (which then maps and sends) and the format-3 path
+    // (which relays the sealed stream). False = refused, and the user told why.
+    bool checkPackagePolicy(const SecurePackagePolicy &policy, const QString &path,
+                            const QString &title);
+    void sendSealedPackage(const QString &path, const SecureFileInfo &info);
     void onGetConfiguration();
     // The read half of onGetConfiguration, split out so it can be repeated once
     // after a password is proved. allowUnlockRetry is false on that second run,

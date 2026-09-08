@@ -5,8 +5,10 @@
 #include <QObject>
 
 #include <optional>
+#include <type_traits>
 
 #include "../model/device_mapper.h"
+#include "../model/sealed_stream.h"
 #include "device_link.h"
 #include "device_session.h"
 
@@ -56,6 +58,16 @@ public:
                                 const device_session::AccessState &deviceAccess = {});
     // Reads all four tables from the device. Deletes itself when finished.
     static ConfigTransfer *get(DeviceLink *link, QObject *parent = nullptr);
+
+    // The write half of a Send as a list of frames, for a caller that SEALS
+    // them rather than sending them (package_builder.cpp): no ping, no verify
+    // reads, no reset, save-to-flash with the version stamped. `payloadBudget`
+    // is the largest payload a frame may carry — smaller than MAX_TX_PAYLOAD
+    // when each frame will grow a seal header before it reaches the wire.
+    static QList<PlannedFrame> planInstallFrames(const DeviceTables &tables,
+                                                 const QVector<ControlCanPayload> &busSetups,
+                                                 quint16 configVersion, const QString &configName,
+                                                 int payloadBudget);
 
     // Test seam: build the real plan — a full Send with verify (true tables,
     // one record each) or a Get — without a link, and hand back the read-
@@ -163,6 +175,7 @@ private:
 
     DeviceLink *m_link;
     QList<Step> m_steps;
+    int m_payloadBudget = MAX_TX_PAYLOAD; // planInstallFrames shrinks it
     QString m_buildFault; // non-empty: the plan failed classification and must not run
     int m_index = 0;
     bool m_cancelled = false;

@@ -43,6 +43,7 @@
 #include "secure_file.h"
 
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonParseError>
 
 #include <QCryptographicHash>
@@ -144,6 +145,7 @@ constexpr int kMaxIterations = kMaxKdfIterations;
 // character and every .ct3s ever written stops opening.
 const QByteArray kLabelPlacement = QByteArrayLiteral("ct3s/placement/v1");
 const QByteArray kLabelWrap = QByteArrayLiteral("ct3s/wrap/v1");
+const QByteArray kLabelWrapV3 = QByteArrayLiteral("ct3s/wrap/v3"); // + version + flags
 const QByteArray kLabelEnc = QByteArrayLiteral("ct3s/enc/v1");
 const QByteArray kLabelMac = QByteArrayLiteral("ct3s/mac/v1");
 const QByteArray kLabelVerifier = QByteArrayLiteral("ct3s/vfy/v1");
@@ -301,9 +303,24 @@ void putChunk(QByteArray &carrier, int slot, const QByteArray &chunk)
 // request. What replaces it as the protection on a package is the licence match
 // enforced at install: the bytes are no harder to read, but they will not
 // install anywhere they were not built for.
-QByteArray buildWrapMask(const QByteArray &salt)
+//
+// Format 3 folds the header's version and flags into the mask. The header is
+// cleartext and outside the payload's tag, and format 2 could afford that
+// because both fields had exactly one legal value: any flip was refused by
+// name. Format 3 gives the flags three legal bits, so instead they are bound
+// here: a flipped flag (or a version edited down to 2) derives a different
+// file key, the tag fails, and the file does not open at all. The reader
+// never has to decide whether a flag is telling the truth.
+QByteArray buildWrapMask(const QByteArray &salt, quint16 formatVersion, quint16 flags)
 {
-    return hmac(salt, kLabelWrap);
+    if (formatVersion == kSecureFormatV2)
+        return hmac(salt, kLabelWrap);
+    QByteArray label = kLabelWrapV3;
+    label.append(char(formatVersion & 0xFF));
+    label.append(char((formatVersion >> 8) & 0xFF));
+    label.append(char(flags & 0xFF));
+    label.append(char((flags >> 8) & 0xFF));
+    return hmac(salt, label);
 }
 
 // encKey and macKey come straight out of the file key by HMAC, so the .ct3s body
@@ -376,7 +393,7 @@ bool parseHeader(const QByteArray &raw, Header *out, QString *error)
     // — no longer has any code to unwrap it. A "> version" test let every v1
     // file through to fail later and less clearly, which is what this used to
     // do and what the round-trip test caught.
-    if (h.formatVersion != kSecureFormatVersion) {
+    if (h.formatVersion != kSecureFormatVersion && h.formatVersion != kSecureFormatV2) {
         return fail(h.formatVersion < kSecureFormatVersion
                         ? QStringLiteral("This secure configuration was written by an older "
                                          "version of CAN Triple Device Manager and can no "
@@ -389,7 +406,9 @@ bool parseHeader(const QByteArray &raw, Header *out, QString *error)
     // knows something this one does not, and both are reasons to stop rather
     // than to proceed while ignoring it. The header is outside the payload's
     // MAC, so without this check the byte is simply free to change.
-    if (h.flags != 0)
+    // Format 2 defined no flags; format 3 defines three. Anything else is a
+    // header nothing wrote.
+    if ((h.formatVersion == kSecureFormatV2 && h.flags != 0) || (h.flags & ~kSecureFlagMask) != 0)
         return fail(QStringLiteral("This secure configuration file's header is damaged."));
 
     *out = h;
@@ -419,11 +438,30 @@ QJsonObject SecurePackagePolicy::toJson() const
     // survive the trip through one.
     if (matchSerialSet)
         o[QStringLiteral("matchHwSerial")] = QString::number(matchSerial);
-    o[QStringLiteral("key")] = toHex(key);
+    if (!key.isEmpty())
+        o[QStringLiteral("key")] = toHex(key);
+    if (hasKeyProof()) {
+        o[QStringLiteral("keyProofNonce")] = toHex(keyProofNonce);
+        o[QStringLiteral("keyProofMac")] = toHex(keyProofMac);
+    }
     o[QStringLiteral("configVersion")] = int(configVersion);
     // Written only when selected, so "leave this password alone" and "clear it"
     // are different documents rather than the same one read two ways. The value
     // is the DERIVED key in hex — see the struct — and kNoAccessKey means clear.
+    if (keysWithheld) {
+        // Format 3: which passwords the install sets, by name. The keys are in
+        // the sealed stream, where only the device can reach them.
+        QJsonArray names;
+        if (setSend)
+            names.append(QStringLiteral("send"));
+        if (setGet)
+            names.append(QStringLiteral("get"));
+        for (int i = 0; i < 4; ++i)
+            if (setCommsSlot[i])
+                names.append(QStringLiteral("comms%1").arg(i + 1));
+        o[QStringLiteral("passwordUpdates")] = names;
+        return o;
+    }
     if (setSend)
         o[QStringLiteral("sendKey")] = toHex(accessKeyBytes(sendKey));
     if (setGet)
@@ -444,6 +482,9 @@ SecurePackagePolicy SecurePackagePolicy::fromJson(const QJsonObject &o)
     p.matchMcuId = o[QStringLiteral("matchMcuId")].toString().toUpper();
     p.matchSerialSet = o.contains(QStringLiteral("matchHwSerial"));
     p.matchSerial = o[QStringLiteral("matchHwSerial")].toString().toULongLong();
+    p.keyProofNonce =
+        QByteArray::fromHex(o[QStringLiteral("keyProofNonce")].toString().toLatin1());
+    p.keyProofMac = QByteArray::fromHex(o[QStringLiteral("keyProofMac")].toString().toLatin1());
     p.key = QByteArray::fromHex(o[QStringLiteral("key")].toString().toLatin1());
     p.configVersion = quint16(o[QStringLiteral("configVersion")].toInt());
     // contains(), not "is the key non-zero": a zero key means CLEAR it, which is
@@ -459,6 +500,21 @@ SecurePackagePolicy SecurePackagePolicy::fromJson(const QJsonObject &o)
         const QString name = QStringLiteral("commsSlot%1Key").arg(i + 1);
         p.setCommsSlot[i] = o.contains(name);
         p.commsSlotKey[i] = keyAt(name);
+    }
+    if (o.contains(QStringLiteral("passwordUpdates"))) {
+        p.keysWithheld = true;
+        for (const QJsonValue &v : o[QStringLiteral("passwordUpdates")].toArray()) {
+            const QString n = v.toString();
+            if (n == QLatin1String("send"))
+                p.setSend = true;
+            else if (n == QLatin1String("get"))
+                p.setGet = true;
+            else if (n.startsWith(QLatin1String("comms"))) {
+                const int slot = n.mid(5).toInt();
+                if (slot >= 1 && slot <= 4)
+                    p.setCommsSlot[slot - 1] = true;
+            }
+        }
     }
     return p;
 }
@@ -546,6 +602,11 @@ bool peekSecureFile(const QString &path, SecureFileInfo *out, QString *error)
         // embeddedCommsKey stays kNoAccessKey — it lives in the carrier, and
         // reaching it means unwrapping, which means opening the file.
         out->embeddedCommsKey = kNoAccessKey;
+        // Format 3 says in its header what the section holds; format 2 has
+        // no flags and the three stay false, which is also the truth of it.
+        out->requiresPassword = (h.flags & kSecureFlagRequiresPassword) != 0;
+        out->hasInstallStream = (h.flags & kSecureFlagInstallStream) != 0;
+        out->installOnly = (h.flags & kSecureFlagInstallOnly) != 0;
     }
     return true;
 }
@@ -593,7 +654,47 @@ bool sealSecureBlob(const QByteArray &plainBody, const SecureSaveOptions &option
     lenBytes[1] = char((policyJson.size() >> 8) & 0xFF);
     keyed.append(lenBytes);
     keyed.append(policyJson);
-    keyed.append(plainBody);
+    // Format 3: a section in place of the bare body — see secure_file.h. The
+    // flags say what is in it, so a peek answers without opening anything.
+    quint16 flags = 0;
+    {
+        const auto appendU32 = [](QByteArray &b, quint32 v) {
+            for (int i = 0; i < 4; ++i)
+                b.append(char((v >> (8 * i)) & 0xFF));
+        };
+        const bool hasStream = !options.installStream.isEmpty();
+        keyed.append(char(hasStream ? 1 : 0));
+        if (hasStream) {
+            appendU32(keyed, quint32(options.installStream.size()));
+            keyed.append(options.installStream);
+            flags |= kSecureFlagInstallStream;
+        }
+        quint8 bodyKind = 0;
+        QByteArray bodyBytes;
+        if (options.includeEditable) {
+            if (!options.openPassword.isEmpty()) {
+                // Wrapped under the package password and nothing else: the
+                // file key that opens the carrier does not open this.
+                bodyKind = 2;
+                const QByteArray bodySalt = randomBytes(kSaltBytes);
+                ConfigKeys bodyKeys = deriveKeys(options.openPassword, bodySalt, iterations);
+                bodyBytes = bodySalt;
+                appendU32(bodyBytes, quint32(iterations));
+                bodyBytes.append(sealPayload(plainBody, bodyKeys));
+                bodyKeys.clear();
+                flags |= kSecureFlagRequiresPassword;
+            } else {
+                bodyKind = 1;
+                bodyBytes = plainBody;
+            }
+        } else {
+            flags |= kSecureFlagInstallOnly;
+        }
+        keyed.append(char(bodyKind));
+        appendU32(keyed, quint32(bodyBytes.size()));
+        keyed.append(bodyBytes);
+        burn(bodyBytes);
+    }
 
     QByteArray fileKey = randomBytes(kSecureFileKeyBytes);
     ConfigKeys keys = keysFromFileKey(fileKey);
@@ -607,7 +708,7 @@ bool sealSecureBlob(const QByteArray &plainBody, const SecureSaveOptions &option
 
     // 2. Wrap the file key.
     QByteArray wrapped = fileKey;
-    QByteArray mask = buildWrapMask(salt);
+    QByteArray mask = buildWrapMask(salt, kSecureFormatVersion, flags);
     xorInto(wrapped, mask);
     burn(mask);
     burn(fileKey);
@@ -658,7 +759,7 @@ bool sealSecureBlob(const QByteArray &plainBody, const SecureSaveOptions &option
     QByteArray header(kSecureHeaderBytes, '\0');
     std::memcpy(header.data() + kOffMagic, kSecureMagic, size_t(kSecureMagicBytes));
     putU16(header, kOffFormatVersion, kSecureFormatVersion);
-    putU16(header, kOffFlags, quint16(0)); // no flags defined in v2
+    putU16(header, kOffFlags, flags);
     std::memcpy(header.data() + kOffSalt, salt.constData(), size_t(kSaltBytes));
     putU32(header, kOffIterations, quint32(iterations));
     putU32(header, kOffCarrierLength, quint32(carrierLength));
@@ -708,7 +809,7 @@ bool writeSecureFile(const QString &path, const QByteArray &plainBody,
 }
 
 bool readSecureFile(const QString &path, QByteArray *plainBody, SecureFileInfo *info,
-                    QString *error)
+                    QString *error, const QString &password)
 {
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
@@ -718,11 +819,34 @@ bool readSecureFile(const QString &path, QByteArray *plainBody, SecureFileInfo *
     }
     const QByteArray raw = f.readAll();
     f.close();
-    return openSecureBlob(raw, plainBody, info, error);
+    return openSecureBlob(raw, plainBody, info, error, password, /*bodyRequired=*/true);
+}
+
+bool readSecureInstall(const QString &path, SecureFileInfo *info, QString *error)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (error)
+            *error = f.errorString();
+        return false;
+    }
+    const QByteArray raw = f.readAll();
+    f.close();
+    SecureFileInfo local;
+    if (!openSecureBlob(raw, nullptr, &local, error, QString(), /*bodyRequired=*/false))
+        return false;
+    if (!local.hasInstallStream) {
+        if (error)
+            *error = QStringLiteral("This package carries no sealed install stream.");
+        return false;
+    }
+    if (info)
+        *info = local;
+    return true;
 }
 
 bool openSecureBlob(const QByteArray &raw, QByteArray *plainBody, SecureFileInfo *info,
-                    QString *error)
+                    QString *error, const QString &password, bool bodyRequired)
 {
     const auto fail = [&](const QString &why) {
         if (error)
@@ -766,7 +890,7 @@ bool openSecureBlob(const QByteArray &raw, QByteArray *plainBody, SecureFileInfo
     // can, because the only thing that knows the right key is the tag on the
     // payload.
     QByteArray fileKey = chunkAt(carrier, slotOrder.at(0)) + chunkAt(carrier, slotOrder.at(1));
-    QByteArray mask = buildWrapMask(h.salt);
+    QByteArray mask = buildWrapMask(h.salt, h.formatVersion, h.flags);
     xorInto(fileKey, mask); // wrapped in, unwrapped out
     burn(mask);
 
@@ -827,9 +951,118 @@ bool openSecureBlob(const QByteArray &raw, QByteArray *plainBody, SecureFileInfo
                 info->policy = SecurePackagePolicy::fromJson(doc.object());
         }
     }
-    if (plainBody)
-        *plainBody = plain.mid(bodyAt);
+    // Format 2 kept the configuration itself after the policy. Format 3 keeps
+    // a SECTION there: the install stream, then whatever editable copy the
+    // Builder chose to include — plain, wrapped under the package password,
+    // or absent. See secure_file.h. The stream and the flags are handed over
+    // whether or not a body is wanted; the body is decided last.
+    if (info) {
+        // Every field this branch may fill, cleared first: a caller that
+        // reuses one SecureFileInfo across files must not inherit the last
+        // file's stream or flags.
+        info->installStream.clear();
+        info->hasInstallStream = false;
+        info->requiresPassword = false;
+        info->installOnly = false;
+    }
+    QByteArray body;
+    bool bodyOk = true;
+    QString bodyWhy;
+    if (h.formatVersion == kSecureFormatV2) {
+        body = plain.mid(bodyAt);
+    } else {
+        int at = bodyAt;
+        const auto need = [&](int n) { return plain.size() >= at + n; };
+        const auto u32At = [&](int p) {
+            quint32 v = 0;
+            for (int i = 3; i >= 0; --i)
+                v = (v << 8) | quint8(plain[p + i]);
+            return v;
+        };
+        if (!need(1)) {
+            burn(plain);
+            return damaged();
+        }
+        const quint8 hasStream = quint8(plain[at++]);
+        if (hasStream) {
+            if (!need(4)) {
+                burn(plain);
+                return damaged();
+            }
+            const quint32 len = u32At(at);
+            at += 4;
+            if (len > quint32(plain.size() - at)) {
+                burn(plain);
+                return damaged();
+            }
+            if (info) {
+                info->installStream = plain.mid(at, int(len));
+                info->hasInstallStream = true;
+            }
+            at += int(len);
+        }
+        if (!need(5)) {
+            burn(plain);
+            return damaged();
+        }
+        const quint8 bodyKind = quint8(plain[at++]);
+        const quint32 bodyLen = u32At(at);
+        at += 4;
+        if (bodyLen > quint32(plain.size() - at) || bodyKind > 2) {
+            burn(plain);
+            return damaged();
+        }
+        const QByteArray bodyBytes = plain.mid(at, int(bodyLen));
+        if (info) {
+            info->installOnly = bodyKind == 0;
+            info->requiresPassword = bodyKind == 2;
+        }
+        if (bodyRequired) {
+            if (bodyKind == 0) {
+                bodyOk = false;
+                bodyWhy = QStringLiteral("This is an install-only secure package. It carries no "
+                                         "editable configuration, so it cannot be opened; use "
+                                         "Online \u2192 Send Secure Configuration to install it.");
+            } else if (bodyKind == 1) {
+                body = bodyBytes;
+            } else {
+                constexpr int kBodyPrefix = kSaltBytes + 4;
+                if (bodyBytes.size() < kBodyPrefix) {
+                    burn(plain);
+                    return damaged();
+                }
+                const QByteArray bodySalt = bodyBytes.left(kSaltBytes);
+                quint32 iterations = 0;
+                for (int i = 3; i >= 0; --i)
+                    iterations = (iterations << 8) | quint8(bodyBytes[kSaltBytes + i]);
+                if (iterations == 0 || iterations > quint32(kMaxKdfIterations)) {
+                    burn(plain);
+                    return damaged();
+                }
+                if (password.isEmpty()) {
+                    bodyOk = false;
+                    bodyWhy = QStringLiteral("This secure package opens only with its package "
+                                             "password.");
+                } else {
+                    ConfigKeys bodyKeys = deriveKeys(password, bodySalt, int(iterations));
+                    QString openWhy;
+                    if (!openPayload(bodyBytes.mid(kBodyPrefix), bodyKeys, &body, &openWhy)) {
+                        bodyOk = false;
+                        bodyWhy = QStringLiteral("The package password is not correct.");
+                    }
+                    bodyKeys.clear();
+                }
+            }
+        }
+    }
     burn(plain);
+    if (!bodyOk) {
+        burn(body);
+        return fail(bodyWhy);
+    }
+    if (plainBody)
+        *plainBody = body;
+    burn(body);
     return true;
 }
 

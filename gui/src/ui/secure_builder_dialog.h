@@ -32,7 +32,10 @@
 
 #include <QDialog>
 
+#include <functional>
+
 #include "../model/configuration.h"
+#include "../model/package_builder.h"
 #include "../model/secure_file.h"
 
 class QCheckBox;
@@ -53,7 +56,12 @@ public:
     // purpose — the builder loads its source from disk every time, so a package
     // is built from a file somebody can point at rather than from whatever
     // happens to be in memory and possibly unsaved.
-    explicit SecureBuilderDialog(const QString &openDocumentPath, QWidget *parent = nullptr);
+    // `builder` does the packaging (package_builder.h); it is a parameter so
+    // this dialog can be driven in a test without linking the mapper and the
+    // script compiler behind it. With none supplied, Build reports that.
+    using BuildFn = std::function<PackageBuildResult(const PackageBuildRequest &)>;
+    explicit SecureBuilderDialog(const QString &openDocumentPath, BuildFn builder = {},
+                                 QWidget *parent = nullptr);
 
 private:
     void browseSource();
@@ -81,6 +89,13 @@ private:
     QLineEdit *m_matchSerial = nullptr;
     // No checkbox: the key always applies.
     QLineEdit *m_key = nullptr;
+
+    // What the customer's copy can do with the file: nothing (install-only, the
+    // default), or open an editable copy with the package password.
+    QCheckBox *m_includeEditable = nullptr;
+    QLineEdit *m_openPassword = nullptr;
+    QLineEdit *m_openPasswordConfirm = nullptr;
+    BuildFn m_builder;
 
     QCheckBox *m_setSendCheck = nullptr;
     QLineEdit *m_setSend = nullptr;

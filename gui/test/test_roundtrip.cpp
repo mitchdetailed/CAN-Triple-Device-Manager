@@ -27,6 +27,8 @@
 #include "../src/model/device_mapper.h"
 #include "../src/model/config_file.h"
 #include "../src/model/secure_file.h"
+#include "../src/model/sealed_stream.h"
+#include "seal.h"
 #include "../src/model/validation.h"
 #include "../src/protocol/asc_log.h"
 #include "../src/protocol/cobs.h"
@@ -4824,6 +4826,159 @@ static void testSecureFile()
         fleetOnly.key = demands.key;
         CHECK(!fleetOnly.wantsHardwareMatch());
         CHECK(packageInstallVerdict(fleetOnly, mute).ok());
+    }
+
+    // ---- the sealed install stream, and the format-3 container around it ----
+    //
+    // The Builder's half (buildSealedStream) and the device's half (seal_open,
+    // the firmware's own code) meet here without a device: what one seals the
+    // other opens, index by index, and every kind of tampering is refused
+    // before a byte is decrypted.
+    {
+        const QByteArray fleetKey = deriveLicenseKey(QStringLiteral("fleet master phrase"));
+        QList<PlannedFrame> frames;
+        for (int i = 0; i < 3; ++i) {
+            PlannedFrame f;
+            f.cmd = quint8(0x10 + i);
+            f.payload = QByteArray(40 + i, char('a' + i));
+            f.flashTimeout = (i == 1);
+            frames.append(f);
+        }
+        QString why;
+        const QByteArray stream = buildSealedStream(fleetKey, frames, &why);
+        CHECK(!stream.isEmpty());
+        QByteArray salt;
+        QList<SealedFrame> parsed;
+        CHECK(parseSealedStream(stream, &salt, &parsed, &why));
+        CHECK(salt.size() == int(SEAL_SALT_LEN));
+        CHECK(parsed.size() == 3);
+        CHECK(parsed[1].flashTimeout && !parsed[0].flashTimeout);
+
+        SealKeys keys{};
+        seal_derive(reinterpret_cast<const uint8_t *>(fleetKey.constData()),
+                    uint32_t(fleetKey.size()),
+                    reinterpret_cast<const uint8_t *>(salt.constData()), &keys);
+        const auto open = [&](const SealKeys &k, quint32 index, const QByteArray &in,
+                              QByteArray *out) {
+            QByteArray plain(in.size(), '\0');
+            uint32_t n = 0;
+            const bool ok = seal_open(&k, index, reinterpret_cast<const uint8_t *>(in.constData()),
+                                      uint32_t(in.size()), reinterpret_cast<uint8_t *>(plain.data()),
+                                      &n);
+            if (ok && out)
+                *out = plain.left(int(n));
+            return ok;
+        };
+        for (int i = 0; i < 3; ++i) {
+            QByteArray plain;
+            CHECK(open(keys, quint32(i), parsed[i].bytes, &plain));
+            CHECK(plain.size() == 1 + frames[i].payload.size());
+            CHECK(quint8(plain[0]) == frames[i].cmd);
+            CHECK(plain.mid(1) == frames[i].payload);
+        }
+        CHECK(!open(keys, 1, parsed[0].bytes, nullptr)); // wrong position
+        {
+            QByteArray bad = parsed[0].bytes;
+            bad[6] = char(quint8(bad[6]) ^ 0x01); // a ciphertext byte
+            CHECK(!open(keys, 0, bad, nullptr));
+            QByteArray badTag = parsed[0].bytes;
+            badTag[badTag.size() - 1] = char(quint8(badTag[badTag.size() - 1]) ^ 0x01);
+            CHECK(!open(keys, 0, badTag, nullptr));
+        }
+        {
+            SealKeys other{};
+            const QByteArray otherKey = deriveLicenseKey(QStringLiteral("somebody else's fleet"));
+            seal_derive(reinterpret_cast<const uint8_t *>(otherKey.constData()),
+                        uint32_t(otherKey.size()),
+                        reinterpret_cast<const uint8_t *>(salt.constData()), &other);
+            CHECK(!open(other, 0, parsed[0].bytes, nullptr));
+        }
+
+        // The container. A policy with a key proof and withheld password keys,
+        // the stream, and an editable copy under a package password.
+        SecurePackagePolicy sealedPolicy;
+        sealedPolicy.matchModel = QStringLiteral("CAN Triple TD");
+        sealedPolicy.configVersion = 9;
+        sealedPolicy.setSend = true;
+        sealedPolicy.sendKey = deriveAccessKey(QStringLiteral("new-send-secret"));
+        sealedPolicy.keysWithheld = true;
+        sealedPolicy.keyProofNonce = QByteArray(kAccessChallengeBytes, char(0x5A));
+        sealedPolicy.keyProofMac = licenseProveExpected(fleetKey, sealedPolicy.keyProofNonce);
+        CHECK(sealedPolicy.hasKeyProof());
+        CHECK(sealedPolicy.isValid()); // valid WITHOUT a key
+        CHECK(sealedPolicy.key.isEmpty());
+        {
+            const QJsonObject pj = sealedPolicy.toJson();
+            CHECK(!pj.contains(QStringLiteral("key")));
+            CHECK(!pj.contains(QStringLiteral("sendKey"))); // withheld
+            CHECK(pj.contains(QStringLiteral("passwordUpdates")));
+            const SecurePackagePolicy back = SecurePackagePolicy::fromJson(pj);
+            CHECK(back.keysWithheld && back.setSend && !back.setGet);
+            CHECK(back.sendKey == kNoAccessKey); // the key did not travel
+            CHECK(back.hasKeyProof() && back.keyProofMac == sealedPolicy.keyProofMac);
+        }
+        const QString sealedPath = dir.filePath(QStringLiteral("sealed.ct3s"));
+        SecureSaveOptions so;
+        so.policy = sealedPolicy;
+        so.installStream = stream;
+        so.includeEditable = true;
+        so.openPassword = QStringLiteral("open-sesame-2026");
+        CHECK(writeSecureFile(sealedPath, body, so, &err));
+
+        SecureFileInfo peeked;
+        CHECK(peekSecureFile(sealedPath, &peeked, &err));
+        CHECK(peeked.formatVersion == kSecureFormatVersion);
+        CHECK(peeked.requiresPassword && peeked.hasInstallStream && !peeked.installOnly);
+
+        // The install half: no password, the stream and the policy, no keys.
+        SecureFileInfo inst;
+        CHECK(readSecureInstall(sealedPath, &inst, &err));
+        CHECK(inst.hasInstallStream && inst.installStream == stream);
+        CHECK(inst.policy.isValid() && inst.policy.key.isEmpty() && inst.policy.hasKeyProof());
+        CHECK(inst.policy.keysWithheld && inst.policy.setSend);
+        CHECK(inst.policy.sendKey == kNoAccessKey);
+        CHECK(inst.policy.matchModel == QStringLiteral("CAN Triple TD"));
+        CHECK(inst.policy.configVersion == 9);
+
+        // The editable half: the password, and only the right one.
+        QByteArray got;
+        SecureFileInfo oi;
+        CHECK(!readSecureFile(sealedPath, &got, &oi, &err));
+        CHECK(oi.requiresPassword);
+        CHECK(!readSecureFile(sealedPath, &got, &oi, &err, QStringLiteral("wrong password")));
+        CHECK(readSecureFile(sealedPath, &got, &oi, &err, QStringLiteral("open-sesame-2026")));
+        CHECK(got == body);
+        {
+            QFile pf(sealedPath);
+            CHECK(pf.open(QIODevice::ReadOnly));
+            const QByteArray raw = pf.readAll();
+            CHECK(!raw.contains(fleetKey));
+            CHECK(!raw.contains(QByteArrayLiteral("open-sesame-2026")));
+            CHECK(!raw.contains(QByteArrayLiteral("new-send-secret")));
+        }
+
+        // Install-only: the same stream, nothing to open, and it says so.
+        const QString ioPath = dir.filePath(QStringLiteral("installonly.ct3s"));
+        SecureSaveOptions io = so;
+        io.includeEditable = false;
+        io.openPassword.clear();
+        CHECK(writeSecureFile(ioPath, body, io, &err));
+        SecureFileInfo ioPeek;
+        CHECK(peekSecureFile(ioPath, &ioPeek, &err));
+        CHECK(ioPeek.installOnly && !ioPeek.requiresPassword && ioPeek.hasInstallStream);
+        CHECK(!readSecureFile(ioPath, &got, &oi, &err, QStringLiteral("open-sesame-2026")));
+        CHECK(err.contains(QStringLiteral("install-only")));
+        SecureFileInfo inst2;
+        CHECK(readSecureInstall(ioPath, &inst2, &err) && inst2.installStream == stream);
+
+        // And a plain Save Secure Config — no stream, no password — is a
+        // format-3 file that opens as it always did and cannot be installed.
+        const QString plainPath = dir.filePath(QStringLiteral("plain3.ct3s"));
+        SecureSaveOptions ps;
+        CHECK(writeSecureFile(plainPath, body, ps, &err));
+        CHECK(readSecureFile(plainPath, &got, &oi, &err) && got == body);
+        CHECK(!oi.hasInstallStream && !oi.requiresPassword && !oi.installOnly);
+        CHECK(!readSecureInstall(plainPath, &inst2, &err));
     }
 
     // ---- a file with NO policy is still a valid file ----

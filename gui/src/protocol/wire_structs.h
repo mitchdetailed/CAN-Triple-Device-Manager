@@ -156,6 +156,12 @@ constexpr uint8_t CMD_LICENSE_KEY_PROVE  = 0x4A; // challenge -> HMAC-SHA256
 // belongs in DeviceLink::isReadResponse() — and is listed there in the same
 // edit that added it.
 constexpr uint8_t CMD_READ_CONFIG_VERSION = 0x4B;
+// v22 (firmware 1.0.8): the sealed install tunnel — firmware/include/seal.h
+// and src/model/sealed_stream.h. SEAL_FRAME answers with the INNER command's
+// own ACK or NACK, echoing the outer request's CRC like any write.
+constexpr uint8_t CMD_SEAL_BEGIN = 0x4C; // salt[16]
+constexpr uint8_t CMD_SEAL_FRAME = 0x4D; // u32le index || ciphertext || tag[16]
+constexpr uint8_t CMD_SEAL_END   = 0x4E;
 
 constexpr int LICENSE_MANUFACTURER_LEN = 32;
 constexpr int LICENSE_MODEL_LEN        = 32;

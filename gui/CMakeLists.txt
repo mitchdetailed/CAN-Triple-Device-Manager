@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.1.19 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.2.0 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -235,6 +235,11 @@ if(EXISTS "${FIRMWARE_DIR}/src/fw_image.c")
         ${FIRMWARE_DIR}/src/script_exec.c
         ${FIRMWARE_DIR}/src/script_cycles.c
         ${FIRMWARE_DIR}/src/engine_math.c
+        # The sealed install tunnel: the Builder seals with the same code the
+        # device opens with, so the two cannot drift. sha256.c is what seal.c
+        # is built from.
+        ${FIRMWARE_DIR}/src/seal.c
+        ${FIRMWARE_DIR}/src/sha256.c
     )
     target_include_directories(ct_device_core PUBLIC ${FIRMWARE_DIR}/include)
 else()
@@ -259,6 +264,12 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/protocol/cobs.h
     src/protocol/config_transfer.cpp
     src/protocol/config_transfer.h
+    src/protocol/sealed_install.cpp
+    src/protocol/sealed_install.h
+    src/model/sealed_stream.cpp
+    src/model/sealed_stream.h
+    src/model/package_builder.cpp
+    src/model/package_builder.h
     src/protocol/crc16.h
     src/protocol/device_link.cpp
     src/protocol/device_link.h
@@ -534,6 +545,7 @@ add_dependencies(CANTripleDeviceManager help_docs)
 qt_add_executable(test_roundtrip
     test/test_roundtrip.cpp
     src/protocol/asc_log.cpp
+    src/model/sealed_stream.cpp
     src/protocol/cobs.cpp
     src/protocol/framer.cpp
     src/protocol/device_link.cpp
@@ -586,6 +598,8 @@ qt_add_executable(test_firmware_link
     test/fake_device_link.h
     src/protocol/config_transfer.cpp
     src/protocol/firmware_update.cpp
+    src/protocol/sealed_install.cpp
+    src/model/sealed_stream.cpp
     src/protocol/firmware_image.cpp
     src/protocol/access_state.cpp
     src/protocol/cobs.cpp
@@ -615,6 +629,7 @@ qt_add_executable(test_firmware_link
     ${FIRMWARE_DIR}/src/license_store.c
     ${FIRMWARE_DIR}/src/sha256.c
     ${FIRMWARE_DIR}/src/cobs.c
+    ${FIRMWARE_DIR}/src/seal.c
     # The firmware-update path, compiled for the host so its state machine is
     # exercised off-hardware. fw_host_stub.c supplies the RAM model those
     # modules read through FW_FLASH_PTR, a NOR-accurate erase/program driver,

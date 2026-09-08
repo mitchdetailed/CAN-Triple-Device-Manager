@@ -1854,9 +1854,12 @@ bool Configuration::peekFile(const QString &path, FilePeek *out, QString *error)
         if (!peekSecureFile(path, &info, error))
             return false;
         peek.secure = true;
-        // A .ct3s never requires a password now — the mode is gone. The flag
-        // stays on FilePeek for the pre-v8 .ct3 case below, which is a different
-        // format and a different password.
+        // Both come straight from the format-3 header flags: a package whose
+        // editable copy is wrapped under a package password wants one, and an
+        // install-only package has nothing to open at all. A format-2 file and
+        // a plain Save Secure Config raise neither and open as they always did.
+        peek.requiresPassword = info.requiresPassword;
+        peek.installOnly = info.installOnly;
         // Whether a .ct3s carries a comms verifier is not knowable from its
         // header — the verifiers live in the sealed body, which is where they
         // belong. False is the honest answer and it costs nothing: a standard
@@ -1926,7 +1929,7 @@ bool Configuration::loadFromFile(const QString &path, QString *error, const QStr
         // No password: v2 of the container has no mode that takes one. The
         // `password` this function was given is for the pre-v8 .ct3 below and
         // for revealing protected comms on load, never for opening a .ct3s.
-        if (!readSecureFile(path, &plain, &info, error))
+        if (!readSecureFile(path, &plain, &info, error, password))
             return false;
         const QJsonDocument bodyDoc = QJsonDocument::fromJson(plain);
         plain.fill('\0'); // the recovered body is the secret the container exists for
@@ -1970,6 +1973,13 @@ bool Configuration::loadFromFile(const QString &path, QString *error, const QStr
         // rather than as a member of its own because it is a property of the
         // FILE, and a document that was never a package simply has none.
         secureOptions.policy = info.policy;
+        // The package password, kept so a Save writes the file back the way it
+        // was opened. The install stream is deliberately NOT kept: an edit here
+        // would leave it describing a configuration this document no longer
+        // is, and a Save would then ship a package that installs the old one.
+        // A document saved from the editor is openable but not installable;
+        // the Builder is where install streams come from.
+        secureOptions.openPassword = password;
         embeddedKey = info.embeddedCommsKey;
     } else if (isBinaryConfigFile(path)) {
         // FORMAT 2 — the sealed .ct3. What comes out of the container is the

@@ -111,38 +111,44 @@ itself still completes.</p>
 <h2>Send Secure Configuration…</h2>
 
 <p>Installs a <code>.ct3s</code> package on the connected device <b>without
-opening it</b>: nothing about the package reaches the document or the screen —
-not a message count, not a channel name, not the per-stage progress text. The
-configuration you have open stays untouched. This is the command to use when
-the person at the laptop is entitled to install a configuration but not to
-read it.</p>
+opening it</b>: the package's sealed install stream is relayed frame by frame
+and the device decrypts it, so nothing about the package reaches the document,
+the screen, or this process at all. The configuration you have open stays
+untouched. This is the command to use when the person at the laptop is entitled
+to install a configuration but not to read it.</p>
 
 <ul>
 <li>A plain <code>.ct3</code> is refused by name — open it and use Online →
 Send Configuration, or build a package with File → Secure Configuration
 Builder… first. See <a href="files.html">Configuration Files (.ct3)</a>.</li>
-<li>A package with <b>no install policy</b> is also refused. "This package makes
-no demands" is not something a package is allowed to be; rebuild it with the
-Secure Configuration Builder.</li>
-<li>The policy is checked <b>before the device is touched</b>, before the Send
-password is asked for, and before a single record goes out — a package that does
-not belong on this unit must never get as far as partially overwriting it. A
-failure refuses with no override, and names the field and both values so you can
-tell whether you picked up the wrong file or the wrong unit.</li>
+<li>A package with <b>no install policy</b> is also refused, and so is a package
+with <b>no install stream</b> (one saved from the editor rather than built).
+"This package makes no demands" is not something a package is allowed to be;
+rebuild it with the Secure Configuration Builder.</li>
+<li>The policy is checked <b>before the device is touched</b> and before a
+single frame goes out — a package that does not belong on this unit must never
+get as far as partially overwriting it. A failure refuses with no override, and
+names the field and both values so you can tell whether you picked up the wrong
+file or the wrong unit.</li>
 <li>The Firmware Key is not a string comparison: the device must <b>prove</b> it
-by answering a challenge, so a look-alike reporting the right manufacturer and
-model still fails. A unit with no licence cannot match anything, so it takes no
-packages at all — issue a licence first. See
+by answering a challenge the package carries, so a look-alike reporting the
+right manufacturer and model still fails — and this Manager never holds the key.
+A unit with no licence cannot match anything, so it takes no packages at all —
+issue a licence first. See
 <a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</li>
-<li>If the package sets device passwords, they are written <b>before</b> the
-configuration goes out, so they commit to flash with it rather than sitting in
-RAM until the next power cycle. A password that cannot be set aborts the whole
-install, so a unit is never left running a new configuration under passwords that
-are half old and half new.</li>
-<li>The install verifies and saves to flash under the same rules as Send
-Configuration: firmware too old to save reports that the configuration is
-running but will be lost at power-off, and a device that guards Get a
-Configuration skips the verify pass.</li>
+<li>No Send password is asked for. The sealed frames carry their own authority
+on the device, and if the package sets device passwords they are written from
+inside the stream, <b>before</b> the configuration, so they commit to flash
+with it.</li>
+<li>The install saves to flash and stamps the package version. There is no
+verify pass: the device answers every frame as it lands, and a refused frame
+ends the install with the frame named. A refusal also ends the sealed session
+on the device, so the install starts again from the beginning rather than
+resuming — "try again" is the whole remedy.</li>
+<li>Needs device firmware <b>1.0.8</b> or newer. An older unit refuses the
+first frame and the message says which firmware to update to. A package built
+by an older Manager (format 2) installs through the path it always used, with
+the Send password prompt and verify pass that path has.</li>
 </ul>
 
 <h2>Get Configuration</h2>

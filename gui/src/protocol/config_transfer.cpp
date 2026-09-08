@@ -119,6 +119,31 @@ ConfigTransfer *ConfigTransfer::get(DeviceLink *link, QObject *parent)
     return t;
 }
 
+QList<PlannedFrame> ConfigTransfer::planInstallFrames(const DeviceTables &tables,
+                                                      const QVector<ControlCanPayload> &busSetups,
+                                                      quint16 configVersion,
+                                                      const QString &configName, int payloadBudget)
+{
+    // A transfer that never runs: built for its plan alone. No link, no
+    // parent, and no runNext() is ever queued.
+    ConfigTransfer t(nullptr, nullptr);
+    t.m_payloadBudget = qBound(64, payloadBudget, int(MAX_TX_PAYLOAD));
+    t.buildSendSteps(tables, /*verify=*/false, busSetups, /*saveToFlash=*/true, configVersion,
+                     configName, /*resetAfter=*/false);
+    QList<PlannedFrame> out;
+    for (const Step &s : t.m_steps) {
+        if (s.cmd == CMD_GET_STATUS)
+            continue; // the relay checks the device in the clear, before BEGIN
+        PlannedFrame f;
+        f.cmd = s.cmd;
+        f.payload = s.payload;
+        f.stage = s.stage;
+        f.flashTimeout = s.timeoutMs == DeviceLink::kFlashTimeoutMs;
+        out.append(f);
+    }
+    return out;
+}
+
 void ConfigTransfer::cancel()
 {
     m_cancelled = true;
@@ -175,6 +200,11 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &tables, bool verify,
 
     auto addWrites = [&](quint8 cmd, auto const &items, int chunk, const QString &what,
                          bool skipIfUnsupported = false) {
+        // The WRITE_CHUNK_* constants are sized against MAX_TX_PAYLOAD. A plan
+        // built for sealing has less room per frame, so the chunk shrinks to
+        // whatever whole records fit the budget it was given.
+        using Item = std::decay_t<decltype(items[0])>;
+        chunk = qMax(1, qMin(chunk, (m_payloadBudget - 4) / int(sizeof(Item))));
         for (int i = 0; i < items.size(); i += chunk) {
             const int count = qMin(chunk, int(items.size()) - i);
             Step s;

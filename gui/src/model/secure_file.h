@@ -122,7 +122,19 @@ constexpr int kSecureMagicBytes = 8;
 // anyway, and half-reading one would mean carrying the wrapping code forever to
 // service files nobody is making. Packages are rebuilt from their .ct3, which is
 // where the configuration actually lives.
-constexpr quint16 kSecureFormatVersion = 2;
+// Format 3 (Manager 1.2.0) keeps a SECTION where format 2 kept the body: an
+// optional sealed install stream (sealed_stream.h) and an optional editable
+// copy that may be wrapped under a package password. A format-2 file still
+// opens and installs exactly as it did; the Builder writes format 3 only.
+// The header flags say what the section holds, so a peek can answer "does
+// this need a password?" and "can this install at all?" without opening
+// anything.
+constexpr quint16 kSecureFormatVersion = 3;
+constexpr quint16 kSecureFormatV2 = 2;
+constexpr quint16 kSecureFlagRequiresPassword = 0x0001; // editable copy wrapped under a password
+constexpr quint16 kSecureFlagInstallStream = 0x0002;    // carries a sealed install stream
+constexpr quint16 kSecureFlagInstallOnly = 0x0004;      // no editable copy at all
+constexpr quint16 kSecureFlagMask = 0x0007;
 constexpr int kSecureFileKeyBytes = 32;
 constexpr int kSecureChunkBytes = 16;
 
@@ -192,6 +204,22 @@ struct SecurePackagePolicy
     bool matchSerialSet = false;
     quint64 matchSerial = 0;
 
+    // Format 3: the fleet key does NOT travel. In its place, a proof the
+    // relay checks a unit against — a nonce the Builder chose and the answer
+    // the device must give to CMD_LICENSE_KEY_PROVE for it. Anyone can check
+    // the answer; only the key can produce it, and the key that could is the
+    // one that sealed the install stream.
+    QByteArray keyProofNonce; // kAccessChallengeBytes
+    QByteArray keyProofMac;   // one HMAC-SHA256 output
+    // Format 3: the password keys are inside the sealed stream, not here; the
+    // policy records only WHICH passwords the install sets.
+    bool keysWithheld = false;
+
+    bool hasKeyProof() const
+    {
+        return keyProofNonce.size() == kAccessChallengeBytes && keyProofMac.size() == 32;
+    }
+
     // The revision this package stamps on the unit when it installs, read back
     // by Device Status. 0 means unversioned. Lives here because a PACKAGE is
     // the deployable revision — it used to be a document field, edited in a
@@ -224,7 +252,7 @@ struct SecurePackagePolicy
     bool setCommsSlot[4] = {false, false, false, false};
     AccessKey commsSlotKey[4] = {kNoAccessKey, kNoAccessKey, kNoAccessKey, kNoAccessKey};
 
-    bool isValid() const { return key.size() == kLicenseKeyBytes; }
+    bool isValid() const { return key.size() == kLicenseKeyBytes || hasKeyProof(); }
     // Whether installing needs the two hardware round trips at all.
     bool wantsHardwareMatch() const { return !matchMcuId.isEmpty() || matchSerialSet; }
     bool changesPasswords() const
@@ -317,6 +345,13 @@ struct SecureSaveOptions
     // that is not the Builder does — a plain .ct3 has no policy and neither does
     // a comms template.
     SecurePackagePolicy policy;
+    // Format 3. The sealed install stream (empty = none), and what to do with
+    // the editable copy: include it under `openPassword`, include it in the
+    // clear when the password is empty (what a plain Save Secure Config does),
+    // or leave it out entirely (includeEditable = false: install-only).
+    QByteArray installStream;
+    QString openPassword;
+    bool includeEditable = true;
     // Extra noise beyond what the payload needs, as a fraction of payload size.
     // Non-zero so two saves of the same document differ in length as well as
     // content, and a file's size says nothing about how much configuration is
@@ -328,6 +363,12 @@ struct SecureSaveOptions
 struct SecureFileInfo
 {
     quint16 formatVersion = 0;
+    // From the header flags, so peekSecureFile can fill them.
+    bool requiresPassword = false; // the editable copy needs the package password
+    bool hasInstallStream = false; // Send Secure Configuration can relay it
+    bool installOnly = false;      // nothing to open in the Manager
+    // Only filled by readSecureFile / readSecureInstall.
+    QByteArray installStream;
     // Only filled by readSecureFile, like the embedded key below: the policy is
     // sealed, so peeking cannot reach it. That is the point — a package's
     // demands are not readable off a file lying on a disk.
@@ -360,13 +401,21 @@ bool writeSecureFile(const QString &path, const QByteArray &plainBody,
 bool sealSecureBlob(const QByteArray &plainBody, const SecureSaveOptions &options,
                     QByteArray *blobOut, QString *error = nullptr);
 bool openSecureBlob(const QByteArray &blob, QByteArray *plainBody,
-                    SecureFileInfo *info, QString *error = nullptr);
+                    SecureFileInfo *info, QString *error = nullptr,
+                    const QString &password = QString(), bool bodyRequired = true);
 
 // Recover the body. `password` is ignored unless the file requires one, and a
 // wrong one fails the payload's integrity check rather than yielding garbage —
 // so `error` distinguishes "wrong password" from "damaged file" for the caller
 // to say which. `plainBody` is only written on success.
 bool readSecureFile(const QString &path, QByteArray *plainBody,
-                    SecureFileInfo *info, QString *error = nullptr);
+                    SecureFileInfo *info, QString *error = nullptr,
+                    const QString &password = QString());
+
+// The install half of a format-3 package: the policy and the sealed stream,
+// which need no password. The editable copy is not touched. Fails on a file
+// with no install stream, which is what a format-2 package and a plain
+// Save Secure Config both are.
+bool readSecureInstall(const QString &path, SecureFileInfo *info, QString *error = nullptr);
 
 } // namespace ct

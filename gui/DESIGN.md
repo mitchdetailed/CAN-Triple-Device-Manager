@@ -551,33 +551,43 @@ satisfies a device's protected-comms gate without them ever typing the password.
 And it carries **the rules for its own installation**. Open… routes on the
 file's magic rather than its extension.
 
-**One mode, and being honest about it is the whole story.** The body is
-encrypted, but the key that decrypts it travels inside the file, obfuscated.
-Anyone with CAN Triple Device Manager can open a `.ct3s`, send it to a device and
-use its channels; nobody can read the protocol detail out of the bytes, and the
-protected messages stay concealed in the UI. This is **obfuscation over
-encryption**. It defeats a hex editor, a text search, a grep for `0x640`, and any
-tool that does not implement this format. It does **not** defeat someone who
-reads this source or disassembles the app: the key is in the file and a
-determined reader will find it.
+**Format 3 (Manager 1.2.0) is where the file stopped carrying its own key.**
+Formats 1 and 2 had one honest story each: format 1 wrapped the file key under a
+password, format 2 dropped that and let the key ride inside the file, obfuscated
+— readable by anyone holding this source. Format 3 keeps the carrier and the
+scatter exactly as format 2 laid them down and changes what is INSIDE the seal:
+the configuration no longer has to be there at all. What a Builder-written
+package carries is a **sealed install stream** (`src/model/sealed_stream.h`) —
+every command frame of a Send, mapped at build time and encrypted under keys
+derived from the Firmware Key with the firmware's own `seal.c` — and a policy
+that names a proof of that key rather than the key. The device derives the same
+keys from the licence it holds and decrypts each frame itself
+(`CMD_SEAL_BEGIN/FRAME/END`, firmware 1.0.8); the Manager relays. The
+configuration is optionally present as an **editable copy**, and then only
+wrapped under a package password with PBKDF2 (`deriveKeys()` from
+`config_lock.h`) — the file key that opens the carrier does not open it.
+Install-only is the Builder's default.
 
-The password-protected mode that used to sit beside it — the file key wrapped
-under the Protected Comms password, so the file would not open at all — was
-removed with format 2. It was the one mode that withheld anything from a reader
-of this source, and it is gone by decision rather than by oversight. What now
-stops a package being *used* where it should not be is the install policy below.
-That is a different guarantee and is not offered as the same one: the policy
-decides which DEVICES will accept the package, not who may read it.
+So a `.ct3s` now says three different things, and the header flags say which:
+`kSecureFlagInstallStream` (it can be relayed), `kSecureFlagRequiresPassword`
+(its editable copy wants the package password), `kSecureFlagInstallOnly` (there
+is nothing to open). A plain **Save Secure Config…** from the editor writes a
+format-3 file with none of them set — openable as before, not installable — and
+a format-2 file still opens and installs exactly as it did, through the old
+path. What stops a package being *used* where it should not be is still the
+install policy below; what stops it being *read* is now the seal, and the two
+are offered as the different guarantees they are.
 
 **File layout** — all multi-byte integers LITTLE-ENDIAN.
 
 ```
 Header, 64 bytes, cleartext:
     0   u8[8]  magic          kSecureMagic
-    8   u16    formatVersion  kSecureFormatVersion — must EQUAL 2; a v1 file
-                              is refused, not read
-   10   u16    flags          none defined in v2; must be 0 or the file is
-                              refused
+    8   u16    formatVersion  2 or 3 (kSecureFormatV2, kSecureFormatVersion);
+                              a v1 file is refused, not read
+   10   u16    flags          v2: must be 0. v3: kSecureFlagRequiresPassword |
+                              kSecureFlagInstallStream | kSecureFlagInstallOnly;
+                              any other bit refuses the file
    12   u8[16] salt           random; seeds wrapping AND chunk placement
    28   u32    iterations     vestigial: written, never read, now that nothing
                               is derived from a password
@@ -593,15 +603,28 @@ run. In order, the material is:
                                     multiple of 16 in the final chunk)
 ```
 
-Both checks above are exact on purpose. `formatVersion` must equal 2 because a
-v1 file is a password-protected package from a format that no longer exists, and
-refusing it by name beats half-reading it. `flags` must be zero because the one
-bit it ever carried was "requires password", and an unused field that is merely
-ignored is a field somebody can flip.
+Both checks are exact on purpose. A v1 file is refused by name because it is a
+password-protected package from a format that no longer exists, and refusing it
+beats half-reading it. Undefined flag bits refuse the file because an unused
+field that is merely ignored is a field somebody can flip. The three v3 flags
+are legal to set, so they are handled the other way: format 3 folds the header's
+version and flags into the wrap mask — `HMAC-SHA256(salt, "ct3s/wrap/v3" ||
+u16le(version) || u16le(flags))` — so a flipped flag, or a version edited down
+to 2, derives a different file key and the tag fails. `peekSecureFile()` reads
+the flags to route Open… and word a prompt; it never has to decide whether they
+are telling the truth, because a file whose flags were touched does not open.
 
-The sealed payload's **plaintext** is four things in order: the four
-embedded-access-key bytes, a `u16` policy length, that many bytes of policy JSON,
-and then the configuration body. The policy sits inside the seal rather than in
+The sealed payload's **plaintext** starts the same way in both formats: the four
+embedded-access-key bytes, a `u16` policy length, that many bytes of policy JSON.
+Format 2 follows with the configuration body. Format 3 follows with a *section*:
+`u8 hasStream`, then if set `u32 len` and the sealed install stream; then
+`u8 bodyKind` and `u32 len` and that many bytes — kind 0 is no body
+(install-only), kind 1 the configuration in the clear (a Save Secure Config…),
+kind 2 `salt[16] || u32 iterations || sealPayload(body, deriveKeys(password,
+salt, iterations))`, the editable copy under the package password. The policy
+JSON of a Builder-written package has no `key`: it has `keyProofNonce` and
+`keyProofMac` instead, and `passwordUpdates` (names only) in place of the
+password keys, which are in the stream. The policy sits inside the seal rather than in
 the cleartext header for two reasons, and either alone would settle it: in the
 header it would be readable off a disk, so a package would advertise which
 devices it was built for; and it would be editable, so the rules a package
@@ -618,10 +641,12 @@ neither is asked to do the other's job.
 Wrapping, in the same terms:
 
 - `fileKey` — 32 random bytes, generated per save.
-- `wrapMask` — `HMAC-SHA256(salt, "ct3s/wrap/v1")`, and nothing else;
+- `wrapMask` — format 2: `HMAC-SHA256(salt, "ct3s/wrap/v1")`; format 3:
+  `HMAC-SHA256(salt, "ct3s/wrap/v3" || u16le(version) || u16le(flags))`;
   `wrapped = fileKey XOR wrapMask`. The password-derived term went with the
-  password mode, so the mask is now always reproducible from the cleartext salt
-  — which is the honest statement of what the wrap is worth.
+  password mode, so the mask is always reproducible from the cleartext header
+  — which is the honest statement of what the wrap is worth: it binds the
+  header, it hides nothing.
 - `encKey` / `macKey` — `HMAC-SHA256(fileKey, "ct3s/enc/v1" / "ct3s/mac/v1")`,
   fed to `sealPayload()` / `openPayload()` from `config_lock.h`. The `.ct3s` body
   therefore uses exactly the authenticated encryption (HMAC-SHA256 in counter
@@ -801,9 +826,9 @@ A plain `.ct3` chosen here is refused by name rather than quietly sent.
 `Configuration::peekFile()` reads the header first, and a file that is not sealed
 has no business being installed by the command whose entire premise is that its
 contents stay closed — the message points at Send Configuration or at Save Secure
-Config… instead. A package that *is* sealed under "Require access password for
-use" prompts for that password before anything else, because there is nothing to
-send until the file can be decoded at all.
+Config… instead. A format-3 package with no install stream — saved from the editor rather than
+built — is refused by name too, because a document that has been edited is a
+package nobody sealed.
 
 One case needed deciding rather than inheriting. When the identity cannot be read
 at all — firmware older than the fleet commands, or a read that simply failed —
@@ -815,15 +840,43 @@ fleet and pins no serial asks nothing and installs anywhere, which is what an
 unbadged development package should do, while one that names a fleet is refused
 rather than installed on faith.
 
-**The honest boundary**, so nobody mistakes this for more than it is: the bytes are
-decrypted in this process, because they have to be to be sent at all. This
-withholds them from the UI; it does not withhold them from someone instrumenting
-the application. There is no longer a stronger setting to reach for: the
-password-protected mode that once made a package genuinely unreadable went with
-format 2, and nothing replaced it, because a package that cannot be opened here
-cannot be installed here either. What a package controls now is not who may read
-it but which DEVICES will accept it — the install policy — and that is a
-different guarantee, offered as itself.
+**Format 3 packages are relayed, not sent** (`src/protocol/sealed_install.*`,
+`MainWindow::sendSealedPackage()`). `readSecureInstall()` opens the carrier — the
+file key is derivable from the cleartext salt, as ever — and hands back the
+policy and the sealed stream without touching the editable copy or asking for a
+password. `checkPackagePolicy()` runs the same verdict as before, with one
+substitution: where a format-2 policy carries the fleet key and the host proves
+it with `proveLicenseKey()`, a format-3 policy carries `keyProofNonce/Mac` — a
+challenge the Builder chose and the PROVE-label answer it computed while it still
+held the key — and `checkLicenseKeyProof()` sends the nonce and compares. Anyone
+can check the answer; only the key can produce it, and the key that could is the
+one that sealed the stream. Then `SealedInstall` sends `CMD_SEAL_BEGIN` with the
+stream's salt, one `CMD_SEAL_FRAME` per frame in order, and `CMD_SEAL_END`. The
+device answers each frame with the *inner* command's own ACK or NACK, so a
+refusal reads exactly as it would on a plain Send, with the frame number added.
+No Send password is asked for: inside a sealed session `accessBlocked()` is
+false, because the seal itself is the authority, and the password writes a
+package carries are the first frames of its stream.
+
+The frames come from `ConfigTransfer::planInstallFrames()`, which is
+`buildSendSteps()` with no link — the same chunking and the same order as a Send,
+minus the status ping, the verify reads and the reset, under a payload budget
+shrunk by `SEAL_OVERHEAD + 1` so a frame still fits `MAX_TX_PAYLOAD` once the
+index, the tag and the inner command byte are added. A refused frame ends the
+session on the device, and there is deliberately no resume: the one hazard a
+relay has that a Send does not is a lost ACK, whose retransmit carries an index
+the device has already moved past, and "start again from BEGIN" is a smaller
+thing to explain than a resume protocol. The stream is not a `Configuration`;
+nothing about it reaches `m_config`, the screen, or this process in the clear.
+
+**The honest boundary, restated for format 3**: nothing is decrypted in this
+process. The passphrase that seals a package is typed into the Builder and goes
+no further — neither it nor the derived key is written anywhere — and whoever
+holds it can decrypt anything built under it, which is the statement of what the
+seal is worth. The device holds the key in flash, so readout protection at
+manufacture is still the backstop for a unit in someone else's hands. A
+format-2 package is still decrypted here, because that format has no other way
+to be sent, and the help says so.
 
 - **File**: New, Open…, Save, Save As…, **Secure Configuration Builder…**
   (packages a `.ct3` as a `.ct3s`), Check Channels (live validation report with unused-channel cleanup),

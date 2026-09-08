@@ -124,12 +124,13 @@ rules, 8 integrators, and
   device **without ever opening it**. Send Configuration sends the document on
   screen and leaves it in the app afterwards, so handing that to a dealer turns
   "install this update" into "and here is the CAN protocol, have a browse". This
-  one decodes the package into a throwaway Configuration, maps it, sends it, and
-  discards it — your own open document is untouched, and nothing about the
-  package is displayed, down to a mapping failure reporting how many errors there
-  were rather than what they were. The package's policy is enforced **before the
-  device is touched**: the licence fields it names must match, its Firmware Key
-  must be *proved* by the unit, and an unlicensed device takes no package at all.
+  one relays the package's sealed install stream frame by frame and the
+  **device decrypts it** (firmware 1.0.8) — nothing about the package is decoded
+  in the Manager at all, and your own open document is untouched. The package's
+  policy is enforced **before the device is touched**: the licence fields it
+  names must match, its Firmware Key must be *proved* by the unit against a
+  proof the package carries in place of the key, and an unlicensed device takes
+  no package at all.
   A refusal names the field and both values. There is no override for a failing
   rule — one that can be clicked past is a warning wearing a costume, and an
   installer has no way to tell which is which.
@@ -143,10 +144,12 @@ rules, 8 integrators, and
   Generates/From and Uses/For tables with the DBC extraction detail, compound
   Id[n] groups, calculations), incomplete channels, unused channels — with
   Print, Save PDF, and Save Text.
-- **File → Secure Configuration Builder…** — packages a `.ct3` as a `.ct3s`,
-  which keeps Hidden and Protected messages concealed in the copy the customer
-  opens, so they can deploy and update a configuration without ever reading its
-  CAN layout. A plain `.ct3` is binary too, but confers no concealment. The
+- **File → Secure Configuration Builder…** — packages a `.ct3` as a `.ct3s`
+  the Manager cannot read: the configuration is mapped at build time and every
+  install frame is sealed under keys derived from the Firmware Key, which never
+  travels in the file. By default the package is install-only; tick the option
+  to include an editable copy, and it opens only with the package password. A
+  plain `.ct3` is binary too, but confers no concealment. The
   package also carries the rules for its own installation: optional matches on
   the licence's Manufacturer, Model and Version, optional matches on the unit's
   own MCU ID and HW Serial, a **Firmware Key the device
@@ -217,8 +220,9 @@ application links.
 - Configurations are saved as **`*.ct3`** — a short readable header giving the
   format, schema and writing version, then an encrypted binary body — or as
   **`*.ct3s`** (File → Secure Configuration Builder…) when the CAN protocol
-  inside them is not for the reader to see — same document, concealment that
-  survives the file, plus the policy deciding which devices may install it.
+  inside them is not for the reader to see — sealed for the device to decrypt,
+  optionally with an editable copy under a package password, plus the policy
+  deciding which devices may install it.
   Save As offers a third format, **`*.json`** — named in the dropdown as
   readable and not encrypted — for diffing in version control or handing to
   another tool; it is never a default, and a Save on a `.ct3` or `.ct3s` never

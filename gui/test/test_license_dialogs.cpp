@@ -83,7 +83,8 @@ void testBuilderRefusesWhatCannotInstall()
     if (!build)
         return;
 
-    // Creation order: source, five match fields, the key, six password
+    // Creation order: source, five match fields, the key, the package password
+    // and its confirmation, six password
     // fields. Cross-checked by what is visible so a reordered form is caught.
     //
     // The Package version QSpinBox owns a QLineEdit of its own, which
@@ -93,13 +94,13 @@ void testBuilderRefusesWhatCannotInstall()
     for (QLineEdit *e : dlg.findChildren<QLineEdit *>())
         if (!(e->parent() && e->parent()->inherits("QAbstractSpinBox")))
             edits << e;
-    CHECK(edits.size() == 13);
-    if (edits.size() != 13)
+    CHECK(edits.size() == 15);
+    if (edits.size() != 15)
         return;
     QLineEdit *source = edits[0];
     QLineEdit *matchModel = edits[2];
     QLineEdit *key = edits[6];
-    QLineEdit *sendPassword = edits[7];
+    QLineEdit *sendPassword = edits[9];
     CHECK(source->placeholderText() == QStringLiteral("Choose a .ct3 to package"));
     CHECK(key->echoMode() == QLineEdit::Password);
     CHECK(key->isEnabled()); // the one secret with no checkbox: always live
@@ -247,8 +248,8 @@ void testBuilderHardwareMatches()
     for (QLineEdit *e : dlg.findChildren<QLineEdit *>())
         if (!(e->parent() && e->parent()->inherits("QAbstractSpinBox")))
             edits << e;
-    CHECK(edits.size() == 13);
-    if (edits.size() != 13)
+    CHECK(edits.size() == 15);
+    if (edits.size() != 15)
         return;
     QLineEdit *source = edits[0];
     QLineEdit *mcuId = edits[4];
@@ -289,6 +290,32 @@ void testBuilderHardwareMatches()
     serialCheck->setChecked(false);
     mcuCheck->setChecked(false);
     CHECK(build->isEnabled()); // unticked: not asked for, whatever the fields hold
+
+    // The editable copy: off by default (install-only), and when on it needs a
+    // password that passes the device-password policy and matches its
+    // confirmation — a typo here is a package nobody can open.
+    QLineEdit *pkgPassword = edits[7];
+    QLineEdit *pkgConfirm = edits[8];
+    CHECK(pkgPassword->echoMode() == QLineEdit::Password);
+    CHECK(!pkgPassword->isEnabled() && !pkgConfirm->isEnabled());
+    QCheckBox *editable = checkboxNamed(&dlg, QStringLiteral("Include an editable copy, opened only with this package password"));
+    CHECK(editable != nullptr);
+    if (!editable)
+        return;
+    editable->setChecked(true);
+    CHECK(pkgPassword->isEnabled() && pkgConfirm->isEnabled());
+    CHECK(!build->isEnabled());
+    CHECK(labelStartingWith(&dlg, QStringLiteral("An editable copy needs a package password")) != nullptr);
+    pkgPassword->setText(QStringLiteral("a"));
+    CHECK(!build->isEnabled());
+    CHECK(labelStartingWith(&dlg, QStringLiteral("Package password:")) != nullptr);
+    pkgPassword->setText(QStringLiteral("a-long-enough-package-password"));
+    CHECK(!build->isEnabled());
+    CHECK(labelStartingWith(&dlg, QStringLiteral("The package password and its confirmation differ")) != nullptr);
+    pkgConfirm->setText(QStringLiteral("a-long-enough-package-password"));
+    CHECK(build->isEnabled());
+    editable->setChecked(false);
+    CHECK(build->isEnabled()); // install-only again, whatever the fields hold
 }
 
 int main(int argc, char **argv)

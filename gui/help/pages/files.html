@@ -42,9 +42,10 @@ described to a customer as one. The key that unscrambles a .ct3 travels inside
 the .ct3, so it defeats Notepad, a text search and any tool that does not
 implement the format — and it does not defeat somebody determined to pull the
 format apart. If a configuration genuinely must not be read, use
-the <b>Secure Configuration Builder</b>, which conceals the protocol detail and
-adds an install policy — though be clear about what that buys: a package is no
-harder to READ, it is harder to USE anywhere it was not built for.</p>
+the <b>Secure Configuration Builder</b>: a package it writes is sealed for the
+device, which decrypts it itself, and the Manager cannot read it at all — unless
+the Builder was told to include an editable copy, which then opens only with the
+package password.</p>
 
 <p class="warn">A .ct3 still confers no concealment. Marking a message
 <b>Read Only</b>, <b>Hidden</b> or <b>Protect Communication</b> stops <i>this
@@ -64,8 +65,11 @@ a .ct3s is never fed to the wrong reader.</p>
 
 <p>Two kinds of file ask for a password before they open:</p>
 <ul>
-<li>A <b>.ct3s saved with "Require access password for use"</b> prompts for
-its Protected Comms password.</li>
+<li>A <b>.ct3s built with an editable copy</b> prompts for its package
+password — the one chosen in the Secure Configuration Builder. An
+<b>install-only</b> package, which is what the Builder writes by default, is
+refused by name: there is nothing in it to open, and the message points at
+Online → Send Secure Configuration….</li>
 <li>A <b>plain .ct3 written by an old version</b> of the program under the
 retired Configuration Password prompts for that password, and the prompt
 names it as such.</li>
@@ -147,24 +151,23 @@ copy that outlives the software.</p>
 
 <h2>What a secure package protects</h2>
 
-<p>The body is encrypted, but the key that decrypts it travels inside the file,
-obfuscated. Anyone with CAN Triple Device Manager can open the package, send it
-to a matching device and use its channels; nobody can read the protocol detail
-out of the bytes with a hex editor or a text search, and the protected messages
-stay concealed in the interface.</p>
+<p>A package built by the Secure Configuration Builder is sealed under keys
+derived from the Firmware Key, and the key does not travel in the file: the
+device derives the same keys from its licence and decrypts the install itself,
+frame by frame, while the Manager only relays. The package carries a proof the
+installer can check a unit against, an <b>install policy</b> — the manufacturer,
+model, version and hardware it demands, and which passwords it sets — and, only
+if the Builder was asked, an editable copy wrapped under a package password.</p>
 
-<p class="warn">Be clear about the limit: this is obfuscation over encryption. It
-defeats a hex editor, a text search and any tool that does not implement the
-format. It does not defeat someone who reads this application's source. An
-earlier release offered a mode that wrapped the file key under a passphrase and
-genuinely withheld it; that mode has been removed, and files written in it can no
-longer be opened — rebuild them from their <code>.ct3</code>.</p>
+<p class="warn">Be clear about the limits. Whoever holds the Firmware Key
+passphrase can decrypt anything built under it. A device holds the key in its
+flash, so an ST-Link with readout protection off recovers both. And a package
+built by an older Manager (format 2) still opens and installs the way it always
+did — its key rides inside the file — until it is rebuilt.</p>
 
-<p>What a package does have instead is an <b>install policy</b>, sealed inside it
-alongside the configuration: the manufacturer, model and version it demands of a
-device, and a Firmware Key the device must prove. That stops a package being
-<i>used</i> where it should not be, which is a different guarantee from being
-unreadable and must not be mistaken for it. See
+<p>The policy stops a package being <i>used</i> where it should not be; the
+seal stops it being <i>read</i>. They are different guarantees and the file now
+offers both. See
 <a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</p>
 
 <h2>Version compatibility</h2>
@@ -212,10 +215,11 @@ as the passwords themselves. They guard the
 carries them the same way.</li>
 <li>In a .ct3s only: the embedded comms key that lets a customer's copy
 satisfy a device's protected-comms gate without them ever typing the
-password, and the fleet key. Both are kept out of a .ct3 on purpose. A .ct3
-is scrambled but its key rides along inside it, so it is the wrong place for
-the fleet's only real secret — and a .ct3 is the file that gets mailed around
-without much thought, which is the other half of the reason.</li>
+password, and — in a package built by the current Builder — the sealed
+install stream and a proof of the fleet key in place of the key itself. The
+fleet key is kept out of every file on purpose: a .ct3 is the file that gets
+mailed around without much thought, and a .ct3s is the file that is handed to
+people who must not be able to read it.</li>
 </ul>
 
 <p>To install a .ct3s on a device without ever displaying its contents, use

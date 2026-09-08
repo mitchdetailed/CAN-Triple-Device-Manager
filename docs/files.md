@@ -24,7 +24,7 @@ have to pick it — see <a href="#json">Saving as JSON</a>.</td></tr>
 
 It means the obvious, ordinary thing: your CAN IDs, bit layouts, scaling factors and channel names are no longer sitting in a file that any text editor opens and any drive-wide text search finds. That was the old behaviour and it surprised people.
 
-> **Warning:** It is **not** a protection feature, and it should never be described to a customer as one. The key that unscrambles a .ct3 travels inside the .ct3, so it defeats Notepad, a text search and any tool that does not implement the format — and it does not defeat somebody determined to pull the format apart. If a configuration genuinely must not be read, use the **Secure Configuration Builder**, which conceals the protocol detail and adds an install policy — though be clear about what that buys: a package is no harder to READ, it is harder to USE anywhere it was not built for.
+> **Warning:** It is **not** a protection feature, and it should never be described to a customer as one. The key that unscrambles a .ct3 travels inside the .ct3, so it defeats Notepad, a text search and any tool that does not implement the format — and it does not defeat somebody determined to pull the format apart. If a configuration genuinely must not be read, use the **Secure Configuration Builder**: a package it writes is sealed for the device, which decrypts it itself, and the Manager cannot read it at all — unless the Builder was told to include an editable copy, which then opens only with the package password.
 
 > **Warning:** A .ct3 still confers no concealment. Marking a message **Read Only**, **Hidden** or **Protect Communication** stops *this application* from displaying or editing it, and opening a .ct3 gives all of it back to whoever opened the file. None of the three survives a different serial tool talking to the device either, because the device enforces none of them. A .ct3s is what carries the marking across to somebody else's machine. See [Marking a message](communications.md#marking).
 
@@ -33,7 +33,7 @@ It means the obvious, ordinary thing: your CAN IDs, bit layouts, scaling factors
 **File → Open…** offers both formats in one filter ("CAN Triple Configurations (\*.ct3 \*.ct3s)"). The program decides which reader to use from the first bytes of the file, not from its extension, so a renamed file still opens correctly, an older JSON .ct3 is recognised for what it is, and a .ct3s is never fed to the wrong reader.
 
 Two kinds of file ask for a password before they open:
-- A **.ct3s saved with "Require access password for use"** prompts for its Protected Comms password.
+- A **.ct3s built with an editable copy** prompts for its package password — the one chosen in the Secure Configuration Builder. An **install-only** package, which is what the Builder writes by default, is refused by name: there is nothing in it to open, and the message points at Online → Send Secure Configuration….
 - A **plain .ct3 written by an old version** of the program under the retired Configuration Password prompts for that password, and the prompt names it as such.
 
 In both cases the prompt appears *before* the current document is touched — cancelling leaves whatever you had open exactly as it was.
@@ -63,11 +63,11 @@ Good reasons to choose it anyway: keeping a configuration in git where the histo
 
 ## What a secure package protects
 
-The body is encrypted, but the key that decrypts it travels inside the file, obfuscated. Anyone with CAN Triple Device Manager can open the package, send it to a matching device and use its channels; nobody can read the protocol detail out of the bytes with a hex editor or a text search, and the protected messages stay concealed in the interface.
+A package built by the Secure Configuration Builder is sealed under keys derived from the Firmware Key, and the key does not travel in the file: the device derives the same keys from its licence and decrypts the install itself, frame by frame, while the Manager only relays. The package carries a proof the installer can check a unit against, an **install policy** — the manufacturer, model, version and hardware it demands, and which passwords it sets — and, only if the Builder was asked, an editable copy wrapped under a package password.
 
-> **Warning:** Be clear about the limit: this is obfuscation over encryption. It defeats a hex editor, a text search and any tool that does not implement the format. It does not defeat someone who reads this application's source. An earlier release offered a mode that wrapped the file key under a passphrase and genuinely withheld it; that mode has been removed, and files written in it can no longer be opened — rebuild them from their `.ct3`.
+> **Warning:** Be clear about the limits. Whoever holds the Firmware Key passphrase can decrypt anything built under it. A device holds the key in its flash, so an ST-Link with readout protection off recovers both. And a package built by an older Manager (format 2) still opens and installs the way it always did — its key rides inside the file — until it is rebuilt.
 
-What a package does have instead is an **install policy**, sealed inside it alongside the configuration: the manufacturer, model and version it demands of a device, and a Firmware Key the device must prove. That stops a package being *used* where it should not be, which is a different guarantee from being unreadable and must not be mistaken for it. See [Firmware Licensing &amp; Access Keys](licensing.md).
+The policy stops a package being *used* where it should not be; the seal stops it being *read*. They are different guarantees and the file now offers both. See [Firmware Licensing &amp; Access Keys](licensing.md).
 
 ## Version compatibility
 
@@ -81,6 +81,6 @@ Refusing is deliberate, and the reason is worth knowing: a setting an older prog
 - For a `.ct3s`, the **install policy** — which devices the package may be sent to and which passwords it sets when it arrives. A plain `.ct3` carries none. See [Firmware Licensing &amp; Access Keys](licensing.md).
 - An **access verifier** for the Protected Comms password, so the program can check a typed password offline. It cannot be turned back into the key that opens hardware, so a file lying around leaks nothing usable.
 - The configuration's four **Message Passwords** — as derived keys, never as the passwords themselves. They guard the [message markings](communications.md#marking), and a [communications template](communications.md#templates) (.ct3t) carries them the same way.
-- In a .ct3s only: the embedded comms key that lets a customer's copy satisfy a device's protected-comms gate without them ever typing the password, and the fleet key. Both are kept out of a .ct3 on purpose. A .ct3 is scrambled but its key rides along inside it, so it is the wrong place for the fleet's only real secret — and a .ct3 is the file that gets mailed around without much thought, which is the other half of the reason.
+- In a .ct3s only: the embedded comms key that lets a customer's copy satisfy a device's protected-comms gate without them ever typing the password, and — in a package built by the current Builder — the sealed install stream and a proof of the fleet key in place of the key itself. The fleet key is kept out of every file on purpose: a .ct3 is the file that gets mailed around without much thought, and a .ct3s is the file that is handed to people who must not be able to read it.
 
 To install a .ct3s on a device without ever displaying its contents, use **Online → Send Secure Configuration…** — see [Online: Send, Get &amp; Flash](online.md).

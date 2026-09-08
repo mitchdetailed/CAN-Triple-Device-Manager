@@ -113,24 +113,12 @@ bool sendAccessKeyWrite(DeviceLink *link, AccessFunction fn, AccessKey key, bool
 {
     if (!link)
         return false;
-    AccessKeyWritePayload record{};
-    record.function = functionByte(fn);
-    record.clear = clear ? 1 : 0;
-    record.slot = quint8(qBound(1, slot, 4));
-    if (!clear) {
-        const QByteArray bytes = accessKeyBytes(key);
-        if (bytes.size() != ACCESS_KEY_LEN) {
-            if (error)
-                *error = QStringLiteral("The password did not produce a usable key.");
-            return false;
-        }
-        memcpy(record.key, bytes.constData(), ACCESS_KEY_LEN);
+    if (!clear && accessKeyBytes(key).size() != ACCESS_KEY_LEN) {
+        if (error)
+            *error = QStringLiteral("The password did not produce a usable key.");
+        return false;
     }
-    // record.key stays zero when clearing. The device ignores it, but an
-    // all-zero key is also how the device spells "no password", so sending the
-    // real bytes there would put a live key on the wire to say the opposite.
-
-    const QByteArray payload(reinterpret_cast<const char *>(&record), sizeof(record));
+    const QByteArray payload = accessKeyWritePayload(fn, key, clear, slot);
     quint8 code = 0;
     if (!link->requestSync(CMD_WRITE_ACCESS_KEYS, payload, nullptr, error,
                            DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
@@ -702,6 +690,51 @@ bool writeBinding(DeviceLink *link, const QByteArray &uid, QString *error)
                 *error = QStringLiteral("This firmware does not support device binding, so the "
                                         "configuration was sent unbound.");
         }
+        return false;
+    }
+    return true;
+}
+
+QByteArray accessKeyWritePayload(AccessFunction fn, AccessKey key, bool clear, int slot)
+{
+    AccessKeyWritePayload record{};
+    record.function = functionByte(fn);
+    record.clear = clear ? 1 : 0;
+    record.slot = quint8(qBound(1, slot, 4));
+    if (!clear) {
+        const QByteArray bytes = accessKeyBytes(key);
+        if (bytes.size() == ACCESS_KEY_LEN)
+            memcpy(record.key, bytes.constData(), ACCESS_KEY_LEN);
+    }
+    // record.key stays zero when clearing. The device ignores it, but an
+    // all-zero key is also how the device spells "no password", so sending the
+    // real bytes there would put a live key on the wire to say the opposite.
+    return QByteArray(reinterpret_cast<const char *>(&record), sizeof(record));
+}
+
+bool checkLicenseKeyProof(DeviceLink *link, const QByteArray &nonce,
+                          const QByteArray &expectedMac, QString *error, bool *mismatch)
+{
+    if (mismatch)
+        *mismatch = false;
+    if (!link || nonce.size() != kAccessChallengeBytes || expectedMac.isEmpty())
+        return false;
+    QByteArray answer;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_LICENSE_KEY_PROVE, nonce, &answer, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        if (code == ERR_LOCKED && error)
+            *error = QStringLiteral("This unit holds no Firmware Key to prove.");
+        return false;
+    }
+    // Not constant-time, and it need not be: both values are public — the
+    // proof is in the package and the answer crossed the wire.
+    if (answer != expectedMac) {
+        if (mismatch)
+            *mismatch = true;
+        if (error)
+            *error = QStringLiteral("This unit does not hold the Firmware Key this package "
+                                    "was built for.");
         return false;
     }
     return true;

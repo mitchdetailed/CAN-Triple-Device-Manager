@@ -218,6 +218,17 @@ bool writeAccessKey(DeviceLink *link, AccessFunction fn, AccessKey key, QString 
                     int slot = 1);
 bool clearAccessKey(DeviceLink *link, AccessFunction fn, QString *error, int slot = 1);
 
+// The CMD_WRITE_ACCESS_KEYS payload for one function and slot, for a caller
+// that carries it somewhere other than straight to a link — the package
+// builder seals it into an install stream. `clear` removes the password.
+QByteArray accessKeyWritePayload(AccessFunction fn, AccessKey key, bool clear, int slot);
+
+// Like proveLicenseKey, but against a proof somebody ELSE computed: the nonce
+// and the answer the device must give for it. A format-3 package carries one,
+// so the relay can tell a unit holds the fleet key without holding that key.
+bool checkLicenseKeyProof(DeviceLink *link, const QByteArray &nonce,
+                          const QByteArray &expectedMac, QString *error, bool *mismatch);
+
 // Bind the configuration to a chip. An empty or all-zero uid clears the
 // binding, so the configuration runs anywhere again.
 bool writeBinding(DeviceLink *link, const QByteArray &uid, QString *error);

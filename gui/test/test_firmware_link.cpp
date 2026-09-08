@@ -22,6 +22,8 @@
 #include "../src/model/configuration.h"
 #include "../src/model/device_mapper.h"
 #include "../src/protocol/config_transfer.h"
+#include "../src/protocol/sealed_install.h"
+#include "../src/model/sealed_stream.h"
 #include "../src/protocol/firmware_image.h"
 #include "../src/protocol/firmware_update.h"
 #include "fake_device_link.h"
@@ -291,6 +293,11 @@ constexpr unsigned kLicenseKeyClear = LICENSE_KEY_CLEAR;
 // spellable, and an #undef here read as if a firmware macro were still
 // shadowing it.
 #undef CMD_READ_CONFIG_VERSION
+// v22's sealed install tunnel: three opcodes the host names identically in
+// wire_structs.h. The sealed-install test spells them as ct::.
+#undef CMD_SEAL_BEGIN
+#undef CMD_SEAL_FRAME
+#undef CMD_SEAL_END
 #undef CMD_READ_CAN_SETUP
 #undef ACCESS_KEY_LEN
 #undef ACCESS_CHALLENGE_LEN
@@ -6349,6 +6356,168 @@ static void testConfigTransferSendAndGetAgainstTheDevice(const SerialProtoCallba
 // be, after which a half-written configuration reports success. Pin both sides:
 // the message-table write is fatal, and an optional step's refusal is survived
 // and reported.
+// The sealed install tunnel, end to end against the real firmware: the
+// Builder's stream (planned, then sealed under the fleet key this unit holds)
+// relayed by SealedInstall, decrypted and dispatched by serial_proto.c, and
+// read back through an ordinary Get. Then every refusal the device makes.
+#include "seal.h"
+extern "C" bool license_store_write(const char *manufacturer, const char *model,
+                                    const char *fw_version, const uint8_t *key,
+                                    const uint8_t *updater_key);
+
+struct RelayOutcome {
+    bool done = false;
+    bool ok = false;
+    QString error;
+};
+
+static void runRelay(ct::SealedInstall *r, RelayOutcome *out)
+{
+    QEventLoop loop;
+    QObject::connect(r, &ct::SealedInstall::finished, &loop,
+                     [out, &loop](bool ok, const QString &error) {
+                         out->done = true;
+                         out->ok = ok;
+                         out->error = error;
+                         loop.quit();
+                     });
+    QTimer::singleShot(20000, &loop, [&loop]() { loop.quit(); });
+    loop.exec();
+}
+
+static void testSealedInstallAgainstTheDevice(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+    serial_proto_init(restore);
+    flashErase();
+
+    // The fleet key this unit holds, written straight into the licence store —
+    // the serial path for that is testFirmwareLicense's business.
+    const QByteArray fleetKey = ct::deriveLicenseKey(QStringLiteral("sealed fleet phrase"));
+    CHECK(license_store_write("Minton Performance", "CAN Triple TD", "1.05",
+                              reinterpret_cast<const uint8_t *>(fleetKey.constData()), nullptr));
+
+    ct::Configuration cfg;
+    fillTransferFixture(cfg);
+    const ct::MappingResult mapped = ct::mapToDevice(cfg);
+    CHECK(mapped.ok());
+    QList<ct::PlannedFrame> frames = ct::ConfigTransfer::planInstallFrames(
+        mapped.tables, {}, 7, QStringLiteral("Sealed fixture"), ct::sealedInnerPayloadBudget());
+    CHECK(frames.size() > 3);
+    for (const ct::PlannedFrame &f : frames)
+        CHECK(f.payload.size() <= ct::sealedInnerPayloadBudget());
+    {
+        // A Send password, set by the stream itself, ahead of the configuration.
+        ct::PlannedFrame f;
+        f.cmd = ct::CMD_WRITE_ACCESS_KEYS;
+        f.payload = ct::device_session::accessKeyWritePayload(
+            ct::AccessFunction::SendConfiguration,
+            ct::deriveAccessKey(QStringLiteral("fleet-send-password")), false, 1);
+        frames.prepend(f);
+    }
+    QString why;
+    const QByteArray stream = ct::buildSealedStream(fleetKey, frames, &why);
+    CHECK(!stream.isEmpty());
+
+    // The relay. Every frame ACKs, nothing crosses in the clear, and the
+    // configuration, its version and the password all land.
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        RelayOutcome out;
+        runRelay(ct::SealedInstall::run(&link, stream), &out);
+        CHECK(out.done && out.ok);
+        if (!out.ok)
+            std::printf("      relay error: %s\n", qPrintable(out.error));
+        CHECK(link.sentAny(ct::CMD_SEAL_BEGIN));
+        CHECK(link.sentAny(ct::CMD_SEAL_FRAME));
+        CHECK(link.sentAny(ct::CMD_SEAL_END));
+        CHECK(!link.sentAny(ct::CMD_WRITE_MSG_CFG));
+        CHECK(!link.sentAny(ct::CMD_CLEAR_CONFIG));
+    }
+    {
+        ct::FakeDeviceLink getLink(firmwareReply);
+        TransferOutcome got;
+        runTransfer(ct::ConfigTransfer::get(&getLink), &got);
+        CHECK(got.done && got.ok && got.gotTables);
+        int active = 0;
+        for (const ct::CanMessageConfig &m : got.tables.messages)
+            if (m.flags & ct::MSGFLAG_ACTIVE)
+                ++active;
+        CHECK(active == mapped.tables.messages.size());
+        for (int i = 0; i < mapped.tables.messages.size() && i < got.tables.messages.size(); ++i)
+            CHECK(got.tables.messages[i].can_id == mapped.tables.messages[i].can_id);
+    }
+    {
+        const auto p = exchange(ct::CMD_READ_CONFIG_VERSION, QByteArray());
+        CHECK(p.size() == 1 && p[0].payload.size() == 2 && quint8(p[0].payload[0]) == 7
+              && quint8(p[0].payload[1]) == 0);
+    }
+    // A power cycle re-locks: whoever set a password holds it for the rest of
+    // that session, and proving says who is on the wire NOW.
+    serial_proto_init(restore);
+    // The password the stream set is in force: a plain CLEAR is refused now...
+    CHECK(expectNack(ct::CMD_CLEAR_CONFIG, QByteArray(), ct::ERR_LOCKED));
+    // ...while the same package installs again — the sealed frames carry their
+    // own authority, which is the whole point of the tunnel.
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        RelayOutcome again;
+        runRelay(ct::SealedInstall::run(&link, stream), &again);
+        CHECK(again.done && again.ok);
+    }
+
+    // Refusals. Each one ends the session, so each case starts with a BEGIN.
+    QByteArray salt;
+    QList<ct::SealedFrame> sealed;
+    CHECK(ct::parseSealedStream(stream, &salt, &sealed, &why));
+    CHECK(sealed.size() == frames.size());
+    CHECK(expectNack(ct::CMD_SEAL_FRAME, sealed[0].bytes, ct::ERR_LOCKED)); // no session
+    CHECK(expectAck(ct::CMD_SEAL_BEGIN, salt));
+    CHECK(expectNack(ct::CMD_SEAL_FRAME, sealed[1].bytes, ct::ERR_LOCKED)); // out of step
+    CHECK(expectNack(ct::CMD_SEAL_FRAME, sealed[0].bytes, ct::ERR_LOCKED)); // and the session is gone
+    CHECK(expectAck(ct::CMD_SEAL_BEGIN, salt));
+    {
+        QByteArray bad = sealed[0].bytes;
+        bad[bad.size() - 1] = char(quint8(bad[bad.size() - 1]) ^ 0x01); // the tag
+        CHECK(expectNack(ct::CMD_SEAL_FRAME, bad, ct::ERR_LOCKED));
+    }
+    {
+        // Sealed under another fleet's key: a valid-looking stream this unit
+        // cannot open.
+        const QByteArray other =
+            ct::buildSealedStream(ct::deriveLicenseKey(QStringLiteral("another fleet")), frames, &why);
+        QByteArray os;
+        QList<ct::SealedFrame> of;
+        CHECK(ct::parseSealedStream(other, &os, &of, &why));
+        CHECK(expectAck(ct::CMD_SEAL_BEGIN, os));
+        CHECK(expectNack(ct::CMD_SEAL_FRAME, of[0].bytes, ct::ERR_LOCKED));
+    }
+    {
+        // A frame that tries to nest the tunnel.
+        ct::PlannedFrame nest;
+        nest.cmd = ct::CMD_SEAL_BEGIN;
+        nest.payload = salt;
+        const QByteArray ns = ct::buildSealedStream(fleetKey, {nest}, &why);
+        QByteArray s2;
+        QList<ct::SealedFrame> nf;
+        CHECK(ct::parseSealedStream(ns, &s2, &nf, &why));
+        CHECK(expectAck(ct::CMD_SEAL_BEGIN, s2));
+        CHECK(expectNack(ct::CMD_SEAL_FRAME, nf[0].bytes, ct::ERR_INVALID_CMD));
+    }
+    CHECK(expectAck(ct::CMD_SEAL_END, QByteArray()));
+    // A unit with no Firmware Key cannot even begin.
+    {
+        const QByteArray zero(int(ct::LICENSE_KEY_LEN), '\0');
+        CHECK(license_store_write("Minton Performance", "CAN Triple TD", "1.05",
+                                  reinterpret_cast<const uint8_t *>(zero.constData()), nullptr));
+        CHECK(expectNack(ct::CMD_SEAL_BEGIN, salt, ct::ERR_LOCKED));
+    }
+    engine_set_access_keys(nullptr); // leave the gates as this test found them
+}
+
 static void testConfigTransferRefusesToSwallowAFatalStep(const SerialProtoCallbacks *restore)
 {
     EngineCallbacks cb{};
@@ -9331,6 +9500,7 @@ int main(int argc, char *argv[])
     testOtpDeviceInfo(&protoCb);
     testFirmwareLicense(&protoCb);
     testConfigVersion(&protoCb);
+    testSealedInstallAgainstTheDevice(&protoCb);
     testBusSetupReadback(&protoCb);
     testCounterRateMode();
     testCounterResetUnlimited();

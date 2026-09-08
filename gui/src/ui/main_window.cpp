@@ -29,6 +29,9 @@
 #include "../model/access_keys.h"
 #include "../model/device_mapper.h"
 #include "../model/secure_file.h"
+#include "../model/package_builder.h"
+#include "../model/sealed_stream.h"
+#include "../protocol/sealed_install.h"
 #include "../model/user_paths.h"
 #include "../model/validation.h"
 #include "../protocol/config_transfer.h"
@@ -620,13 +623,22 @@ bool MainWindow::openPath(const QString &path)
     }
 
     // requiresPassword on its own, deliberately not "secure && requiresPassword".
-    // peekFile raises that flag for two quite different files: a .ct3s whose file
-    // key is wrapped under the Protected Comms password, and a pre-v8 plain
+    // peekFile raises that flag for two quite different files: a format-3 .ct3s
+    // whose editable copy is wrapped under its package password, and a pre-v8 plain
     // .ct3 whose body is sealed under the retired Configuration Password. The
     // second is not a secure container and peekFile leaves `secure` false for it,
     // so requiring both conditions meant that file never reached this prompt —
     // and, having no other way to be handed a password, could not be opened at
     // all. The flag is the only cue either file gives, so it is the whole gate.
+    if (peek.installOnly) {
+        QMessageBox::information(
+            this, tr("Open Configuration"),
+            tr("\"%1\" is an install-only secure package. It carries no editable configuration, "
+               "so it cannot be opened here.\n\nUse Online \u2192 Send Secure Configuration to "
+               "install it on a device.")
+                .arg(QFileInfo(path).fileName()));
+        return false;
+    }
     if (peek.requiresPassword) {
         // Which password is wanted differs between the two, and naming the wrong
         // one is worse than naming none: someone hunting for a "Protected
@@ -634,8 +646,8 @@ bool MainWindow::openPath(const QString &path)
         // for something nobody ever set.
         const QString prompt =
             peek.secure
-                ? tr("\"%1\" is a secure configuration and cannot be opened without its "
-                     "Protected Comms password.\n\nEnter the password:")
+                ? tr("\"%1\" is a secure package and opens only with its package "
+                     "password.\n\nEnter the password:")
                       .arg(QFileInfo(path).fileName())
                 : tr("\"%1\" was saved with the old Configuration Password and cannot be "
                      "opened without it.\n\nEnter the password:")
@@ -790,7 +802,7 @@ void MainWindow::onSecureBuilder()
     // its source from disk. Packaging what happens to be in the editor would let
     // an unsaved edit reach a customer's device without ever existing in a file
     // anybody could go back to.
-    SecureBuilderDialog dialog(m_config.filePath(), this);
+    SecureBuilderDialog dialog(m_config.filePath(), &buildSecurePackage, this);
     dialog.exec();
 }
 
@@ -1068,6 +1080,35 @@ void MainWindow::onSendSecureConfiguration()
         return;
     }
 
+    // A format-3 package carries a sealed install stream and is never opened
+    // here at all: the policy and the stream come out without a password, and
+    // the device does the decrypting. A format-2 package falls through to the
+    // path that has always installed it.
+    {
+        SecureFileInfo installInfo;
+        QString installError;
+        if (readSecureInstall(path, &installInfo, &installError)) {
+            sendSealedPackage(path, installInfo);
+            return;
+        }
+        // Not relayable. A format-3 file says why in its header: either it has
+        // no stream (saved from the editor, not built) or it has one this read
+        // could not reach, which is the read's own error. Anything older falls
+        // through to the path that has always installed it.
+        SecureFileInfo peeked;
+        if (peekSecureFile(path, &peeked) && peeked.formatVersion >= kSecureFormatVersion) {
+            QMessageBox::critical(
+                this, title,
+                peeked.hasInstallStream
+                    ? installError
+                    : tr("\"%1\" carries no sealed install stream, so it cannot be installed. "
+                         "A package saved from the editor is openable but not installable; "
+                         "build one with File \u2192 Secure Configuration Builder.")
+                          .arg(QFileInfo(path).fileName()));
+            return;
+        }
+    }
+
     // No password prompt here any more: v2 removed the container's
     // password-protected mode, so a .ct3s always opens. What stops a package
     // installing on the wrong unit is the licence match, checked against the
@@ -1092,110 +1133,8 @@ void MainWindow::onSendSecureConfiguration()
     // reach it. This function keeps the wording.
     const SecurePackagePolicy policy = package.secureOptions().policy;
 
-    device_session::LicenseState deviceLicense;
-    QString licenseError;
-    {
-        BusyScope busy(this);
-        device_session::readLicense(&m_link, &deviceLicense, &licenseError);
-    }
-
-    // The hardware facts, read only when the package asks for them: a policy
-    // that names no MCU ID or serial gets the one round trip it always had,
-    // and a firmware that cannot answer either question is reported as such
-    // by the verdict rather than failing the read here.
-    DeviceMatchFacts facts;
-    facts.licensed = deviceLicense.supported;
-    facts.manufacturer = deviceLicense.manufacturer;
-    facts.model = deviceLicense.model;
-    facts.version = deviceLicense.firmwareVersion;
-    if (policy.wantsHardwareMatch()) {
-        BusyScope busy(this);
-        device_session::Identity identity;
-        device_session::DeviceInfo info;
-        QString ignored;
-        if (device_session::readIdentity(&m_link, &identity, &ignored) && identity.supported) {
-            facts.identityKnown = true;
-            facts.mcuId = identity.uidText();
-        }
-        if (device_session::readDeviceInfo(&m_link, &info, &ignored) && info.supported
-            && info.serialKnown) {
-            facts.serialKnown = true;
-            facts.serial = info.serialNumber;
-        }
-    }
-    const InstallVerdict verdict = packageInstallVerdict(policy, facts);
-    if (verdict.noPolicy) {
-        QMessageBox::critical(
-            this, title,
-            tr("\"%1\" carries no install policy, so there is no way to tell which devices "
-               "it was built for.\n\nIt has NOT been sent. Rebuild it with "
-               "File → Secure Configuration Builder.")
-                .arg(QFileInfo(path).fileName()));
+    if (!checkPackagePolicy(policy, path, title))
         return;
-    }
-    if (verdict.deviceUnlicensed) {
-        QMessageBox::critical(
-            this, title,
-            tr("This unit's firmware cannot report a licence, so it cannot be matched against "
-               "this package.\n\nIt has NOT been sent. Update the unit's firmware."));
-        return;
-    }
-    if (!verdict.ok()) {
-        // Each failure names the field and both values: "this package was not
-        // built for this device" is true and useless to the person holding the
-        // laptop, while "Model: package wants X, device says Y" tells them
-        // whether they picked up the wrong file or the wrong unit.
-        const auto fieldLabel = [this](const QString &field) {
-            if (field == QLatin1String("manufacturer"))
-                return tr("Manufacturer");
-            if (field == QLatin1String("model"))
-                return tr("Model");
-            if (field == QLatin1String("mcuId"))
-                return tr("MCU ID");
-            if (field == QLatin1String("hwSerial"))
-                return tr("HW Serial");
-            return tr("Version");
-        };
-        QStringList lines;
-        for (const InstallMismatch &m : verdict.mismatches) {
-            // An empty "actual" is a unit that could not answer — no licence
-            // field, no identity command, no serial burned — and 'device says
-            // ""' would read as a value.
-            lines << (m.actual.isEmpty()
-                          ? tr("%1: package wants \"%2\", device reports none")
-                                .arg(fieldLabel(m.field), m.wanted)
-                          : tr("%1: package wants \"%2\", device says \"%3\"")
-                                .arg(fieldLabel(m.field), m.wanted, m.actual));
-        }
-        QMessageBox::critical(this, title,
-                              tr("This package was not built for the connected device, so it "
-                                 "has NOT been sent.\n\n%1")
-                                  .arg(lines.join(QStringLiteral("\n"))));
-        return;
-    }
-
-    // THE KEY, which is not optional and is not a string compare. The host picks
-    // a nonce and the device answers under the key it holds — so this proves the
-    // unit really carries the licence rather than merely reporting one, and a
-    // look-alike that echoed the right manufacturer and model still fails here.
-    // Read-only: the device's state is unchanged by answering.
-    {
-        bool mismatch = false;
-        QString proveError;
-        bool proved = false;
-        {
-            BusyScope busy(this);
-            proved = device_session::proveLicenseKey(&m_link, policy.key, &proveError, &mismatch);
-        }
-        if (!proved) {
-            QMessageBox::critical(
-                this, title,
-                tr("This unit could not prove the Firmware Key this package requires, so the "
-                   "package has NOT been sent.\n\n%1")
-                    .arg(proveError.isEmpty() ? tr("The device did not answer.") : proveError));
-            return;
-        }
-    }
 
     // mapWithScript: a package carrying a script — written as Lua, or retained
     // as bytecode from a Get — would otherwise be programmed with the script
@@ -1345,6 +1284,169 @@ void MainWindow::onSendSecureConfiguration()
                              "flash, so the configuration is lost at power-off.")
                         : tr("Installed, verified, and saved to flash.\n\nIt reloads "
                              "automatically at every power-up."));
+            });
+}
+
+bool MainWindow::checkPackagePolicy(const SecurePackagePolicy &policy, const QString &path,
+                                    const QString &title)
+{
+    device_session::LicenseState deviceLicense;
+    QString licenseError;
+    {
+        BusyScope busy(this);
+        device_session::readLicense(&m_link, &deviceLicense, &licenseError);
+    }
+
+    // The hardware facts, read only when the package asks for them: a policy
+    // that names no MCU ID or serial gets the one round trip it always had,
+    // and a firmware that cannot answer either question is reported as such
+    // by the verdict rather than failing the read here.
+    DeviceMatchFacts facts;
+    facts.licensed = deviceLicense.supported;
+    facts.manufacturer = deviceLicense.manufacturer;
+    facts.model = deviceLicense.model;
+    facts.version = deviceLicense.firmwareVersion;
+    if (policy.wantsHardwareMatch()) {
+        BusyScope busy(this);
+        device_session::Identity identity;
+        device_session::DeviceInfo info;
+        QString ignored;
+        if (device_session::readIdentity(&m_link, &identity, &ignored) && identity.supported) {
+            facts.identityKnown = true;
+            facts.mcuId = identity.uidText();
+        }
+        if (device_session::readDeviceInfo(&m_link, &info, &ignored) && info.supported
+            && info.serialKnown) {
+            facts.serialKnown = true;
+            facts.serial = info.serialNumber;
+        }
+    }
+    const InstallVerdict verdict = packageInstallVerdict(policy, facts);
+    if (verdict.noPolicy) {
+        QMessageBox::critical(
+            this, title,
+            tr("\"%1\" carries no install policy, so there is no way to tell which devices "
+               "it was built for.\n\nIt has NOT been sent. Rebuild it with "
+               "File → Secure Configuration Builder.")
+                .arg(QFileInfo(path).fileName()));
+        return false;
+    }
+    if (verdict.deviceUnlicensed) {
+        QMessageBox::critical(
+            this, title,
+            tr("This unit's firmware cannot report a licence, so it cannot be matched against "
+               "this package.\n\nIt has NOT been sent. Update the unit's firmware."));
+        return false;
+    }
+    if (!verdict.ok()) {
+        // Each failure names the field and both values: "this package was not
+        // built for this device" is true and useless to the person holding the
+        // laptop, while "Model: package wants X, device says Y" tells them
+        // whether they picked up the wrong file or the wrong unit.
+        const auto fieldLabel = [this](const QString &field) {
+            if (field == QLatin1String("manufacturer"))
+                return tr("Manufacturer");
+            if (field == QLatin1String("model"))
+                return tr("Model");
+            if (field == QLatin1String("mcuId"))
+                return tr("MCU ID");
+            if (field == QLatin1String("hwSerial"))
+                return tr("HW Serial");
+            return tr("Version");
+        };
+        QStringList lines;
+        for (const InstallMismatch &m : verdict.mismatches) {
+            // An empty "actual" is a unit that could not answer — no licence
+            // field, no identity command, no serial burned — and 'device says
+            // ""' would read as a value.
+            lines << (m.actual.isEmpty()
+                          ? tr("%1: package wants \"%2\", device reports none")
+                                .arg(fieldLabel(m.field), m.wanted)
+                          : tr("%1: package wants \"%2\", device says \"%3\"")
+                                .arg(fieldLabel(m.field), m.wanted, m.actual));
+        }
+        QMessageBox::critical(this, title,
+                              tr("This package was not built for the connected device, so it "
+                                 "has NOT been sent.\n\n%1")
+                                  .arg(lines.join(QStringLiteral("\n"))));
+        return false;
+    }
+
+    // THE KEY, which is not optional and is not a string compare. The host picks
+    // a nonce and the device answers under the key it holds — so this proves the
+    // unit really carries the licence rather than merely reporting one, and a
+    // look-alike that echoed the right manufacturer and model still fails here.
+    // Read-only: the device's state is unchanged by answering.
+    {
+        bool mismatch = false;
+        QString proveError;
+        bool proved = false;
+        {
+            BusyScope busy(this);
+            proved = policy.hasKeyProof()
+                         ? device_session::checkLicenseKeyProof(&m_link, policy.keyProofNonce,
+                                                                policy.keyProofMac, &proveError,
+                                                                &mismatch)
+                         : device_session::proveLicenseKey(&m_link, policy.key, &proveError,
+                                                           &mismatch);
+        }
+        if (!proved) {
+            QMessageBox::critical(
+                this, title,
+                tr("This unit could not prove the Firmware Key this package requires, so the "
+                   "package has NOT been sent.\n\n%1")
+                    .arg(proveError.isEmpty() ? tr("The device did not answer.") : proveError));
+            return false;
+        }
+    }
+    return true;
+}
+
+// Online > Send Secure Configuration, for a format-3 package: relay the sealed
+// stream. Nothing here maps, verifies or types a password; every one of those
+// is inside the frames, and the device answers for each.
+void MainWindow::sendSealedPackage(const QString &path, const SecureFileInfo &info)
+{
+    const QString title = tr("Send Secure Configuration");
+    const SecurePackagePolicy &policy = info.policy;
+    if (!checkPackagePolicy(policy, path, title))
+        return;
+
+    QString confirm = tr("Install \"%1\" on the connected device?\n\n"
+                         "This replaces the device's entire configuration and saves it to "
+                         "flash, so it reloads at every power-up.")
+                          .arg(QFileInfo(path).fileName());
+    if (policy.changesPasswords())
+        confirm += tr("\n\nThis package also sets the device's access passwords.");
+    confirm += tr("\n\nThe package is sealed: the device decrypts it, and nothing in it is "
+                  "shown here. The configuration you have open stays as it is.");
+    if (QMessageBox::question(this, title, confirm, QMessageBox::Yes | QMessageBox::No,
+                              QMessageBox::No)
+        != QMessageBox::Yes)
+        return;
+
+    auto *progress = new QProgressDialog(tr("Installing\u2026"), tr("Cancel"), 0, 100, this);
+    progress->setWindowTitle(title);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setMinimumDuration(0);
+    auto *relay = SealedInstall::run(&m_link, info.installStream, this);
+    connect(relay, &SealedInstall::progress, progress,
+            [progress](int done, int total, const QString &) {
+                progress->setMaximum(total);
+                progress->setValue(done);
+            });
+    connect(progress, &QProgressDialog::canceled, relay, &SealedInstall::cancel);
+    connect(relay, &SealedInstall::finished, this,
+            [this, progress, title](bool ok, const QString &error) {
+                progress->close();
+                progress->deleteLater();
+                if (!ok) {
+                    QMessageBox::warning(this, title, error);
+                    return;
+                }
+                QMessageBox::information(this, title,
+                                         tr("Installed and saved to flash.\n\nIt reloads "
+                                            "automatically at every power-up."));
             });
 }
 

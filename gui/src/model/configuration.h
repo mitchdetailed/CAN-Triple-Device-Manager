@@ -391,6 +391,7 @@ public:
         // Password. NOT a .ct3s any more: the container's password mode was
         // removed, so a secure package never requires one.
         bool requiresPassword = false;
+        bool installOnly = false;      // a format-3 package with no editable copy
         bool commsProtected = false;   // carries an Protected Comms verifier
     };
     static bool peekFile(const QString &path, FilePeek *out, QString *error = nullptr);

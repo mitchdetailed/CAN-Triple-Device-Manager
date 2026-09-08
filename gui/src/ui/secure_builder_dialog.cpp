@@ -47,8 +47,10 @@ Row addRow(QFormLayout *form, const QString &label, QWidget *parent, bool secret
 
 } // namespace
 
-SecureBuilderDialog::SecureBuilderDialog(const QString &openDocumentPath, QWidget *parent)
+SecureBuilderDialog::SecureBuilderDialog(const QString &openDocumentPath, BuildFn builder,
+                                         QWidget *parent)
     : QDialog(parent)
+    , m_builder(std::move(builder))
 {
     setWindowTitle(tr("Secure Configuration Builder"));
 
@@ -129,6 +131,37 @@ SecureBuilderDialog::SecureBuilderDialog(const QString &openDocumentPath, QWidge
     limitToUtf8Bytes(m_matchModel, LICENSE_MODEL_LEN);
     limitToUtf8Bytes(m_matchVersion, LICENSE_VERSION_LEN);
 
+    // ---- what the customer's copy can do
+    // Install-only is the default: the .ct3 this is built from is the editable
+    // master, and a copy inside the package is one more place the
+    // configuration exists. Either way the install stream is sealed under the
+    // Firmware Key and decrypted by the device — the password guards only the
+    // editable copy.
+    auto *contentsGroup = new QGroupBox(tr("Package contents"), this);
+    auto *contentsForm = new QFormLayout(contentsGroup);
+    m_includeEditable = new QCheckBox(
+        tr("Include an editable copy, opened only with this package password"), contentsGroup);
+    contentsForm->addRow(m_includeEditable);
+    m_openPassword = new QLineEdit(contentsGroup);
+    m_openPassword->setEchoMode(QLineEdit::Password);
+    m_openPassword->setEnabled(false);
+    contentsForm->addRow(tr("Package password:"), m_openPassword);
+    m_openPasswordConfirm = new QLineEdit(contentsGroup);
+    m_openPasswordConfirm->setEchoMode(QLineEdit::Password);
+    m_openPasswordConfirm->setEnabled(false);
+    contentsForm->addRow(tr("Confirm password:"), m_openPasswordConfirm);
+    connect(m_includeEditable, &QCheckBox::toggled, m_openPassword, &QLineEdit::setEnabled);
+    connect(m_includeEditable, &QCheckBox::toggled, m_openPasswordConfirm,
+            &QLineEdit::setEnabled);
+    auto *contentsNote = new QLabel(
+        tr("The configuration itself is sealed under the Firmware Key and is decrypted by the "
+           "device, never by the Manager. Unticked, the package cannot be opened in the Manager "
+           "at all; ticked, it opens with this password and nothing else."),
+        contentsGroup);
+    contentsNote->setWordWrap(true);
+    contentsForm->addRow(contentsNote);
+    layout->addWidget(contentsGroup);
+
     // ---- passwords
     auto *pwGroup = new QGroupBox(tr("Set device passwords on install"), this);
     auto *pwForm = new QFormLayout(pwGroup);
@@ -164,13 +197,14 @@ SecureBuilderDialog::SecureBuilderDialog(const QString &openDocumentPath, QWidge
     connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
     for (QLineEdit *e : {m_source, m_matchManufacturer, m_matchModel, m_matchVersion,
-                         m_matchMcuId, m_matchSerial, m_key, m_setSend, m_setGet,
-                         m_setSlot[0], m_setSlot[1], m_setSlot[2], m_setSlot[3]})
+                         m_matchMcuId, m_matchSerial, m_key, m_openPassword,
+                         m_openPasswordConfirm, m_setSend, m_setGet, m_setSlot[0], m_setSlot[1],
+                         m_setSlot[2], m_setSlot[3]})
         connect(e, &QLineEdit::textChanged, this, &SecureBuilderDialog::refreshEnabled);
     for (QCheckBox *c : {m_matchManufacturerCheck, m_matchModelCheck, m_matchVersionCheck,
-                         m_matchMcuIdCheck, m_matchSerialCheck, m_setSendCheck, m_setGetCheck,
-                         m_setSlotCheck[0], m_setSlotCheck[1], m_setSlotCheck[2],
-                         m_setSlotCheck[3]})
+                         m_matchMcuIdCheck, m_matchSerialCheck, m_includeEditable,
+                         m_setSendCheck, m_setGetCheck, m_setSlotCheck[0], m_setSlotCheck[1],
+                         m_setSlotCheck[2], m_setSlotCheck[3]})
         connect(c, &QCheckBox::toggled, this, &SecureBuilderDialog::refreshEnabled);
 
     refreshEnabled();
@@ -288,6 +322,21 @@ void SecureBuilderDialog::refreshEnabled()
     for (int i = 0; i < 4; ++i)
         weak(m_setSlotCheck[i], m_setSlot[i], tr("Protected Comms Slot %1 Password").arg(i + 1));
 
+    // An editable copy is only as protected as its password, so it takes the
+    // same policy as a device password, plus a confirmation: a typo here is a
+    // package nobody can ever open.
+    if (m_includeEditable->isChecked()) {
+        if (m_openPassword->text().isEmpty()) {
+            problems << tr("An editable copy needs a package password.");
+        } else {
+            const QString why = passwordProblem(m_openPassword->text());
+            if (!why.isEmpty())
+                problems << tr("Package password: %1").arg(why);
+            else if (m_openPassword->text() != m_openPasswordConfirm->text())
+                problems << tr("The package password and its confirmation differ.");
+        }
+    }
+
     m_warning->setText(problems.join(QStringLiteral("\n")));
     m_warning->setVisible(!problems.isEmpty());
     for (QAbstractButton *b : m_buttons->buttons()) {
@@ -304,16 +353,8 @@ void SecureBuilderDialog::build()
         QMessageBox::warning(this, windowTitle(), why);
         return;
     }
-
-    // Loaded from disk every time. The alternative — packaging whatever is in
-    // the editor — would let an unsaved edit reach a customer's device without
-    // ever existing in a file anybody could go back to.
-    Configuration source;
-    QString error;
-    if (!source.loadFromFile(m_source->text(), &error)) {
-        QMessageBox::warning(this, windowTitle(),
-                             error.isEmpty() ? tr("That configuration could not be opened.")
-                                             : error);
+    if (!m_builder) {
+        QMessageBox::warning(this, windowTitle(), tr("The package builder is not available."));
         return;
     }
 
@@ -325,38 +366,23 @@ void SecureBuilderDialog::build()
     if (QFileInfo(path).suffix().isEmpty())
         path += QStringLiteral(".ct3s");
 
-    SecureSaveOptions options = source.secureOptions();
-    options.policy = policy;
-    // The key the file carries so a customer's copy can satisfy a device's
-    // protected-comms gate without them ever typing the password.
-    options.embeddedCommsKey = source.commsKey();
-
-    if (!source.saveSecureToFile(path, options, &error)) {
+    // The passphrase goes to the builder and no further: it derives the fleet
+    // key there, seals the stream with it, and neither is written anywhere.
+    PackageBuildRequest request;
+    request.sourcePath = m_source->text();
+    request.outputPath = path;
+    request.fleetPassphrase = m_key->text();
+    request.policy = policy;
+    request.includeEditable = m_includeEditable->isChecked();
+    request.openPassword = request.includeEditable ? m_openPassword->text() : QString();
+    const PackageBuildResult result = m_builder(request);
+    if (!result.ok) {
         QMessageBox::warning(this, windowTitle(),
-                             error.isEmpty() ? tr("The package could not be written.") : error);
+                             result.error.isEmpty() ? tr("The package could not be written.")
+                                                    : result.error);
         return;
     }
-
-    QStringList summary;
-    summary << tr("Package written to %1.").arg(QFileInfo(path).fileName());
-    QStringList matched;
-    if (!policy.matchManufacturer.isEmpty())
-        matched << tr("manufacturer");
-    if (!policy.matchModel.isEmpty())
-        matched << tr("model");
-    if (!policy.matchVersion.isEmpty())
-        matched << tr("version");
-    if (!policy.matchMcuId.isEmpty())
-        matched << tr("MCU ID");
-    if (policy.matchSerialSet)
-        matched << tr("HW serial");
-    matched << tr("Firmware Key");
-    summary << tr("It installs only on devices matching: %1.").arg(matched.join(QStringLiteral(", ")));
-    if (policy.changesPasswords())
-        summary << tr("It also sets device passwords as it installs.");
-    if (policy.configVersion != 0)
-        summary << tr("It stamps configuration version %1 on the unit.").arg(policy.configVersion);
-    QMessageBox::information(this, windowTitle(), summary.join(QStringLiteral("\n\n")));
+    QMessageBox::information(this, windowTitle(), result.summary.join(QStringLiteral("\n\n")));
 }
 
 } // namespace ct
