@@ -328,6 +328,8 @@
 
             <!-- Files -->
             <keyword name="configuration files" ref="pages/files.html"/>
+            <keyword name="Target Firmware" ref="pages/files.html#target"/>
+            <keyword name="capacity" ref="pages/files.html#target"/>
             <keyword name=".ct3" ref="pages/files.html"/>
             <keyword name=".ct3s" ref="pages/files.html"/>
             <keyword name="secure configuration" ref="pages/files.html"/>

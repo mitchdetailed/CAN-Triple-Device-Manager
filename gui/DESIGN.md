@@ -64,7 +64,10 @@ dash-manager layout and navigation.
   (and therefore 64 grid-row records — table `t` owns rows `t*8 .. t*8+7`),
   integrators 8, transmit-CRC8 rules 20, and 384 script chunks of 64 B. The GUI
   enforces each of these before a Send, so a configuration that would not fit is
-  refused at the desk rather than part-written to a device.
+  refused at the desk rather than part-written to a device. Since firmware
+  1.0.10 the device also **reports** them — `CMD_GET_CAPACITY` (0x50), and the
+  same bytes in every `.ctf` behind `FW_CAPS_MAGIC` — see "The capacity
+  report"; nothing sizes itself from the report yet.
 - **A capacity is bounded by the device's storage, and the shared channel
   pool.** The second is the one that binds more often and is visible from here:
   a condition, a counter, a timer, a constant, an integrator and a lookup table
@@ -94,9 +97,11 @@ WRITE/READ CRC8 **0x41/0x42**, WRITE/READ MSG_PASSWORDS **0x43/0x44** (the
 configuration's four Message Passwords, which unlike the access keys are read
 back on purpose), GET_DEVICE_INFO **0x45** (88 raw OTP bytes), the licence block
 READ/WRITE_LICENSE **0x46/0x47** + LICENSE_CHALLENGE **0x48** +
-LICENSE_RESPONSE **0x49** + LICENSE_KEY_PROVE **0x4A**, and READ_CONFIG_VERSION
-**0x4B**. Replies are ACK **0x80**, NACK **0x81**, MONITOR_STREAM **0x82**,
-VALUE_STREAM **0x83** and LOG **0x90**.
+LICENSE_RESPONSE **0x49** + LICENSE_KEY_PROVE **0x4A**, READ_CONFIG_VERSION
+**0x4B**, the sealed install tunnel SEAL_BEGIN/FRAME/END **0x4C-0x4E**,
+GET_PROTECTION **0x4F** (see "Readout protection") and GET_CAPACITY **0x50**
+(see "The capacity report"). Replies are ACK **0x80**, NACK **0x81**,
+MONITOR_STREAM **0x82**, VALUE_STREAM **0x83** and LOG **0x90**.
 
 **0x0B is retired**: it was LOAD_FROM_FLASH, which reloaded a stored BACKUP
 image over the live tables, and the flash-resident single-copy store removed the
@@ -800,6 +805,125 @@ ordinary programming pass. The threat this closes is the one the sealed
 package leaves open by design — a unit in someone else's hands giving up its
 flash, key included, over the debug port.
 
+### The capacity report
+
+Every capacity in §1 used to exist only as a constant compiled into both sides.
+That is fine while there is one firmware; it stops being fine the day a build
+ships with 40 CRC8 rules for one customer and 16 lookup tables for another,
+because a Manager that assumes 20 and 8 refuses what the first can take and
+reads back only part of what the second holds. Firmware 1.0.10 therefore
+reports its own numbers, twice over. `CMD_GET_CAPACITY` (0x50, ungated, fixed
+shape, empty request — a payload is refused) answers a `CapacityReportHeader`
+(format, table count, store version) followed by one `CapacityEntry`
+(`u16 capacity, u16 item_size`) per table in `DeviceTable` order; and the
+identical bytes sit in every `.ctf` at `FW_CAPS_OFFSET` (0x240, immediately
+after the image header) behind `FW_CAPS_MAGIC`, so the Manager can ask a file
+what it will hold before installing it. On the device the two are one object:
+`flash_store.c` generates the report from `FLASH_TABLE_LIST`, the list the flash
+layout is built from, and places it in the image's `.fw_caps` section, which is
+what the wire handler sends — the numbers a host is told cannot be edited apart
+from the numbers the store is laid out from. The packer refuses a build that
+has lost the block; the bootloader never looks at it, and it sits inside the
+image CRC like everything else.
+
+`protocol/capacity.h` is the host's one parser for both sources.
+`parseCapacityReport` reads the count off the wire and tolerates trailing
+bytes (an image has code after the block), refuses a `format` it does not
+know, and fills a `DeviceCapacity` — the store version plus a `TableCapacity`
+per table, indexed by `DeviceTable`, with `capacityOf()` answering 0 for a
+table the firmware lacks. `device_session::readCapacity` reads it from a unit
+and leaves `reported == false` on firmware without the command;
+`FirmwareImage::capacity()` reads it from a file and is `nullopt` for an image
+that predates the block. In both cases the caller substitutes
+`DeviceCapacity::builtIn()`, the `MAX_*` constants this build carries, which is
+exactly what such firmware holds. A report in a format this build cannot read
+is an error naming the Manager update rather than a fallback: falling back
+would size checks against numbers the unit has just said are wrong.
+`test_firmware_link` holds the STANDARD firmware's reply equal to `builtIn()`
+table for table, so a standard unit reporting anything else is a unit the two
+headers have drifted about; a variant reports its own numbers, which is the
+point.
+
+What the report does not make flexible: record shapes (CRC8 elements per rule,
+table sites, condition terms, name lengths) are fixed by the wire format; the
+channel pool is the signal table's capacity and every calculation still takes
+a slot from it; and messages stop at 510 whatever the flash budget says.
+
+**What sizes itself from it.** A `DeviceCapacity` rides on `DeviceTables`
+("the layout these tables are sized against") and on `Configuration`
+(`capacity()`, builtIn() for a new document, not yet written to the file and
+not dirty-tracked). `mapToDevice` judges every "table is full" and every
+channel-slot bound against the document's capacity and stamps it on the
+tables; the editing dialogs' "supports at most n" and the Communications
+"n of m messages used" read the same; `validateConfiguration`'s Device usage
+line reports "n/m" against it; the script compiler chunks against its Script
+entry and verifies against its channel count. A Get reads each table over the
+range the UNIT reports (`ConfigTransfer::get` takes the capacity;
+`runGetTransfer` and the firmware-update backup read it first), skips a table
+the firmware lacks, and `mapFromDevice` sizes the rebuilt document like the
+unit — so a document read from a larger variant can carry everything that
+unit held, and `copyContentTo` keeps a live view at the same numbers. A Send
+asks `tablesExceeding(tables, deviceCapacity)` first (`MainWindow::
+tablesFitDevice`, and the firmware-update restore): the mapper sized the
+tables against the document's capacity, the unit on the cable may hold less,
+and the refusal names the tables rather than surfacing as ERR_OUT_OF_BOUNDS
+after CLEAR_CONFIG has erased the unit. The `MAX_*` constants survive only
+inside `builtIn()`, in the chunk arithmetic (record sizes, not capacities),
+and as the script simulator's FLOOR: `ScriptSimulator::load` takes the
+channel count the script was compiled against and sizes its table to the
+larger of that and `MAX_SIGNALS`, so a script for a variant with more
+channels than this build's constant simulates as it runs.
+
+**The target firmware.** A document's capacity is its target: File > Target
+Firmware… (`TargetFirmwareDialog`) sets it from the connected unit's report,
+from a `.ctf` (`FirmwareImage::capacity()`; an image or unit that predates
+the report yields builtIn() with a label saying so), or back to the built-in
+numbers, and shows what the document uses against what the target holds. A
+chosen target (`reported`) is written to the `.ct3` as `"targetCapacity"`
+(`DeviceCapacity::toJson`: label, store version, `[capacity, itemSize]` per
+table) and restored on load; a document that never chose one carries nothing
+and loads as builtIn(), which keeps every existing file byte-identical and
+earned the key no schema bump (the note beside `kConfigSchemaVersion` gives
+the test it passes). Choosing is an edit (`setCapacity` marks dirty and emits
+`capacityChanged`); a Get labels the unit's report "device on COMn" and
+mapFromDevice makes it the target. `MainWindow::updateCapacityGates` disables
+each Calculations item whose table the target lacks, with the tooltip naming
+the dialog. Shrinking a target is allowed — it is how a document is brought
+down to a smaller variant — and never silent: the dialog reports how many rows
+no longer map, and Check Channels names them.
+
+**Sealed packages.** The relay cannot see inside a format-3 stream, so the
+Builder records `tableCountsOf(mapped.tables)` in the policy
+(`SecurePackagePolicy::tableCounts`), `checkPackagePolicy` reads the unit's
+capacity when a package carries counts, and `packageInstallVerdict` fills
+`InstallVerdict::shortfalls` from `countsExceeding` — the one comparison
+behind a Send's `tablesExceeding` too. A package built before the report
+recorded nothing and is not judged; neither is a unit whose capacity could
+not be read.
+
+**Variants, and the layout identity.** Firmware 1.0.11 makes a variant a
+build setting (firmware `include/variant.h`): a header under
+`include/variants/` defines the capacities it changes and which table pays,
+`protocol.h`'s `MAX_*` defaults are `#ifndef`-guarded behind it, and a
+PlatformIO environment per variant (`custom_variant = crc40`) builds its own
+`.ctf`, whose capacity block and build description ("77c24c1 crc40") say what
+it is. Two ship as worked examples, `crc40` and `tables16`. Nothing on the
+Manager side is per variant — a document targets one through the report — but
+one hazard is: two builds of the same store version can lay the same fifteen
+tables out at different offsets, and the store version alone cannot refuse
+the other's image. So the configuration header carries a **layout identity**
+(store v19): the CRC32 of the report's entries, written by every commit and
+required by every validate, which refuses a foreign layout before reading a
+record and reports it as "no configuration". The Manager's consequence is
+that "same store version" no longer means "same layout": the update dialog
+reads the unit's report beside the image's and warns from
+`layoutDifferences` ("CRC8 rules: 20 → 40") through the one predicate
+(`FirmwareUpdateDialog::layoutChanges`) that also words the confirmation and
+the post-update message, falling back to the version comparison only when a
+side predates the report. `EXPECTED_STORE_VERSION` is 19; `test_firmware_link`
+pins the identity to `fw_crc32` over the entries at header byte 6 and shows
+a header with any other identity refused, CRC or no CRC.
+
 ## Send Secure Configuration
 
 **Online → Send Secure Configuration…** (`MainWindow::onSendSecureConfiguration()`),
@@ -1322,9 +1446,11 @@ to be sent, and the help says so.
   the distinction findable), Get Configuration, Verify
   Configuration, Monitor Channels **F3** (live grid from value stream),
   CAN Viewer (raw frame monitor + inject-frame form; buffers up to 10M frames
-  and exports them as a Vector ASCII `.asc` log via "Save to File…" — classic
+  and exports them via "Save to File…" as a Vector ASCII `.asc` log — classic
   frames as standard lines, CAN FD frames as Vector `CANFD` lines carrying
-  real BRS and ESI), Load Device Config from Flash, Clear Device Config, Device
+  real BRS and ESI — or, chosen by file type, a SocketCAN candump `.log` or a
+  PEAK trace 3.0 `.trc`; `src/protocol/can_log_export.*` holds the two newer
+  writers and the format choice, beside `asc_log.*`), Load Device Config from Flash, Clear Device Config, Device
   Status, **Get Device Info…**, **Set Access Passwords…** and **Firmware
   License Manager…**. The first two need a connection: the OTP record is read
   out of the unit in front of them, and the access keys live in the device rather
@@ -1669,6 +1795,19 @@ start bit as its LSB for Intel (`@1`, matches directly) but its MSB for Motorola
 expects. Multiplexed DBC messages become compound sections (multiplexor value →
 identifier selector via `muxSelectorForValue()`); mixed-endianness or
 byte-unmappable multiplexors are skipped with a warning.
+
+**Import as Transmit Messages** (same `ImportDbcDialog`, an "Import as" combo):
+each ticked signal becomes a row SENDING an existing catalogue channel — the
+Send Channel column, prefilled by `ChannelCatalog::findByName()` on the spaced
+name and otherwise picked through `SelectChannelDialog::pickInput()` on
+double-click — and nothing is created; a ticked signal with no channel is
+skipped with a note. `transmitRowFromDbcSignal()` NEGATES the DBC offset,
+because a transmit row adds its Offset where a DBC subtracts (comms_types.h),
+and `BA_ "GenMsgCycleTime"` (parsed, with the `BA_DEF_DEF_` default, into
+`DbcMessage::cycleTimeMs`) becomes `transmitPeriodMs` through
+`transmitTimingFromCycleTime()`; messages without one take the dialog's rate.
+The tree is rebuilt on a mode switch and the ticks and chosen channels are
+carried across (`rebuildKeepingState()`).
 
 **Signal names import with underscores turned into spaces**
 (`channelNameFromDbcSignal()`, simplified() so runs collapse and the ends are

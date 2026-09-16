@@ -77,7 +77,23 @@ Refusing is deliberate, and the reason is worth knowing: a setting an older prog
 
 > **Note:** The file schema version is independent of the firmware protocol version. Updating firmware never invalidates your .ct3 files — but it can invalidate the configuration stored *in the device's flash*, in which case the device comes up empty and the configuration has to be sent again. See [Troubleshooting](troubleshooting.md).
 
+<a id="target"></a>
+
+## Target firmware
+
+How many messages, channels, conditions, tables, CRC8 rules and so on a configuration may hold is decided by the **firmware** it will run on, and from device firmware 1.0.10 the firmware says so itself: it reports a capacity for each of its tables, and every firmware image file (`.ctf`) carries the same report. From firmware 1.0.11, CAN Triple firmware is built in **variants** sized differently — more CRC8 rules for one customer, more lookup tables for another — and this is how the program knows which one a document is for. A variant is the same firmware version with a different layout, so a unit keeps a stored configuration only for the variant that wrote it: moving a unit between variants clears its configuration like a format change does, and the Update Firmware dialog says so beforehand.
+
+**File → Target Firmware…** shows what the open document is sized against, table by table, beside what it currently uses, and lets you take the numbers from:
+- **the connected device** — what the unit on the cable reports;
+- **a firmware image** — the `.ctf` you are about to install, so a configuration can be built for a firmware before any unit runs it;
+- **the built-in numbers** — this program's defaults, which are exactly what every firmware before 1.0.10 holds. This is what a new document uses, and what a document that never chose a target uses.
+
+The target is saved with the document and restored when it is opened. It sets the limit each editing dialog enforces, the "n of m" figures in the Config Summary, and which items the Calculations menu offers — a target with no integrators, say, disables Integrators… rather than opening a dialog that refuses every row. **Get Configuration** sets the target to the unit it read from, so a document read back from a larger variant can carry everything that unit held.
+
+> **Note:** A target smaller than the document is allowed — it is how a configuration is brought down to a smaller firmware — but it is never silent: the dialog says how many rows no longer fit, and Check Channels names them. And a target is a sizing assumption, not a lock: before **Send Configuration** the program reads what the connected unit actually holds and refuses, by table, a configuration it cannot take — with the unit untouched — whatever the document's target says. A secure package records the table sizes it writes for the same check at install time.
+
 ## What the file carries besides the configuration
+- The **target firmware** — the capacities the document is sized against and where they came from — once one has been chosen (see above). A document sized against the built-in numbers records nothing, and opens in an older version of the program exactly as it always did.
 - For a `.ct3s`, the **install policy** — which devices the package may be sent to and which passwords it sets when it arrives. A plain `.ct3` carries none. See [Firmware Licensing &amp; Access Keys](licensing.md).
 - An **access verifier** for the Protected Comms password, so the program can check a typed password offline. It cannot be turned back into the key that opens hardware, so a file lying around leaks nothing usable.
 - The configuration's four **Message Passwords** — as derived keys, never as the passwords themselves. They guard the [message markings](communications.md#marking), and a [communications template](communications.md#templates) (.ct3t) carries them the same way.

@@ -108,9 +108,12 @@
 
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
+#include <QVector>
 
 #include <QJsonObject>
 
+#include "../protocol/capacity.h"
 #include "access_keys.h"
 
 namespace ct {
@@ -227,6 +230,16 @@ struct SecurePackagePolicy
     // renumbering a unit.
     quint16 configVersion = 0;
 
+    // Records per device table the sealed stream writes, indexed by
+    // DeviceTable (device_mapper's tableCountsOf at build time). The relay
+    // cannot see inside the stream, so this is how it learns whether the unit
+    // on the cable can hold what is about to be written — a variant with 20
+    // CRC8 rules would otherwise take a 30-rule package as far as the 21st
+    // write and NACK it with the unit already erased. Empty in a package built
+    // before the capacity report, which is then not checked: there is nothing
+    // to check against, and refusing every older package would be worse.
+    QVector<int> tableCounts;
+
     // The derived Firmware Key, kLicenseKeyBytes long. MANDATORY: a policy
     // whose key is missing or the wrong length is not installable, and
     // isValid() is what every writer and reader checks.
@@ -296,8 +309,15 @@ struct InstallVerdict
     // not the first, so the person holding the laptop can see whether they have
     // the wrong file or the wrong unit in one reading.
     QList<InstallMismatch> mismatches;
+    // The tables the package writes more of than the unit holds, one sentence
+    // each (countsExceeding). Only judged when the package recorded its counts
+    // and the unit's capacity is known; empty otherwise.
+    QStringList shortfalls;
 
-    bool ok() const { return !noPolicy && !deviceUnlicensed && mismatches.isEmpty(); }
+    bool ok() const
+    {
+        return !noPolicy && !deviceUnlicensed && mismatches.isEmpty() && shortfalls.isEmpty();
+    }
 };
 
 // Everything about the connected unit the verdict compares against, gathered
@@ -317,6 +337,11 @@ struct DeviceMatchFacts
     QString mcuId; // Identity::uidText()
     bool serialKnown = false;
     quint64 serial = 0;
+    // What the unit holds, table by table — its CMD_GET_CAPACITY report, or
+    // builtIn() for firmware that cannot say. capacityKnown is false when the
+    // read itself failed, in which case a package's counts are not judged.
+    bool capacityKnown = false;
+    DeviceCapacity capacity;
 };
 
 InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,

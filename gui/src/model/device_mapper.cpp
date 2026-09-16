@@ -48,12 +48,13 @@ QString scriptVerifyText(quint8 code)
     }
 }
 
-bool validateScriptImage(const QByteArray &image, QString *reason)
+bool validateScriptImage(const QByteArray &image, QString *reason, int signalSlots)
 {
     // avail is the image's OWN length, so a header claiming more code than it
     // was given is rejected by the size check rather than walking the verifier
     // off the end of a QByteArray.
-    const quint8 verdict = script_verify(image.constData(), quint32(image.size()), MAX_SIGNALS);
+    const quint8 verdict =
+        script_verify(image.constData(), quint32(image.size()), quint16(signalSlots));
     if (verdict != SCRIPT_OK) {
         if (reason)
             *reason = scriptVerifyText(verdict);
@@ -62,7 +63,7 @@ bool validateScriptImage(const QByteArray &image, QString *reason)
     return true;
 }
 
-RetainedScript scriptImageFromChunks(const QVector<ScriptChunk> &chunks)
+RetainedScript scriptImageFromChunks(const QVector<ScriptChunk> &chunks, int signalSlots)
 {
     RetainedScript out;
     if (chunks.isEmpty())
@@ -83,7 +84,7 @@ RetainedScript scriptImageFromChunks(const QVector<ScriptChunk> &chunks)
     out.present = true;
 
     QString reason;
-    if (!validateScriptImage(raw, &reason)) {
+    if (!validateScriptImage(raw, &reason, signalSlots)) {
         out.error = reason;
         return out;
     }
@@ -378,6 +379,27 @@ MappingResult mapToDevice(const Configuration &config)
     MappingResult r;
     const ChannelCatalog &catalog = config.catalog();
 
+    // The capacity the tables are sized against travels with them. Every
+    // "table is full" and every channel-slot bound below is judged against
+    // these rather than against this build's MAX_* constants, so a document
+    // targeting a differently sized firmware maps against THAT firmware's
+    // numbers — the constants are only what builtIn() says a firmware without
+    // a report holds.
+    const DeviceCapacity &cap = config.capacity();
+    r.tables.capacity = cap;
+    const int maxMessages = cap.capacityOf(DeviceTable::Messages);
+    const int maxSignals = cap.capacityOf(DeviceTable::Signals);
+    const int maxMath = cap.capacityOf(DeviceTable::Math);
+    const int maxConditions = cap.capacityOf(DeviceTable::Conditions);
+    const int maxCounters = cap.capacityOf(DeviceTable::Counters);
+    const int maxTimers = cap.capacityOf(DeviceTable::Timers);
+    const int maxConstants = cap.capacityOf(DeviceTable::Constants);
+    const int maxRelays = cap.capacityOf(DeviceTable::Relays);
+    const int maxTables2x16 = cap.capacityOf(DeviceTable::Tables2x16Def);
+    const int maxTables8x8 = cap.capacityOf(DeviceTable::Tables8x8Def);
+    const int maxIntegrators = cap.capacityOf(DeviceTable::Integrators);
+    const int maxCrc8 = cap.capacityOf(DeviceTable::Crc8);
+
     // Device labels are MAX_CHANNEL_NAME_BYTES UTF-8 bytes — 31, since the
     // record's label went back to 32 bytes with the capacity expansion (it was
     // 15 while v15 had it at 16). Distinct channels whose names truncate
@@ -484,9 +506,9 @@ MappingResult mapToDevice(const Configuration &config)
             if (section.device == SectionDevice::Off)
                 continue;
             if (section.isTransmit()) {
-                if (r.tables.messages.size() >= MAX_MESSAGES) {
+                if (r.tables.messages.size() >= maxMessages) {
                     r.errors.append(QStringLiteral("%1: device message table is full (%2)")
-                                        .arg(where).arg(MAX_MESSAGES));
+                                        .arg(where).arg(maxMessages));
                     continue;
                 }
                 CanMessageConfig msg{};
@@ -560,9 +582,9 @@ MappingResult mapToDevice(const Configuration &config)
                 // the channel/compound/routing paths below apply unchanged);
                 // this block adds only the stamp.
                 if (section.isCrc8()) {
-                    if (r.tables.crc8.size() >= MAX_CRC8_MESSAGES) {
+                    if (r.tables.crc8.size() >= maxCrc8) {
                         r.errors.append(QStringLiteral("%1: device CRC8 table is full (%2)")
-                                            .arg(where).arg(MAX_CRC8_MESSAGES));
+                                            .arg(where).arg(maxCrc8));
                     } else if (section.crcChannel.isEmpty()) {
                         // The editor refuses to close without a CRC channel, so
                         // this is a hand-edited .ct3. Mapping it anyway would
@@ -580,10 +602,10 @@ MappingResult mapToDevice(const Configuration &config)
                         // uses: the slot lands in signalToChannel and the monitor
                         // can watch the wire's checksum like any other channel.
                         const int destIdx = signalFor(section.crcChannel);
-                        if (destIdx >= MAX_SIGNALS) {
+                        if (destIdx >= maxSignals) {
                             r.errors.append(QStringLiteral(
                                 "%1: device signal table is full (%2)")
-                                                .arg(where).arg(MAX_SIGNALS));
+                                                .arg(where).arg(maxSignals));
                         } else {
                             Crc8Config cc{};
                             cc.msg_idx = quint16(msgIdx);
@@ -641,9 +663,9 @@ MappingResult mapToDevice(const Configuration &config)
                     // Canonical value slot for the channel (created virtual if
                     // nothing generates it yet), read by the TX composer.
                     const int sourceIdx = signalFor(row.channelName);
-                    if (r.tables.signalConfigs.size() >= MAX_SIGNALS || sourceIdx >= MAX_SIGNALS) {
+                    if (r.tables.signalConfigs.size() >= maxSignals || sourceIdx >= maxSignals) {
                         r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
-                                            .arg(where).arg(MAX_SIGNALS));
+                                            .arg(where).arg(maxSignals));
                         return;
                     }
                     const Channel ch = catalog.findByName(row.channelName);
@@ -737,10 +759,10 @@ MappingResult mapToDevice(const Configuration &config)
                             // sub-message somebody wants on the bus every period.
                             if (!ident.configured)
                                 continue;
-                            if (r.tables.signalConfigs.size() >= MAX_SIGNALS) {
+                            if (r.tables.signalConfigs.size() >= maxSignals) {
                                 r.errors.append(
                                     QStringLiteral("%1: device signal table is full (%2)")
-                                        .arg(where).arg(MAX_SIGNALS));
+                                        .arg(where).arg(maxSignals));
                                 continue;
                             }
                             CanSignalConfig sel{};
@@ -781,9 +803,9 @@ MappingResult mapToDevice(const Configuration &config)
             }
             if (section.isRelay()) {
                 // v11: message relay — a masked-ID gateway rule, not a message.
-                if (r.tables.relays.size() >= MAX_RELAYS) {
+                if (r.tables.relays.size() >= maxRelays) {
                     r.errors.append(QStringLiteral("%1: device relay table is full (%2)")
-                                        .arg(where).arg(MAX_RELAYS));
+                                        .arg(where).arg(maxRelays));
                     continue;
                 }
                 RelayConfig rl{};
@@ -811,9 +833,9 @@ MappingResult mapToDevice(const Configuration &config)
                 r.tables.relays.append(rl);
                 continue;
             }
-            if (r.tables.messages.size() >= MAX_MESSAGES) {
+            if (r.tables.messages.size() >= maxMessages) {
                 r.errors.append(QStringLiteral("%1: device message table is full (%2)")
-                                    .arg(where).arg(MAX_MESSAGES));
+                                    .arg(where).arg(maxMessages));
                 continue;
             }
 
@@ -875,9 +897,9 @@ MappingResult mapToDevice(const Configuration &config)
                     // several identifiers (each decodes under its own selector).
                     // Its value slot is the first such signal; the name resolves
                     // there for calculations/monitoring.
-                    if (r.tables.signalConfigs.size() >= MAX_SIGNALS) {
+                    if (r.tables.signalConfigs.size() >= maxSignals) {
                         r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
-                                            .arg(where).arg(MAX_SIGNALS));
+                                            .arg(where).arg(maxSignals));
                         return;
                     }
                     sigIdx = r.tables.signalConfigs.size();
@@ -891,9 +913,9 @@ MappingResult mapToDevice(const Configuration &config)
                 } else {
                     bool created = false;
                     sigIdx = signalFor(row.channelName, &created);
-                    if (sigIdx >= MAX_SIGNALS) {
+                    if (sigIdx >= maxSignals) {
                         r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
-                                            .arg(where).arg(MAX_SIGNALS));
+                                            .arg(where).arg(maxSignals));
                         return;
                     }
                     if (!created && sigMsgIdx(r.tables.signalConfigs[sigIdx]) != SIG_MSG_NONE)
@@ -1005,7 +1027,7 @@ MappingResult mapToDevice(const Configuration &config)
         if (!m.active)
             continue;
         const QString where = QStringLiteral("Math %1").arg(i + 1);
-        if (r.tables.math.size() >= MAX_MATH_COMPUTATIONS) {
+        if (r.tables.math.size() >= maxMath) {
             r.errors.append(QStringLiteral("%1: device math table is full").arg(where));
             break;
         }
@@ -1030,9 +1052,9 @@ MappingResult mapToDevice(const Configuration &config)
             // math row reads that slot and leaves it alone, so this cannot
             // clash with whatever else reads or writes the channel.
             const int inputIdx = signalFor(name);
-            if (inputIdx >= MAX_SIGNALS) {
+            if (inputIdx >= maxSignals) {
                 r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
-                                    .arg(where).arg(MAX_SIGNALS));
+                                    .arg(where).arg(maxSignals));
                 return false;
             }
             type = 1;
@@ -1072,7 +1094,7 @@ MappingResult mapToDevice(const Configuration &config)
             continue;
         }
         const int destIdx = signalFor(m.destChannel);
-        if (destIdx >= MAX_SIGNALS) {
+        if (destIdx >= maxSignals) {
             r.errors.append(QStringLiteral("%1: device signal table is full").arg(where));
             continue;
         }
@@ -1118,7 +1140,7 @@ MappingResult mapToDevice(const Configuration &config)
         if (!c.active)
             continue;
         const QString where = QStringLiteral("User Condition %1").arg(i + 1);
-        if (r.tables.conditions.size() >= MAX_CONDITIONS) {
+        if (r.tables.conditions.size() >= maxConditions) {
             r.errors.append(QStringLiteral("%1: device condition table is full").arg(where));
             break;
         }
@@ -1228,9 +1250,9 @@ MappingResult mapToDevice(const Configuration &config)
                         return -1;
                     }
                     const int idx = signalFor(name);
-                    if (idx >= MAX_SIGNALS) {
+                    if (idx >= maxSignals) {
                         r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
-                                            .arg(where).arg(MAX_SIGNALS));
+                                            .arg(where).arg(maxSignals));
                         return -1;
                     }
                     return idx;
@@ -1275,7 +1297,7 @@ MappingResult mapToDevice(const Configuration &config)
         }
 
         const int destIdx = signalFor(c.outputChannel);
-        if (destIdx >= MAX_SIGNALS) {
+        if (destIdx >= maxSignals) {
             r.errors.append(QStringLiteral("%1: device signal table is full").arg(where));
             continue;
         }
@@ -1323,9 +1345,9 @@ MappingResult mapToDevice(const Configuration &config)
         if (name.isEmpty())
             return SIG_MSG_NONE;
         const int idx = signalFor(name);
-        if (idx >= MAX_SIGNALS) {
+        if (idx >= maxSignals) {
             r.errors.append(QStringLiteral("%1: %2 channel '%3': device signal table is full (%4)")
-                                .arg(where, label, name).arg(MAX_SIGNALS));
+                                .arg(where, label, name).arg(maxSignals));
             return SIG_MSG_NONE;
         }
         return quint16(idx);
@@ -1344,9 +1366,9 @@ MappingResult mapToDevice(const Configuration &config)
         if (!c.active)
             continue;
         const QString where = QStringLiteral("Counter %1").arg(i + 1);
-        if (r.tables.counters.size() >= MAX_COUNTERS) {
+        if (r.tables.counters.size() >= maxCounters) {
             r.errors.append(QStringLiteral("%1: device counter table is full (%2)")
-                                .arg(where).arg(MAX_COUNTERS));
+                                .arg(where).arg(maxCounters));
             break;
         }
         if (c.outputChannel.isEmpty()) {
@@ -1366,7 +1388,7 @@ MappingResult mapToDevice(const Configuration &config)
         // ERROR here, and main_window treats any mapper error as fatal, so the
         // entire configuration could not be sent because of an input the
         // counter demonstrably does not read. A leftover Follow channel also
-        // consumed a device signal slot out of MAX_SIGNALS.
+        // consumed a device signal slot out of the channel capacity.
         //
         // Reset and Enable are read in every mode — a rate counter can still be
         // gated and zeroed, which is most of what makes one useful.
@@ -1446,9 +1468,9 @@ MappingResult mapToDevice(const Configuration &config)
         if (!t.active)
             continue;
         const QString where = QStringLiteral("Timer %1").arg(i + 1);
-        if (r.tables.timers.size() >= MAX_TIMERS) {
+        if (r.tables.timers.size() >= maxTimers) {
             r.errors.append(QStringLiteral("%1: device timer table is full (%2)")
-                                .arg(where).arg(MAX_TIMERS));
+                                .arg(where).arg(maxTimers));
             break;
         }
         if (t.outputChannel.isEmpty()) {
@@ -1486,10 +1508,10 @@ MappingResult mapToDevice(const Configuration &config)
                 return true;
             }
             const int idxA = signalFor(tr.aChannel);
-            if (idxA >= MAX_SIGNALS) {
+            if (idxA >= maxSignals) {
                 r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
                                     .arg(where)
-                                    .arg(MAX_SIGNALS));
+                                    .arg(maxSignals));
                 return false;
             }
             out->input_a_signal_idx = quint16(idxA);
@@ -1500,10 +1522,10 @@ MappingResult mapToDevice(const Configuration &config)
                     return false;
                 }
                 const int idxB = signalFor(tr.bChannel);
-                if (idxB >= MAX_SIGNALS) {
+                if (idxB >= maxSignals) {
                     r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
                                         .arg(where)
-                                        .arg(MAX_SIGNALS));
+                                        .arg(maxSignals));
                     return false;
                 }
                 out->input_b_type = 1;
@@ -1548,9 +1570,9 @@ MappingResult mapToDevice(const Configuration &config)
         if (!g.active)
             continue;
         const QString where = QStringLiteral("Integrator %1").arg(i + 1);
-        if (r.tables.integrators.size() >= MAX_INTEGRATORS) {
+        if (r.tables.integrators.size() >= maxIntegrators) {
             r.errors.append(QStringLiteral("%1: device integrator table is full (%2)")
-                                .arg(where).arg(MAX_INTEGRATORS));
+                                .arg(where).arg(maxIntegrators));
             break;
         }
         if (g.outputChannel.isEmpty()) {
@@ -1565,9 +1587,9 @@ MappingResult mapToDevice(const Configuration &config)
                 continue;
             }
             const int inputIdx = signalFor(g.inputChannel);
-            if (inputIdx >= MAX_SIGNALS) {
+            if (inputIdx >= maxSignals) {
                 r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
-                                    .arg(where).arg(MAX_SIGNALS));
+                                    .arg(where).arg(maxSignals));
                 continue;
             }
             cfg.input_signal_idx = quint16(inputIdx);
@@ -1601,9 +1623,9 @@ MappingResult mapToDevice(const Configuration &config)
         if (!k.active)
             continue;
         const QString where = QStringLiteral("Constant %1").arg(i + 1);
-        if (r.tables.constants.size() >= MAX_CONSTANTS) {
+        if (r.tables.constants.size() >= maxConstants) {
             r.errors.append(QStringLiteral("%1: device constant table is full (%2)")
-                                .arg(where).arg(MAX_CONSTANTS));
+                                .arg(where).arg(maxConstants));
             break;
         }
         if (k.name.isEmpty()) {
@@ -1611,7 +1633,7 @@ MappingResult mapToDevice(const Configuration &config)
             continue;
         }
         const int destIdx = signalFor(k.name);
-        if (destIdx >= MAX_SIGNALS) {
+        if (destIdx >= maxSignals) {
             r.errors.append(QStringLiteral("%1: device signal table is full").arg(where));
             continue;
         }
@@ -1656,7 +1678,7 @@ MappingResult mapToDevice(const Configuration &config)
             return -1;
         }
         const int destIdx = signalFor(name);
-        if (destIdx >= MAX_SIGNALS) {
+        if (destIdx >= maxSignals) {
             r.errors.append(QStringLiteral("%1: device signal table is full").arg(where));
             return -1;
         }
@@ -1679,9 +1701,9 @@ MappingResult mapToDevice(const Configuration &config)
             return false;
         }
         const int idx = signalFor(name);
-        if (idx >= MAX_SIGNALS) {
+        if (idx >= maxSignals) {
             r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
-                                .arg(where).arg(MAX_SIGNALS));
+                                .arg(where).arg(maxSignals));
             return false;
         }
         *idxOut = quint16(idx);
@@ -1693,9 +1715,9 @@ MappingResult mapToDevice(const Configuration &config)
         if (!t.active)
             continue;
         const QString where = QStringLiteral("Table 2x16 %1").arg(i + 1);
-        if (r.tables.tables2x16Def.size() >= MAX_TABLES_2X16) {
+        if (r.tables.tables2x16Def.size() >= maxTables2x16) {
             r.errors.append(QStringLiteral("%1: device 2x16 table is full (%2)")
-                                .arg(where).arg(MAX_TABLES_2X16));
+                                .arg(where).arg(maxTables2x16));
             break;
         }
         const int n = qBound(0, int(t.xSites.size()), TABLE_2X16_SITES);
@@ -1728,9 +1750,9 @@ MappingResult mapToDevice(const Configuration &config)
         if (!t.active)
             continue;
         const QString where = QStringLiteral("Table 8x8 %1").arg(i + 1);
-        if (r.tables.tables8x8Def.size() >= MAX_TABLES_8X8) {
+        if (r.tables.tables8x8Def.size() >= maxTables8x8) {
             r.errors.append(QStringLiteral("%1: device 8x8 table is full (%2)")
-                                .arg(where).arg(MAX_TABLES_8X8));
+                                .arg(where).arg(maxTables8x8));
             break;
         }
         // The model's grid is strided by the row's OWN X width, which is what
@@ -1791,8 +1813,9 @@ MappingResult mapToDevice(const Configuration &config)
     // moment anyone wants them. They are a baseline, so they are allocated like
     // one.
     //
-    // The cost is bounded and paid once: DEVCH_COUNT slots out of MAX_SIGNALS,
-    // taken at the END of the table so no document channel's index moves, and
+    // The cost is bounded and paid once: DEVCH_COUNT slots out of the channel
+    // capacity, taken at the END of the table so no document channel's index
+    // moves, and
     // 6 bytes per channel per tick on the value stream — and only while a
     // monitor is actually open, since the stream is off otherwise. A
     // configuration that genuinely cannot spare them trips the capacity check
@@ -1808,7 +1831,7 @@ MappingResult mapToDevice(const Configuration &config)
         // this channel, so a referenced device channel is unaffected by the
         // change above — it does not get a second slot.
         const int idx = signalFor(dev.name);
-        if (idx >= MAX_SIGNALS)
+        if (idx >= maxSignals)
             continue;
         r.tables.deviceChannels.signal_idx[dev.deviceChannelId] = quint16(idx);
         // Type the slot from the built-in definition, exactly as a constant or
@@ -1827,11 +1850,38 @@ MappingResult mapToDevice(const Configuration &config)
         }
     }
 
-    if (r.tables.signalConfigs.size() > MAX_SIGNALS)
+    if (r.tables.signalConfigs.size() > maxSignals)
         r.errors.append(QStringLiteral("Configuration needs %1 signals; the device supports %2")
-                            .arg(r.tables.signalConfigs.size()).arg(MAX_SIGNALS));
+                            .arg(r.tables.signalConfigs.size()).arg(maxSignals));
 
     return r;
+}
+
+QVector<int> tableCountsOf(const DeviceTables &tables)
+{
+    QVector<int> counts(DEVICE_TABLE_COUNT, 0);
+    // Slot by slot rather than a positional list: the index IS the table.
+    counts[int(DeviceTable::Messages)] = int(tables.messages.size());
+    counts[int(DeviceTable::Signals)] = int(tables.signalConfigs.size());
+    counts[int(DeviceTable::Math)] = int(tables.math.size());
+    counts[int(DeviceTable::Conditions)] = int(tables.conditions.size());
+    counts[int(DeviceTable::Counters)] = int(tables.counters.size());
+    counts[int(DeviceTable::Timers)] = int(tables.timers.size());
+    counts[int(DeviceTable::Constants)] = int(tables.constants.size());
+    counts[int(DeviceTable::Relays)] = int(tables.relays.size());
+    counts[int(DeviceTable::Tables2x16Def)] = int(tables.tables2x16Def.size());
+    counts[int(DeviceTable::Tables2x16Out)] = int(tables.tables2x16Out.size());
+    counts[int(DeviceTable::Tables8x8Def)] = int(tables.tables8x8Def.size());
+    counts[int(DeviceTable::Tables8x8Row)] = int(tables.tables8x8Row.size());
+    counts[int(DeviceTable::Integrators)] = int(tables.integrators.size());
+    counts[int(DeviceTable::Script)] = int(tables.scriptChunks.size());
+    counts[int(DeviceTable::Crc8)] = int(tables.crc8.size());
+    return counts;
+}
+
+QStringList tablesExceeding(const DeviceTables &tables, const DeviceCapacity &device)
+{
+    return countsExceeding(tableCountsOf(tables), device);
 }
 
 namespace {
@@ -1971,6 +2021,10 @@ QString neutralSectionName(const BusConfig &bus, CommsProtection protection)
 void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringList *notes,
                    const QVector<ControlCanPayload> &busSetup)
 {
+    // The channel table these records index: the unit's, as the Get that read
+    // them reported it. A slot at or past this is "unused", exactly as the
+    // device treats it.
+    const int maxSignals = tables.capacity.capacityOf(DeviceTable::Signals);
     // (bus, row) of every section whose name came off the DEVICE (store v18).
     // The prior-name pass at the end skips these: the unit carries the name
     // now, so the document snapshot below is a fallback rather than an
@@ -2043,6 +2097,10 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
     // device just handed back stay concealed from a viewer who has not proved
     // anything.
     config.clearContent();
+    // The document is now sized like the unit it was read from: the dialogs
+    // allow what that firmware holds, and the next Send to it maps against
+    // the same numbers the Get read over.
+    config.setCapacity(tables.capacity);
     // Bus modes and rates. The message and signal tables carry none of this, so
     // it comes from CMD_READ_CAN_SETUP — a separate read that older firmware
     // does not answer. Both outcomes are handled here rather than left to the
@@ -2108,7 +2166,7 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
     // device that answered with a short or garbled image must leave this
     // document with no bytecode at all rather than with an image that fails at
     // the next Send, when CLEAR_CONFIG has already erased the unit.
-    const RetainedScript retained = scriptImageFromChunks(tables.scriptChunks);
+    const RetainedScript retained = scriptImageFromChunks(tables.scriptChunks, maxSignals);
     config.setScriptBytecode(retained.image);
     if (notes && retained.present) {
         if (!retained.image.isEmpty()) {
@@ -2247,7 +2305,7 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
     QSet<int> devicePublishedSlots;
     for (int id = 0; id < DEVCH_COUNT; ++id) {
         const quint16 slot = tables.deviceChannels.signal_idx[id];
-        if (slot < MAX_SIGNALS)
+        if (slot < maxSignals)
             devicePublishedSlots.insert(int(slot));
     }
 
@@ -2682,7 +2740,7 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
                 }
                 return tr;
             }
-            if (wt.input_a_signal_idx >= MAX_SIGNALS)
+            if (wt.input_a_signal_idx >= maxSignals)
                 return tr; // unused half
             tr.op = wt.op;
             tr.aChannel = signalNames.value(wt.input_a_signal_idx);

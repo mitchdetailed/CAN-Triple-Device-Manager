@@ -105,6 +105,12 @@ FW_STATIC_ASSERT(sizeof(FwImageHeader) == 64, "FwImageHeader must be 64 bytes");
 FW_STATIC_ASSERT(FW_IMAGE_HEADER_OFFSET + sizeof(FwImageHeader) < 0x400u,
                  "header must not run past the space reserved for it");
 
+#define FW_CAPS_OFFSET       0x240u
+#define FW_CAPS_MAGIC        0x50435443u
+
+FW_STATIC_ASSERT(FW_CAPS_OFFSET == FW_IMAGE_HEADER_OFFSET + sizeof(FwImageHeader),
+                 "the capacity block sits immediately after the image header");
+
 #define FW_IMAGE_CRC_OFFSET \
     (FW_IMAGE_HEADER_OFFSET + (uint32_t)__builtin_offsetof(FwImageHeader, image_crc32))
 

@@ -100,19 +100,26 @@ int main(int argc, char **argv)
     // in m.errors, so a .ct3 with a broken script must read NOT OK here too.
     const MappingResult m = mapWithScript(cfg);
 
+    // The "of" column is the capacity the tables were mapped against — the
+    // document's, which is this build's numbers until a .ct3 records the
+    // firmware it targets — not a constant restated here.
+    const DeviceCapacity &cap = m.tables.capacity;
     out << "device tables:\n";
-    row(out, "messages", m.tables.messages.size(), MAX_MESSAGES);
-    row(out, "signals", m.tables.signalConfigs.size(), MAX_SIGNALS);
-    row(out, "math", m.tables.math.size(), MAX_MATH_COMPUTATIONS);
-    row(out, "conditions", m.tables.conditions.size(), MAX_CONDITIONS);
-    row(out, "counters", m.tables.counters.size(), MAX_COUNTERS);
-    row(out, "timers", m.tables.timers.size(), MAX_TIMERS);
-    row(out, "constants", m.tables.constants.size(), MAX_CONSTANTS);
-    row(out, "relays", m.tables.relays.size(), MAX_RELAYS);
-    row(out, "tables 2x16", m.tables.tables2x16Def.size(), MAX_TABLES_2X16);
-    row(out, "tables 8x8", m.tables.tables8x8Def.size(), MAX_TABLES_8X8);
-    row(out, "integrators", m.tables.integrators.size(), MAX_INTEGRATORS);
-    row(out, "crc8", m.tables.crc8.size(), MAX_CRC8_MESSAGES);
+    row(out, "messages", m.tables.messages.size(), cap.capacityOf(DeviceTable::Messages));
+    row(out, "signals", m.tables.signalConfigs.size(), cap.capacityOf(DeviceTable::Signals));
+    row(out, "math", m.tables.math.size(), cap.capacityOf(DeviceTable::Math));
+    row(out, "conditions", m.tables.conditions.size(), cap.capacityOf(DeviceTable::Conditions));
+    row(out, "counters", m.tables.counters.size(), cap.capacityOf(DeviceTable::Counters));
+    row(out, "timers", m.tables.timers.size(), cap.capacityOf(DeviceTable::Timers));
+    row(out, "constants", m.tables.constants.size(), cap.capacityOf(DeviceTable::Constants));
+    row(out, "relays", m.tables.relays.size(), cap.capacityOf(DeviceTable::Relays));
+    row(out, "tables 2x16", m.tables.tables2x16Def.size(),
+        cap.capacityOf(DeviceTable::Tables2x16Def));
+    row(out, "tables 8x8", m.tables.tables8x8Def.size(),
+        cap.capacityOf(DeviceTable::Tables8x8Def));
+    row(out, "integrators", m.tables.integrators.size(),
+        cap.capacityOf(DeviceTable::Integrators));
+    row(out, "crc8", m.tables.crc8.size(), cap.capacityOf(DeviceTable::Crc8));
 
     // Transmit load, because a configuration that maps cleanly can still ask for
     // more than the wire can carry, and that is invisible in the table counts.

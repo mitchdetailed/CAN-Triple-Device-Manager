@@ -30,15 +30,19 @@ failure, so occasional line noise is absorbed silently.</p>
 
 <h2>After a firmware update the device reports an empty configuration</h2>
 
-<p>This happens when an update changes the stored-configuration format, and it
-is expected rather than a fault. The configuration in the device's flash carries
-the flash-store version and a CRC of the image, and firmware loads only an image
-whose version matches its own exactly — in either direction — rather than risk
-misreading its records. When the versions differ the first boot after flashing
-comes up on bring-up defaults, Device Status… shows 0 active messages, and Get
-Configuration returns nothing. Any update that changes the store format asks
-the one re-Send below — and because the device's access passwords live beside
-the configuration in the same store, they need setting again too.</p>
+<p>This happens when an update changes the stored-configuration format, or
+installs a different <i>variant</i> of the firmware (the same version with some
+tables sized differently), and it is expected rather than a fault. The
+configuration in the device's flash carries the flash-store version, a layout
+identity and a CRC of the image, and firmware loads only an image whose version
+and layout match its own exactly — in either direction — rather than risk
+misreading its records. When they differ the first boot after flashing comes up
+on bring-up defaults, Device Status… shows 0 active messages, and Get
+Configuration returns nothing. Any update that changes the store format or the
+layout asks the one re-Send below — and because the device's access passwords
+live beside the configuration in the same store, they need setting again too.
+The Update Firmware dialog warns before either kind of update and backs the
+configuration up first.</p>
 
 <p><b>Fix:</b> open your saved .ct3 and run
 <b>Online&nbsp;→&nbsp;Send Configuration</b> (F5). The send verifies the

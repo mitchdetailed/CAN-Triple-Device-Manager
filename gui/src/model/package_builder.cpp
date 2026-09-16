@@ -118,6 +118,10 @@ PackageBuildResult buildSecurePackage(const PackageBuildRequest &request)
     written.keysWithheld = true;
     written.keyProofNonce = randomBytes(kAccessChallengeBytes);
     written.keyProofMac = licenseProveExpected(fleetKey, written.keyProofNonce);
+    // What the sealed stream writes, table by table, so the relay can refuse
+    // a unit that holds less BEFORE the first frame rather than have the
+    // device NACK the twenty-first with the configuration already erased.
+    written.tableCounts = tableCountsOf(mapped.tables);
     if (!written.isValid())
         return fail(QStringLiteral("The package policy could not be sealed."));
 

@@ -425,6 +425,10 @@ Name: "drivers"; Description: "Install the ST-Link USB drivers (needed to progra
 ; renumber, whose header outranks every current release) would be chosen over
 ; the firmware this installer actually carries.
 Type: files; Name: "{app}\Firmware\can-triple-*.ctf"
+; The variant images live one folder down (see cmake/stage_firmware.cmake for
+; why not beside the standard one); the same argument applies, so the folder
+; is emptied before this release's variants are laid down.
+Type: files; Name: "{app}\Firmware\Variants\can-triple-*.ctf"
 
 Type: filesandordirs; Name: "{app}\generic"
 Type: filesandordirs; Name: "{app}\iconengines"

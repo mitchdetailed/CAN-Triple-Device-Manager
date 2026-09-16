@@ -416,10 +416,10 @@ void MathDialog::rebuild()
 
 void MathDialog::onAdd()
 {
-    if (m_rows.size() >= MAX_MATH_COMPUTATIONS) {
+    const int limit = m_config->capacity().capacityOf(DeviceTable::Math);
+    if (m_rows.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
-                             tr("The device supports at most %1 math channels.")
-                                 .arg(MAX_MATH_COMPUTATIONS));
+                             tr("The device supports at most %1 math channels.").arg(limit));
         return;
     }
     MathRowEditor editor(m_config, MathRow(), livePatch(m_rows), this);

@@ -17,6 +17,7 @@
 
 #include "../model/access_keys.h"
 #include "access_state.h"
+#include "capacity.h"
 #include "device_link.h"
 
 namespace ct {
@@ -163,6 +164,13 @@ bool parseLicense(const QByteArray &payload, LicenseState *out);
 
 bool readIdentity(DeviceLink *link, Identity *out, QString *error);
 bool readReadoutProtection(DeviceLink *link, ReadoutProtection *out, QString *error);
+// The capacity report (CMD_GET_CAPACITY, firmware 1.0.10): what the unit can
+// hold, table by table. `reported` stays false on firmware without the
+// command, and the caller then assumes DeviceCapacity::builtIn(). A report in
+// a format this build cannot read is an ERROR naming the Manager update, not a
+// silent fallback — falling back would size checks against numbers the unit
+// has just said are wrong.
+bool readCapacity(DeviceLink *link, DeviceCapacity *out, QString *error);
 bool readAccessState(DeviceLink *link, AccessState *out, QString *error);
 bool readConfigVersion(DeviceLink *link, ConfigVersionState *out, QString *error);
 bool readDeviceInfo(DeviceLink *link, DeviceInfo *out, QString *error);

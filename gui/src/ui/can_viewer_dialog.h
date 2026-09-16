@@ -58,7 +58,7 @@ private:
     // on screen saying when the change took effect.
     void updateInjectSlot(int slot);
     void onClearClicked();
-    void onSaveClicked(); // write the buffered frames as a Vector ASCII (.asc) log
+    void onSaveClicked(); // write the buffered frames as a .asc, SocketCAN .log or PEAK .trc file
     void onOverwriteToggled();
     void appendFrameRow(const ct::MonitorStreamPayload &frame); // one row, no filtering
     // The "frames dropped" marker row for a frame carrying MONFLAG_GAP. Its own
@@ -123,6 +123,9 @@ private:
     // Full capture buffer for file export — a deque so append and drop-oldest
     // are O(1) even at millions of frames (the table shows only a live window).
     std::deque<MonitorStreamPayload> m_frames;
+    // The file type chosen in the last Save to File… of this dialog, offered
+    // first the next time. Empty until the first save.
+    QString m_lastLogFilter;
     // Latest frame per identifier. Maintained in BOTH modes so that ticking
     // Overwrite Mode shows the bus immediately instead of waiting for every
     // message to come round again, and so the counts survive the toggle.

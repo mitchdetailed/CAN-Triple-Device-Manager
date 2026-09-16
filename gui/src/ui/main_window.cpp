@@ -42,6 +42,7 @@
 #include "channel_editor_dialog.h"
 #include "check_channels_dialog.h"
 #include "config_summary_dialog.h"
+#include "target_firmware_dialog.h"
 #include "communications_dialog.h"
 #include "conditions_dialog.h"
 #include "constants_dialog.h"
@@ -157,7 +158,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(&m_config, &Configuration::documentReset, this, [this]() {
         updateWindowTitle();
         updateProtectionState(); // New/Open/Get changes which document is protected
+        updateCapacityGates();   // ...and which firmware it is sized against
     });
+    connect(&m_config, &Configuration::capacityChanged, this, &MainWindow::updateCapacityGates);
     connect(&m_link, &DeviceLink::connected, this, &MainWindow::updateConnectionStatus);
     connect(&m_link, &DeviceLink::disconnected, this, &MainWindow::updateConnectionStatus);
     connect(&m_link, &DeviceLink::logMessage, this, [this](const QString &text) {
@@ -185,6 +188,10 @@ void MainWindow::buildMenus()
     fileMenu->addSeparator();
     fileMenu->addAction(tr("Check &Channels"), this, &MainWindow::onCheckChannels);
     fileMenu->addAction(tr("Config S&ummary…"), this, &MainWindow::onConfigSummary);
+    // Beside the two document reports because it is a fact about the DOCUMENT
+    // — which firmware it is sized against — and the reports are where that
+    // fact shows up as "n of m".
+    fileMenu->addAction(tr("Target &Firmware…"), this, &MainWindow::onTargetFirmware);
     fileMenu->addSeparator();
     m_revealAction = fileMenu->addAction(tr("&Reveal Protected Comms…"), this,
                                          &MainWindow::onRevealProtectedComms);
@@ -206,22 +213,28 @@ void MainWindow::buildMenus()
 
     // Calculations
     QMenu *calcMenu = menuBar()->addMenu(tr("C&alculations"));
-    calcMenu->addAction(tr("&Math Channels…"), this, &MainWindow::onMathChannels);
+    // Each is kept so updateCapacityGates() can switch it off when the target
+    // firmware has no such table — a variant without integrators offers no
+    // Integrators dialog rather than one that refuses every row.
+    m_mathAction = calcMenu->addAction(tr("&Math Channels…"), this, &MainWindow::onMathChannels);
     // Mnemonic moved o -> C with the rename: "Up / Down Counters" already owns U
     // and "Constants" owns n, so C is the letter left in "User Conditions".
-    calcMenu->addAction(tr("User &Conditions…"), this, &MainWindow::onConditions);
-    calcMenu->addAction(tr("&Timers…"), this, &MainWindow::onTimers);
-    calcMenu->addAction(tr("&Up / Down Counters…"), this, &MainWindow::onCounters);
-    calcMenu->addAction(tr("&Integrators…"), this, &MainWindow::onIntegrators);
-    calcMenu->addAction(tr("Co&nstants…"), this, &MainWindow::onConstants);
-    calcMenu->addAction(tr("Ta&bles…"), this, &MainWindow::onTables);
+    m_conditionsAction =
+        calcMenu->addAction(tr("User &Conditions…"), this, &MainWindow::onConditions);
+    m_timersAction = calcMenu->addAction(tr("&Timers…"), this, &MainWindow::onTimers);
+    m_countersAction =
+        calcMenu->addAction(tr("&Up / Down Counters…"), this, &MainWindow::onCounters);
+    m_integratorsAction =
+        calcMenu->addAction(tr("&Integrators…"), this, &MainWindow::onIntegrators);
+    m_constantsAction = calcMenu->addAction(tr("Co&nstants…"), this, &MainWindow::onConstants);
+    m_tablesAction = calcMenu->addAction(tr("Ta&bles…"), this, &MainWindow::onTables);
     calcMenu->addSeparator();
     // Below the separator because it is a different kind of thing from the rows
     // above: those are grids the device evaluates, this is code it runs. It is
     // in Calculations rather than Tools because it computes channel values like
     // everything else here — the Lua Console next door edits the DOCUMENT and
     // never reaches a device, which is the opposite direction entirely.
-    calcMenu->addAction(tr("&Device Script…"), this, &MainWindow::onDeviceScript);
+    m_scriptAction = calcMenu->addAction(tr("&Device Script…"), this, &MainWindow::onDeviceScript);
 
     // Online
     QMenu *onlineMenu = menuBar()->addMenu(tr("&Online"));
@@ -317,6 +330,41 @@ void MainWindow::buildMenus()
     helpMenu->addAction(tr("&About…"), this, &MainWindow::onAbout);
 
     updateProtectionState();
+    updateCapacityGates();
+}
+
+void MainWindow::updateCapacityGates()
+{
+    const DeviceCapacity &cap = m_config.capacity();
+    const auto gate = [this, &cap](QAction *action, int holds, const QString &what) {
+        if (!action)
+            return;
+        action->setEnabled(holds > 0);
+        // A disabled item with no explanation reads as a bug. The tooltip is
+        // shown by the menu when the pointer rests on it.
+        action->setToolTip(holds > 0 ? QString()
+                                     : tr("The target firmware has no %1 — see File > Target "
+                                          "Firmware.")
+                                           .arg(what));
+    };
+    gate(m_mathAction, cap.capacityOf(DeviceTable::Math), tr("math channels"));
+    gate(m_conditionsAction, cap.capacityOf(DeviceTable::Conditions), tr("User Conditions"));
+    gate(m_timersAction, cap.capacityOf(DeviceTable::Timers), tr("timers"));
+    gate(m_countersAction, cap.capacityOf(DeviceTable::Counters), tr("counters"));
+    gate(m_integratorsAction, cap.capacityOf(DeviceTable::Integrators), tr("integrators"));
+    gate(m_constantsAction, cap.capacityOf(DeviceTable::Constants), tr("constants"));
+    // Either kind of table keeps the dialog: it has a tab per kind, and each
+    // tab's Add already refuses at that kind's own capacity.
+    gate(m_tablesAction,
+         cap.capacityOf(DeviceTable::Tables2x16Def) + cap.capacityOf(DeviceTable::Tables8x8Def),
+         tr("lookup tables"));
+    gate(m_scriptAction, cap.capacityOf(DeviceTable::Script), tr("device script"));
+}
+
+void MainWindow::onTargetFirmware()
+{
+    TargetFirmwareDialog dialog(&m_config, &m_link, this);
+    dialog.exec();
 }
 
 // What replaced the old document-wide lock, and why it does so much less.
@@ -1156,6 +1204,8 @@ void MainWindow::onSendSecureConfiguration()
                                  .arg(mapped.errors.size()));
         return;
     }
+    if (!tablesFitDevice(mapped.tables, title))
+        return;
 
     // THE CONFIRMATION — and everything above it left the device exactly as it
     // was. Everything below it changes something.
@@ -1321,6 +1371,17 @@ bool MainWindow::checkPackagePolicy(const SecurePackagePolicy &policy, const QSt
             facts.serial = info.serialNumber;
         }
     }
+    // What the unit holds, for a package that recorded what it writes. Read
+    // only then: an older package makes no claim the capacity could refute.
+    if (!policy.tableCounts.isEmpty()) {
+        BusyScope busy(this);
+        DeviceCapacity capacity;
+        QString ignored;
+        if (device_session::readCapacity(&m_link, &capacity, &ignored)) {
+            facts.capacityKnown = true;
+            facts.capacity = capacity.reported ? capacity : DeviceCapacity::builtIn();
+        }
+    }
     const InstallVerdict verdict = packageInstallVerdict(policy, facts);
     if (verdict.noPolicy) {
         QMessageBox::critical(
@@ -1336,6 +1397,19 @@ bool MainWindow::checkPackagePolicy(const SecurePackagePolicy &policy, const QSt
             this, title,
             tr("This unit's firmware cannot report a licence, so it cannot be matched against "
                "this package.\n\nIt has NOT been sent. Update the unit's firmware."));
+        return false;
+    }
+    if (!verdict.shortfalls.isEmpty()) {
+        // Not a wrong unit — the right fleet, holding less than the package
+        // writes. Named by table, like a Send's own refusal, because the fix
+        // is a different package or a different firmware, not a different
+        // device.
+        QMessageBox::critical(
+            this, title,
+            tr("This package writes more than the connected device's firmware holds, so it "
+               "has NOT been sent:\n\n%1\n\nInstall a firmware that holds more, or a package "
+               "built for this one.")
+                .arg(verdict.shortfalls.join(QStringLiteral("\n"))));
         return false;
     }
     if (!verdict.ok()) {
@@ -1650,6 +1724,8 @@ void MainWindow::onSendConfiguration()
         box.exec();
         return;
     }
+    if (!tablesFitDevice(mapped.tables, tr("Send Configuration")))
+        return;
 
     // Per-bus CONTROL_CAN setups from the Communications rate/mode settings
     // (v2 firmware applies them; v1 NACKs and the step is skipped).
@@ -1890,6 +1966,37 @@ void MainWindow::onSendConfiguration()
     });
 }
 
+// The connected unit's capacity against the tables about to be sent. The
+// mapper sized them against the DOCUMENT's capacity — builtIn(), or the unit
+// the document was last read from — and the unit on the cable may be a smaller
+// variant. Better refused here, with the unit untouched, than NACKed
+// ERR_OUT_OF_BOUNDS half way through a Send with CLEAR_CONFIG already done.
+// Firmware without the report holds what builtIn() says.
+bool MainWindow::tablesFitDevice(const DeviceTables &tables, const QString &title)
+{
+    DeviceCapacity capacity;
+    QString error;
+    {
+        BusyScope busy(this); // sync round trip — see the readIdentity note in onSendConfiguration
+        if (!device_session::readCapacity(&m_link, &capacity, &error)) {
+            QMessageBox::warning(this, title,
+                                 tr("The device's capacity could not be read: %1").arg(error));
+            return false;
+        }
+    }
+    if (!capacity.reported)
+        capacity = DeviceCapacity::builtIn();
+    const QStringList over = tablesExceeding(tables, capacity);
+    if (over.isEmpty())
+        return true;
+    QMessageBox::warning(this, title,
+                         tr("This configuration does not fit the connected device, so nothing "
+                            "has been sent:\n\n%1\n\nReduce it, or send it to a device whose "
+                            "firmware holds more.")
+                             .arg(over.join(QStringLiteral("\n"))));
+    return false;
+}
+
 void MainWindow::onGetConfiguration()
 {
     if (!ensureConnected())
@@ -1982,10 +2089,30 @@ bool MainWindow::offerProtectedCommsUnlock(const QString &title)
 // time after a password is proved — see the locked branch at the bottom.
 void MainWindow::runGetTransfer(bool allowUnlockRetry)
 {
+    // What the unit holds, so the read covers ITS tables rather than this
+    // build's idea of them: a variant with 40 CRC8 rules is read to 40, not to
+    // 20, and a table the firmware lacks is not asked for. Firmware without
+    // the report is read at the numbers it has always had. The document the
+    // Get rebuilds is then sized like the unit (mapFromDevice).
+    DeviceCapacity capacity;
+    {
+        BusyScope busy(this); // sync round trip — see the readIdentity note in onSendConfiguration
+        QString capError;
+        if (!device_session::readCapacity(&m_link, &capacity, &capError)) {
+            QMessageBox::warning(this, tr("Get Configuration"),
+                                 tr("The device's capacity could not be read: %1").arg(capError));
+            return;
+        }
+    }
+    if (!capacity.reported)
+        capacity = DeviceCapacity::builtIn();
+    else
+        capacity.label = tr("device on %1").arg(m_link.portName()); // the document's target
+
     auto *progress = new QProgressDialog(tr("Reading configuration…"), tr("Cancel"), 0, 100, this);
     progress->setWindowModality(Qt::WindowModal);
     progress->setMinimumDuration(0);
-    auto *transfer = ConfigTransfer::get(&m_link, this);
+    auto *transfer = ConfigTransfer::get(&m_link, this, capacity);
     connect(transfer, &ConfigTransfer::progress, progress,
             [progress](int done, int total, const QString &stage) {
                 progress->setMaximum(total);

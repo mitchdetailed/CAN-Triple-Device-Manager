@@ -105,6 +105,57 @@ if(_stale_ctf)
     message(STATUS "deploy: removed stale firmware image(s): ${_stale_ctf}")
 endif()
 
+# THE VARIANTS (firmware include/variant.h) - the same firmware with the
+# configuration tables sized differently, one image each, named
+# can-triple-<version>-<variant>.ctf. Staged into a Variants/ SUBFOLDER and
+# not beside the standard image, because of the rule just above: the
+# initial-programming tool takes the highest-versioned can-triple-*.ctf in
+# ITS OWN folder, and three images at one version would make that choice an
+# accident of sort order - a blank board provisioned with a variant nobody
+# chose. One folder down they are out of that glob, inside the installer's
+# recursive [Files], and one click from where Online -> Update Firmware and
+# File -> Target Firmware open. Both dialogs read an image's capacity block, so
+# a user can size a document for a variant, or install one, from the install
+# alone.
+#
+# The private tree builds them under .pio/build/CAN_Triple_<variant>/; the
+# public tree would carry them as released binaries beside the standard one.
+# A tree with no variants stages none and leaves no folder behind - and, as
+# above, whatever was not staged this pass is removed, so the subfolder holds
+# exactly this release's variants.
+set(_variant_dir "${DEPLOY_DIR}/Firmware/Variants")
+set(_staged_variants)
+file(GLOB _built_variants "${FIRMWARE_DIR}/.pio/build/CAN_Triple_*/firmware.ctf")
+foreach(_ctf ${_built_variants})
+    get_filename_component(_env "${_ctf}" DIRECTORY)
+    get_filename_component(_env "${_env}" NAME)
+    string(REGEX REPLACE "^CAN_Triple_" "" _variant "${_env}")
+    set(_dest "${_variant_dir}/can-triple-${FW_VERSION}-${_variant}.ctf")
+    file(MAKE_DIRECTORY "${_variant_dir}")
+    stage_one("can-triple-${FW_VERSION}-${_variant}.ctf (variant)" "${_ctf}" "" "${_dest}")
+    list(APPEND _staged_variants "${_dest}")
+endforeach()
+if(NOT _built_variants)
+    file(GLOB _released_variants "${FIRMWARE_DIR}/can-triple-${FW_VERSION}-*.ctf")
+    foreach(_ctf ${_released_variants})
+        get_filename_component(_name "${_ctf}" NAME)
+        file(MAKE_DIRECTORY "${_variant_dir}")
+        stage_one("${_name} (variant)" "" "${_ctf}" "${_variant_dir}/${_name}")
+        list(APPEND _staged_variants "${_variant_dir}/${_name}")
+    endforeach()
+endif()
+file(GLOB _stale_variants "${_variant_dir}/can-triple-*.ctf")
+if(_staged_variants)
+    list(REMOVE_ITEM _stale_variants ${_staged_variants})
+endif()
+if(_stale_variants)
+    file(REMOVE ${_stale_variants})
+    message(STATUS "deploy: removed stale variant image(s): ${_stale_variants}")
+endif()
+if(NOT _staged_variants AND EXISTS "${_variant_dir}")
+    file(REMOVE_RECURSE "${_variant_dir}")
+endif()
+
 # The bootloader image the initial-programming tool writes to a blank part.
 stage_one("bootloader.bin"
     "${FIRMWARE_DIR}/bootloader/.pio/build/bootloader/firmware.bin"

@@ -73,9 +73,11 @@ three are ticked by default — see below.</td></tr>
 appear in the list. Ticked by default — see below.</td></tr>
 <tr><td>Overwrite Mode</td><td>One row per message carrying its most recent
 data, instead of a scrolling trace — see below.</td></tr>
-<tr><td>Save to File…</td><td>Writes every buffered frame as a Vector ASCII
-log (*.asc), readable by common CAN tools. Timestamps in the file are relative
-to the first buffered frame.</td></tr>
+<tr><td>Save to File…</td><td>Writes every buffered frame to a file, in the
+format chosen by the file type in the save dialog: a <b>Vector ASCII log
+(*.asc)</b>, a <b>SocketCAN candump log (*.log)</b> or a <b>PEAK trace 3.0
+(*.trc)</b> — see <a href="#export">Export formats</a>. Timestamps in the file
+are relative to the first buffered frame in every format.</td></tr>
 <tr><td>Clear</td><td>Empties the table and the capture buffer.</td></tr>
 <tr><td>Inject Frames</td><td>Eight slots, each sending a frame once or repeating it at a rate — see below.</td></tr>
 </table>
@@ -170,6 +172,40 @@ receives is not the same traffic, so Rx and Tx keep separate rows. The
 capture itself is untouched, so <b>Save to File…</b> writes the complete trace
 frame by frame no matter which mode you were watching in. Switching the mode
 off gives the full history back — it was recorded the whole time.</p>
+
+<h2 id="export">Export formats</h2>
+
+<p><b>Save to File…</b> offers three file types. Pick one in the save dialog's
+file-type list, or type the extension yourself — an extension that names a
+format wins over the list. The suggested name is <b>Logged Msgs
+<i>yyMMdd</i> - <i>HHmm</i></b> with the chosen extension, so a day's captures
+sort in the order they were taken. Every format carries one line per frame, with the
+timestamp relative to the first buffered frame, because the device reports its
+uptime rather than the time of day.</p>
+
+<ul>
+<li><b>Vector ASCII log (*.asc)</b> — the original export, readable by
+CANalyzer, CANoe and most viewers. Classic frames as standard lines, CAN FD
+frames as <code>CANFD</code> lines carrying the real BRS and ESI flags, the
+direction as Rx or Tx.</li>
+<li><b>SocketCAN candump log (*.log)</b> — the line format
+<code>candump -l</code> writes and <code>canplayer</code> replays, which
+python-can, SavvyCAN, cantools and the Linux CAN tools all read:
+<code>(0000000012.345000) can2 0F3#7E0D0000F0C400F0</code>. The bus is written
+as <code>can1</code>, <code>can2</code> or <code>can3</code>, the device's own
+numbering; a CAN FD frame reads <code>id##F</code> followed by its bytes, F
+being the flags digit (1 = BRS, 2 = ESI). The format has no column for the
+direction, so transmitted and received frames look alike in it.</li>
+<li><b>PEAK trace 3.0 (*.trc)</b> — PCAN-View and PCAN-Explorer's trace file,
+per PEAK's file format document: a comment header with the start time, then
+one record per frame with the index, the offset in milliseconds, the type
+(<code>DT</code> for classic, <code>FD</code>/<code>FB</code>/<code>FE</code>/
+<code>BI</code> for CAN FD without and with BRS and ESI), the bus, the id, Rx
+or Tx, the DLC and the bytes.</li>
+</ul>
+
+<p>Line endings follow each format's tools: CR/LF for .asc and .trc, LF for
+the candump log.</p>
 
 <p class="note">Ticking Overwrite Mode shows the bus as it already stands
 rather than starting empty: the current value of every message seen since the

@@ -210,11 +210,25 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
 {
     QString error;
     m_statusValid = m_updater.readStatus(&m_status, &error);
+    m_deviceCapacity.reset();
 
     if (!m_statusValid) {
         m_deviceInfo->setText(
             QStringLiteral("<span style='color:#c0392b'>%1</span>").arg(error.toHtmlEscaped()));
         return;
+    }
+
+    // What the unit holds, so an image of the SAME store version that lays the
+    // tables out differently (another variant) is caught before the update
+    // and not discovered as an empty device after it. A unit that cannot say
+    // leaves this unset and the version comparison stands alone, as it did
+    // before the report existed; a read that fails is not a reason to block
+    // an update, so it is reported as unknown rather than as an error.
+    {
+        DeviceCapacity capacity;
+        QString capError;
+        if (device_session::readCapacity(m_link, &capacity, &capError) && capacity.reported)
+            m_deviceCapacity = capacity;
     }
 
     QStringList lines;
@@ -332,14 +346,22 @@ void FirmwareUpdateDialog::updateReadiness()
         }
 
         // The one that actually costs the user something.
-        if (m_image->flashStoreVersion() != m_status.running_store_version) {
-            warnings << tr("<b>This update changes the stored-configuration format "
-                           "(v%1 → v%2).</b> The device's saved configuration will not survive "
-                           "it and the unit will start up with no configuration. Keep the "
-                           "backup option ticked — the configuration cannot be recovered from "
-                           "the device afterwards.")
-                            .arg(m_status.running_store_version)
-                            .arg(m_image->flashStoreVersion());
+        const QStringList changes = layoutChanges();
+        if (!changes.isEmpty()) {
+            const bool versionChanges =
+                m_image->flashStoreVersion() != m_status.running_store_version;
+            warnings << (versionChanges
+                             ? tr("<b>This update changes the stored-configuration format "
+                                  "(v%1 → v%2).</b> ")
+                                   .arg(m_status.running_store_version)
+                                   .arg(m_image->flashStoreVersion())
+                             : tr("<b>This image lays the configuration out differently from "
+                                  "the firmware the device is running</b> (%1). ")
+                                   .arg(changes.join(QStringLiteral("; ")).toHtmlEscaped()))
+                            + tr("The device's saved configuration will not survive it and the "
+                                 "unit will start up with no configuration. Keep the backup "
+                                 "option ticked — the configuration cannot be recovered from "
+                                 "the device afterwards.");
         }
 
         const int cmp = m_image->compareVersion(m_status.running_major, m_status.running_minor,
@@ -368,6 +390,26 @@ void FirmwareUpdateDialog::updateReadiness()
     m_updateButton->setEnabled(m_image.has_value() && !blocked);
 }
 
+QStringList FirmwareUpdateDialog::layoutChanges() const
+{
+    if (!m_image || !m_statusValid)
+        return {};
+    // Both sides can describe their layout: compare the layouts. This is the
+    // check a variant switch needs — same store version, different offsets —
+    // and it also covers a version change, since the report carries the
+    // version. (An image built before the report holds builtIn(); so did every
+    // unit that predates it, and the two are always at different versions
+    // from anything that reports, so the version comparison below catches
+    // that pairing on its own.)
+    if (m_deviceCapacity && m_image->capacity())
+        return layoutDifferences(*m_deviceCapacity, *m_image->capacity());
+    if (m_image->flashStoreVersion() != m_status.running_store_version)
+        return {tr("configuration store: v%1 → v%2")
+                    .arg(m_status.running_store_version)
+                    .arg(m_image->flashStoreVersion())};
+    return {};
+}
+
 void FirmwareUpdateDialog::setBusy(bool busy)
 {
     m_busy = busy; // reject()/closeEvent() consult this to block dismissal
@@ -391,8 +433,21 @@ bool FirmwareUpdateDialog::backupConfiguration(QString *savedPath, QString *erro
     QVector<ControlCanPayload> busSetup;
     QString deviceName;
 
+    // Read over what the unit holds, so the backup carries everything a larger
+    // variant stored rather than the first N of each table.
+    DeviceCapacity capacity;
+    {
+        QString capError;
+        if (!device_session::readCapacity(m_link, &capacity, &capError)) {
+            *error = tr("The device's capacity could not be read: %1").arg(capError);
+            return false;
+        }
+        if (!capacity.reported)
+            capacity = DeviceCapacity::builtIn();
+    }
+
     bool replyLost = false;
-    auto *transfer = ConfigTransfer::get(m_link, this);
+    auto *transfer = ConfigTransfer::get(m_link, this, capacity);
     connect(transfer, &ConfigTransfer::tablesReady, this,
             [&](const DeviceTables &t) { tables = t; });
     connect(transfer, &ConfigTransfer::finished, this,
@@ -574,6 +629,36 @@ void FirmwareUpdateDialog::offerConfigurationRestore(const QString &backupPath)
         return;
     }
 
+    // The unit is running the NEW firmware now, which may hold less than the
+    // one the backup came from — the backup was sized against the old unit's
+    // report. Refused here, before CLEAR_CONFIG, rather than discovered as an
+    // ERR_OUT_OF_BOUNDS half way through with the unit already erased.
+    {
+        DeviceCapacity capacity;
+        QString capError;
+        if (!device_session::readCapacity(m_link, &capacity, &capError)) {
+            QMessageBox::warning(
+                this, tr("Restore Configuration"),
+                tr("The device's capacity could not be read: %1\n\n"
+                   "The backup is still on disk:\n%2\n\n"
+                   "Open it with File > Open and send it manually.")
+                    .arg(capError, QDir::toNativeSeparators(backupPath)));
+            return;
+        }
+        if (!capacity.reported)
+            capacity = DeviceCapacity::builtIn();
+        const QStringList over = tablesExceeding(mapped.tables, capacity);
+        if (!over.isEmpty()) {
+            QMessageBox::warning(
+                this, tr("Restore Configuration"),
+                tr("The backup does not fit the firmware now on this device:\n\n%1\n\n"
+                   "The file is still on disk:\n%2\n\n"
+                   "Open it with File > Open, reduce it, and send it manually.")
+                    .arg(over.join(QStringLiteral("\n")), QDir::toNativeSeparators(backupPath)));
+            return;
+        }
+    }
+
     QVector<ControlCanPayload> busSetups;
     for (int i = 0; i < 3; ++i) {
         ControlCanPayload setup {};
@@ -626,8 +711,7 @@ void FirmwareUpdateDialog::onUpdate()
         return;
     }
 
-    const bool formatChanges =
-        m_image->flashStoreVersion() != m_status.running_store_version;
+    const bool formatChanges = !layoutChanges().isEmpty();
 
     QString confirm = tr("Install firmware %1 on this device?\n\n"
                          "The image is sent to a spare area of flash first, so the device "
@@ -749,8 +833,8 @@ void FirmwareUpdateDialog::onUpdate()
         QMessageBox::information(
             this, tr("Update Firmware"),
             tr("Firmware %1 is installed.\n\nThe device has no stored configuration — this "
-               "update changed the configuration format. Send a configuration to the device "
-               "when you are ready.")
+               "update changed the configuration format or layout. Send a configuration to "
+               "the device when you are ready.")
                 .arg(m_image->versionString()));
     } else {
         QMessageBox::information(this, tr("Update Firmware"),

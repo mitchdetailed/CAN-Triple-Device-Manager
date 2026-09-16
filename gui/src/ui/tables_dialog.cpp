@@ -1110,9 +1110,10 @@ ConfigPatch TablesDialog::liveView() const
 
 void TablesDialog::onAdd2x16()
 {
-    if (m_rows2x16.size() >= MAX_TABLES_2X16) {
+    const int limit = m_config->capacity().capacityOf(DeviceTable::Tables2x16Def);
+    if (m_rows2x16.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
-                             tr("The device supports at most %1 2x16 tables.").arg(MAX_TABLES_2X16));
+                             tr("The device supports at most %1 2x16 tables.").arg(limit));
         return;
     }
     const QStringList siblings = siblingOutputs(false, -1);
@@ -1129,9 +1130,10 @@ void TablesDialog::onAdd2x16()
 
 void TablesDialog::onAdd8x8()
 {
-    if (m_rows8x8.size() >= MAX_TABLES_8X8) {
+    const int limit = m_config->capacity().capacityOf(DeviceTable::Tables8x8Def);
+    if (m_rows8x8.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
-                             tr("The device supports at most %1 8x8 tables.").arg(MAX_TABLES_8X8));
+                             tr("The device supports at most %1 8x8 tables.").arg(limit));
         return;
     }
     const QStringList siblings = siblingOutputs(true, -1);

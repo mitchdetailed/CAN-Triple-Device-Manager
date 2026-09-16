@@ -604,10 +604,10 @@ void CountersDialog::rebuild()
 
 void CountersDialog::onAdd()
 {
-    if (m_rows.size() >= MAX_COUNTERS) {
+    const int limit = m_config->capacity().capacityOf(DeviceTable::Counters);
+    if (m_rows.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
-                             tr("The device supports at most %1 counters.")
-                                 .arg(MAX_COUNTERS));
+                             tr("The device supports at most %1 counters.").arg(limit));
         return;
     }
     CounterRowEditor editor(m_config, CounterRow(), livePatch(m_rows), this);

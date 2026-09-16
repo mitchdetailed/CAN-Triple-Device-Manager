@@ -318,6 +318,40 @@ bool readReadoutProtection(DeviceLink *link, ReadoutProtection *out, QString *er
     return true;
 }
 
+bool readCapacity(DeviceLink *link, DeviceCapacity *out, QString *error)
+{
+    if (!link || !out)
+        return false;
+    *out = DeviceCapacity{};
+    QByteArray resp;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_GET_CAPACITY, QByteArray(), &resp, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        if (unsupported(code)) {
+            if (error)
+                error->clear();
+            return true; // older firmware: it holds what this build always assumed
+        }
+        return false;
+    }
+    if (!parseCapacityReport(resp, out)) {
+        if (error) {
+            // Two ways to be unreadable, wanting different sentences: a format
+            // this build predates is a Manager update, a short reply is a
+            // link or firmware fault.
+            const bool newerFormat = !resp.isEmpty() && quint8(resp[0]) != CAPACITY_REPORT_FORMAT;
+            *error = newerFormat
+                         ? QStringLiteral("The device reports its capacity in a format (%1) this "
+                                          "version of the Device Manager cannot read. Update the "
+                                          "Device Manager.")
+                               .arg(quint8(resp[0]))
+                         : QStringLiteral("The device returned a malformed capacity report.");
+        }
+        return false;
+    }
+    return true;
+}
+
 bool readAccessState(DeviceLink *link, AccessState *out, QString *error)
 {
     if (!link || !out)

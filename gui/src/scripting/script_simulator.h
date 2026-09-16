@@ -17,6 +17,8 @@
 #include <QString>
 #include <QVector>
 
+#include "../protocol/wire_structs.h"
+
 namespace ct {
 
 class ScriptSimulator
@@ -42,8 +44,12 @@ public:
     ~ScriptSimulator();
 
     // Load compiled bytecode. Returns the script_verify() code; SCRIPT_OK means
-    // ready to run. Clears all signal and state values.
-    quint8 load(const QByteArray &image);
+    // ready to run. Clears all signal and state values. `signalSlots` is the
+    // channel table the script was compiled against — the target firmware's
+    // Signals capacity — and sizes the simulated table to match, so a script
+    // built for a variant with more channels than this build's constant runs
+    // here exactly as it will there. The default is the built-in number.
+    quint8 load(const QByteArray &image, int signalSlots = MAX_SIGNALS);
 
     // Seed an input before running. Channels the script writes will be
     // overwritten by it; channels it only reads keep what is set here, which is
@@ -65,6 +71,7 @@ public:
 private:
     int m_tick = 0;
     bool m_loaded = false;
+    int m_signalSlots = MAX_SIGNALS; // the table size the image was loaded with
     QByteArray m_image;   // kept alive: the VM holds pointers into it
 };
 

@@ -562,10 +562,10 @@ void IntegratorsDialog::rebuild()
 
 void IntegratorsDialog::onAdd()
 {
-    if (m_rows.size() >= MAX_INTEGRATORS) {
+    const int limit = m_config->capacity().capacityOf(DeviceTable::Integrators);
+    if (m_rows.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
-                             tr("The device supports at most %1 integrators.")
-                                 .arg(MAX_INTEGRATORS));
+                             tr("The device supports at most %1 integrators.").arg(limit));
         return;
     }
     IntegratorRowEditor editor(m_config, IntegratorRow(), livePatch(m_rows), this);
@@ -607,7 +607,8 @@ void IntegratorsDialog::updateButtons()
     const bool hasSelection = !m_tree->selectedItems().isEmpty();
     m_changeButton->setEnabled(hasSelection);
     m_removeButton->setEnabled(hasSelection);
-    m_addButton->setEnabled(m_rows.size() < MAX_INTEGRATORS);
+    m_addButton->setEnabled(m_rows.size()
+                            < m_config->capacity().capacityOf(DeviceTable::Integrators));
 }
 
 } // namespace ct

@@ -4,6 +4,7 @@ To import messages and signals from an industry-standard .dbc file, open **Conne
 
 ## The import dialog
 - **Import into :** the target bus — preset to the tab you clicked from, changeable here.
+- **Import as :** **Receive Messages** (the default) or **Transmit Messages**. Receive creates a channel for every ticked signal; transmit sends channels that already exist, and changes what the columns are for — see [Importing as transmit messages](#transmit). A **Rate :** box appears beside it in transmit mode.
 - **Filter :** type to filter messages and signals by name.
 - The tree has columns **Message / Signal**, **Channel Type**, **Details** and **Unit**. Tick the signals to import; ticking a message row ticks all of its signals, and a partially ticked message shows a tristate check.
 - **Messages are listed by arbitration id, lowest first**, whatever order they appear in the file — a DBC has no required message order, and the tool that wrote it may have used none you would recognise. Sorting them makes the list match a spec sheet and puts related ids together. The sections the import creates are made in that same order. Note that the id sorted on is the arbitration id itself, so an extended-frame message sorts by its 29-bit id and not after every standard one.
@@ -14,7 +15,7 @@ To import messages and signals from an industry-standard .dbc file, open **Conne
 
 ## What an import creates
 
-Each message with at least one ticked signal becomes a **Receive Message** section on the target bus, and each ticked signal becomes a channel row plus a User Channel in the catalogue. The section takes the message's CAN ID, extended flag and DLC; a DLC over 8 bytes marks the section CAN FD. Sections are appended to the bus — import never overwrites existing sections, and channel names are never allowed to clobber existing channels.
+As receive messages (the default), each message with at least one ticked signal becomes a **Receive Message** section on the target bus, and each ticked signal becomes a channel row plus a User Channel in the catalogue. The section takes the message's CAN ID, extended flag and DLC; a DLC over 8 bytes marks the section CAN FD. Sections are appended to the bus — import never overwrites existing sections, and channel names are never allowed to clobber existing channels.
 
 If any signal had to be renamed or skipped, a summary box reports "Imported N message(s) with M note(s)" — the full list is under **Show Details**.
 
@@ -56,6 +57,26 @@ A DBC message with a multiplexor imports as a **compound** section: each multipl
 **The multiplexor itself is not imported as a channel**, and its row in the list has no tick box. Its bits *are* the identifier's selector: the device writes that selector into the frame after the channels, so a channel on the same bits would not share them, it would be overwritten by them — and the section editor refuses to save a message in that state. The row is still shown, so you can see which signal picks the variant, and the Details column says what becomes of it.
 
 > **Warning:** The device matches selectors through a 16-bit window, so a multiplexor field must be 1–16 bits wide, and a Motorola multiplexor must not span multiple bytes. A multiplexor value that cannot be expressed is skipped with a note and its channels are not imported; a message whose multiplexed signals all fail imports as a plain message carrying only the non-multiplexed channels.
+
+<a id="transmit"></a>
+
+## Importing as transmit messages
+
+A .dbc written from the far side of the wire — what a dash, a cluster or a gearbox controller *expects to receive* — is, from this device's side, a list of messages to send. Set **Import as :** to **Transmit Messages** and the same tree imports the other way round: each message with a ticked signal becomes a **Transmit Message** section, and each ticked signal becomes a row that sends an existing channel.
+- **Nothing is created.** A transmit row reads a channel that something else already produces — a receive message, a calculation, a constant — so the import creates no channels, and the name, type and unit columns give way to the one that matters here: **Send Channel**.
+- **Send Channel** is prefilled wherever the catalogue already has a channel of the signal's name (underscores read as spaces, case ignored) — the case when the file was written against this document's channels, or when the same file has already been imported as receive messages. Anything else reads **(pick one)** in the warning colour: **double-click the cell** to choose the channel through the ordinary channel picker. Picking a channel ticks the signal.
+- A ticked signal with no Send Channel is **skipped**, with a note — a transmit field has no way to carry "nothing". The count beside Select All says how many ticked signals are in that state, and Import stays disabled until at least one ticked signal has a channel.
+- **DBC Unit** shows what the file said, for matching by eye. Nothing converts the numbers: the channel is sent through the signal's scaling as it stands.
+
+### Scaling: the offset changes sign
+
+A DBC scales one way — physical = raw × factor + offset, so a sender computes raw = (physical − offset) ÷ factor — while a transmit row in this application **adds** its Offset before dividing (see [Communications](communications.md)). The import therefore negates the file's offset. A coolant signal written `(0.1,-40)` imports with Bit Resolution 0.1 and Offset **+40**, so 25 °C goes out as (25 + 40) ÷ 0.1 = 650 — the count a receiver decoding with the same DBC turns back into 25. The factor is unchanged, and so is everything else about the row: start bit, length, signedness and byte order import exactly as they do for receive.
+
+### Rate
+
+Every imported transmit message is **Cyclic**. A message whose file states a cycle time (a `BA_ "GenMsgCycleTime"` line, or the file's `BA_DEF_DEF_` default) keeps that period exactly, with the nearest whole rate shown in the section editor; every other message takes the **Rate :** chosen beside the mode. The device transmits no faster than every 5 ms, so a cycle time under that is set to 200 Hz with a note. Triggered transmission is a choice about this document's User Conditions, which a .dbc knows nothing about, so it is left to the section editor.
+
+Multiplexed messages import as compound transmit sections the same way as for receive: each multiplexor value becomes an identifier the device writes into the frame, and the multiplexor itself is never a row.
 
 ## After the import
 

@@ -2,7 +2,9 @@
 // writes + optional read-back verify) and Get Configuration (chunked reads).
 #pragma once
 
+#include <QList>
 #include <QObject>
+#include <QPair>
 
 #include <optional>
 #include <type_traits>
@@ -56,8 +58,18 @@ public:
                                 const QString &configName = {}, bool resetAfter = false,
                                 QObject *parent = nullptr,
                                 const device_session::AccessState &deviceAccess = {});
-    // Reads all four tables from the device. Deletes itself when finished.
-    static ConfigTransfer *get(DeviceLink *link, QObject *parent = nullptr);
+    // Reads every table from the device. Deletes itself when finished.
+    //
+    // `capacity` is what the unit holds — its CMD_GET_CAPACITY report, or
+    // builtIn() for firmware that cannot say — and it is the RANGE each table
+    // is read over. A variant holding 40 CRC8 rules is read to 40, a table the
+    // firmware lacks (capacity 0) is not asked for at all, and the tables
+    // handed back carry the same capacity so mapFromDevice can size the
+    // document like the unit. Reading a fixed range instead would silently
+    // drop everything past this build's constants, which is the failure the
+    // report exists to end.
+    static ConfigTransfer *get(DeviceLink *link, QObject *parent = nullptr,
+                               const DeviceCapacity &capacity = DeviceCapacity::builtIn());
 
     // The write half of a Send as a list of frames, for a caller that SEALS
     // them rather than sending them (package_builder.cpp): no ping, no verify
@@ -76,6 +88,11 @@ public:
     // disagree, instead of the disagreement shipping and being found on
     // hardware — which has now happened for six read commands.
     static QString planClassificationFaultForTest(bool getPlan);
+
+    // Test seam: the Get plan's requests — (command, payload) in order — for a
+    // given capacity, so a test can hold the ranges read against the numbers
+    // a unit reported without a link or a device.
+    static QList<QPair<quint8, QByteArray>> planGetRequestsForTest(const DeviceCapacity &capacity);
 
     void cancel();
 
@@ -166,7 +183,7 @@ private:
                         const QVector<ControlCanPayload> &busSetups, bool saveToFlash,
                         std::optional<quint16> configVersion, const QString &configName,
                         bool resetAfter);
-    void buildGetSteps();
+    void buildGetSteps(const DeviceCapacity &capacity);
     // Runs over the freshly built plan; a non-empty m_buildFault stops the
     // transfer before its first request, with the fix in the message. See the
     // definition for the six-entry history this guard answers to.

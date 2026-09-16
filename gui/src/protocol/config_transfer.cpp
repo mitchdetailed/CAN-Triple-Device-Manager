@@ -55,12 +55,16 @@ bool appendItems(QVector<T> &dst, const QByteArray &payload)
 // Chunk sizes for the transmit-CRC8 table, derived exactly the way the
 // WRITE_CHUNK_*/READ_CHUNK_* figures in wire_structs.h are. Writes: the
 // largest n with 4 + n*40 <= MAX_TX_PAYLOAD (496), which is 12 — 4 + 12*40 =
-// 484, and 13 would be 524. Reads: the whole table in one request, since
-// 4 + 20*40 = 804 sits well inside the ~2030-byte response cap that bounds
-// every READ_CHUNK_* — the same "capped by the table's own capacity" rule the
-// counters and relays use.
+// 484, and 13 would be 524. Reads: the largest n with 4 + n*40 inside the
+// 2030-byte response cap that bounds every READ_CHUNK_*, which is 50 (2004;
+// 51 would be 2044). This used to be MAX_CRC8_MESSAGES — "the whole table in
+// one request" — which was true only while the table was 20 on every unit;
+// the Get plan now reads to whatever the unit reports, and a chunk that
+// happened to equal one firmware's capacity would read a larger one short.
 constexpr int kWriteChunkCrc8 = 12;
-constexpr int kReadChunkCrc8 = MAX_CRC8_MESSAGES;
+constexpr int kReadChunkCrc8 = 50;
+static_assert(4 + kReadChunkCrc8 * int(sizeof(Crc8Config)) <= 2030,
+              "CRC8 read chunk must fit the response cap");
 static_assert(4 + kWriteChunkCrc8 * int(sizeof(Crc8Config)) <= MAX_TX_PAYLOAD,
               "CRC8 write chunk must fit the payload cap");
 
@@ -110,11 +114,12 @@ ConfigTransfer *ConfigTransfer::send(DeviceLink *link, const DeviceTables &table
     return t;
 }
 
-ConfigTransfer *ConfigTransfer::get(DeviceLink *link, QObject *parent)
+ConfigTransfer *ConfigTransfer::get(DeviceLink *link, QObject *parent,
+                                    const DeviceCapacity &capacity)
 {
     auto *t = new ConfigTransfer(link, parent);
     t->m_isGet = true;
-    t->buildGetSteps();
+    t->buildGetSteps(capacity);
     QMetaObject::invokeMethod(t, &ConfigTransfer::runNext, Qt::QueuedConnection);
     return t;
 }
@@ -419,54 +424,65 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &tables, bool verify,
     validateReadClassification();
 }
 
-void ConfigTransfer::buildGetSteps()
+void ConfigTransfer::buildGetSteps(const DeviceCapacity &capacity)
 {
+    // The tables handed back carry the capacity they were read over, so the
+    // document a Get rebuilds is sized like the unit — see DeviceTables.
+    m_readTables.capacity = capacity;
+
     Step ping;
     ping.cmd = CMD_GET_STATUS;
     ping.stage = QStringLiteral("Checking device");
     m_steps.append(ping);
 
-    auto addReads = [&](quint8 cmd, int max, int chunk, int table, const QString &what) {
+    // Each table is read over the range the UNIT reports for it, in chunks
+    // sized by the response cap. A table the firmware lacks has capacity 0
+    // and gets no read at all — which is also what an older firmware's NACK
+    // on an optional read amounts to, so the two read the same downstream.
+    auto addReads = [&](quint8 cmd, DeviceTable table, int chunk, const QString &what) {
+        const int max = capacity.capacityOf(table);
         for (int i = 0; i < max; i += chunk) {
             const int count = qMin(chunk, max - i);
             Step s;
             s.cmd = cmd;
             s.payload = rangeHeader(quint16(i), quint16(count));
             s.stage = QStringLiteral("Reading %1 (%2/%3)").arg(what).arg(i + count).arg(max);
-            s.table = table;
+            s.table = int(table);
             m_steps.append(s);
         }
     };
-    addReads(CMD_READ_MSG_CFG, MAX_MESSAGES, READ_CHUNK_MESSAGES, 0, QStringLiteral("messages"));
-    addReads(CMD_READ_SIG_CFG, MAX_SIGNALS, READ_CHUNK_SIGNALS, 1, QStringLiteral("channels"));
-    addReads(CMD_READ_MATH_CFG, MAX_MATH_COMPUTATIONS, READ_CHUNK_MATH, 2, QStringLiteral("math"));
-    addReads(CMD_READ_COND_CFG, MAX_CONDITIONS, READ_CHUNK_CONDITIONS, 3,
+    addReads(CMD_READ_MSG_CFG, DeviceTable::Messages, READ_CHUNK_MESSAGES,
+             QStringLiteral("messages"));
+    addReads(CMD_READ_SIG_CFG, DeviceTable::Signals, READ_CHUNK_SIGNALS,
+             QStringLiteral("channels"));
+    addReads(CMD_READ_MATH_CFG, DeviceTable::Math, READ_CHUNK_MATH, QStringLiteral("math"));
+    addReads(CMD_READ_COND_CFG, DeviceTable::Conditions, READ_CHUNK_CONDITIONS,
              QStringLiteral("conditions"));
     // Older firmware NACKs the counter/timer/constant reads — tolerated, tables
     // stay empty.
     const int firstOptionalStep = m_steps.size();
-    addReads(CMD_READ_COUNTER_CFG, MAX_COUNTERS, READ_CHUNK_COUNTERS, 4,
+    addReads(CMD_READ_COUNTER_CFG, DeviceTable::Counters, READ_CHUNK_COUNTERS,
              QStringLiteral("counters"));
-    addReads(CMD_READ_TIMER_CFG, MAX_TIMERS, READ_CHUNK_TIMERS, 5,
+    addReads(CMD_READ_TIMER_CFG, DeviceTable::Timers, READ_CHUNK_TIMERS,
              QStringLiteral("timers"));
-    addReads(CMD_READ_CONST_CFG, MAX_CONSTANTS, READ_CHUNK_CONSTANTS, 6,
+    addReads(CMD_READ_CONST_CFG, DeviceTable::Constants, READ_CHUNK_CONSTANTS,
              QStringLiteral("constants"));
-    addReads(CMD_READ_RELAY_CFG, MAX_RELAYS, READ_CHUNK_RELAYS, 7,
+    addReads(CMD_READ_RELAY_CFG, DeviceTable::Relays, READ_CHUNK_RELAYS,
              QStringLiteral("relays"));
-    addReads(CMD_READ_TABLE2X16_DEF, MAX_TABLES_2X16, READ_CHUNK_TABLES_2X16_DEF, 8,
+    addReads(CMD_READ_TABLE2X16_DEF, DeviceTable::Tables2x16Def, READ_CHUNK_TABLES_2X16_DEF,
              QStringLiteral("2x16 tables"));
-    addReads(CMD_READ_TABLE2X16_OUT, MAX_TABLES_2X16, READ_CHUNK_TABLES_2X16_OUT, 9,
+    addReads(CMD_READ_TABLE2X16_OUT, DeviceTable::Tables2x16Out, READ_CHUNK_TABLES_2X16_OUT,
              QStringLiteral("2x16 table values"));
     // The 8x8 pair took the retired 4x4's slots 10 and 11, which pushed the
     // integrators to 12 — see the table-index note in runNext(). The row table
-    // is read over its FLAT range 0..MAX_TABLE_8X8_ROWS-1, not per table: the
-    // device stores it as one 64-entry table and the t*8 grouping is the
-    // reader's arithmetic, not the wire's.
-    addReads(CMD_READ_TABLE8X8_DEF, MAX_TABLES_8X8, READ_CHUNK_TABLES_8X8_DEF, 10,
+    // is read over its FLAT range (the unit's row capacity, 64 on every
+    // firmware so far), not per table: the device stores it as one table and
+    // the t*8 grouping is the reader's arithmetic, not the wire's.
+    addReads(CMD_READ_TABLE8X8_DEF, DeviceTable::Tables8x8Def, READ_CHUNK_TABLES_8X8_DEF,
              QStringLiteral("8x8 tables"));
-    addReads(CMD_READ_TABLE8X8_ROW, MAX_TABLE_8X8_ROWS, READ_CHUNK_TABLES_8X8_ROW, 11,
+    addReads(CMD_READ_TABLE8X8_ROW, DeviceTable::Tables8x8Row, READ_CHUNK_TABLES_8X8_ROW,
              QStringLiteral("8x8 table values"));
-    addReads(CMD_READ_INTEG_CFG, MAX_INTEGRATORS, READ_CHUNK_INTEGRATORS, 12,
+    addReads(CMD_READ_INTEG_CFG, DeviceTable::Integrators, READ_CHUNK_INTEGRATORS,
              QStringLiteral("integrators"));
     // The script, table 13. Read back as BYTECODE, which is not the source and
     // cannot be turned into it — so a Get still cannot recover an EDITABLE
@@ -484,14 +500,12 @@ void ConfigTransfer::buildGetSteps()
     // main_window is byte-for-byte against what a Send would produce, and a
     // device whose script differs from the document's is exactly the difference
     // that comparison exists to report.
-    addReads(CMD_READ_SCRIPT, MAX_SCRIPT_CHUNKS, READ_CHUNK_SCRIPT, 13,
-             QStringLiteral("script"));
+    addReads(CMD_READ_SCRIPT, DeviceTable::Script, READ_CHUNK_SCRIPT, QStringLiteral("script"));
     // Transmit-CRC8 rules, table 14 (the firmware's ENGINE_TABLE_CRC8).
     // Optional like everything from the counters on: firmware without the
     // table NACKs ERR_INVALID_CMD, and the honest reading of that is "this
     // device stamps no checksums", not a failed Get.
-    addReads(CMD_READ_CRC8_CFG, MAX_CRC8_MESSAGES, kReadChunkCrc8, 14,
-             QStringLiteral("CRC8 rules"));
+    addReads(CMD_READ_CRC8_CFG, DeviceTable::Crc8, kReadChunkCrc8, QStringLiteral("CRC8 rules"));
     // Configuration name (v7+; old firmware NACKs — tolerated).
     {
         Step s;
@@ -588,7 +602,7 @@ QString ConfigTransfer::planClassificationFaultForTest(bool getPlan)
 {
     ConfigTransfer t(nullptr, nullptr);
     if (getPlan) {
-        t.buildGetSteps();
+        t.buildGetSteps(DeviceCapacity::builtIn());
     } else {
         // One record per table, because the verify phase only enqueues steps
         // for non-empty tables — an empty container would silently exempt its
@@ -613,6 +627,17 @@ QString ConfigTransfer::planClassificationFaultForTest(bool getPlan)
                          /*configVersion=*/std::nullopt, {}, /*resetAfter=*/false);
     }
     return t.m_buildFault;
+}
+
+QList<QPair<quint8, QByteArray>>
+ConfigTransfer::planGetRequestsForTest(const DeviceCapacity &capacity)
+{
+    ConfigTransfer t(nullptr, nullptr);
+    t.buildGetSteps(capacity);
+    QList<QPair<quint8, QByteArray>> out;
+    for (const Step &s : std::as_const(t.m_steps))
+        out.append(qMakePair(s.cmd, s.payload));
+    return out;
 }
 
 void ConfigTransfer::runNext()

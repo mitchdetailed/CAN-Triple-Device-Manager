@@ -166,6 +166,18 @@ constexpr uint8_t CMD_SEAL_END   = 0x4E;
 // (0 off, 1 the flash cannot be read over the debug port, 2 permanent).
 // A licensed unit sets level 1 itself at boot.
 constexpr uint8_t CMD_GET_PROTECTION = 0x4F;
+// v24 (firmware 1.0.10): the capacity report — how many of each table the
+// firmware holds and each table's record size, read off the unit instead of
+// assumed from the MAX_* constants below. The reply is a CapacityReportHeader
+// followed by table_count CapacityEntry records in DeviceTable order (all
+// three below). Ungated, fixed shape, no echo: it belongs in isReadResponse()
+// and NOT in echoesRequestRange(). The same bytes sit in a .ctf at
+// FW_CAPS_OFFSET (fw_image.h) behind FW_CAPS_MAGIC, so a host can ask a FILE
+// the same question — protocol/capacity.h parses both. Older firmware NACKs
+// ERR_INVALID_CMD, which reads as "the numbers this build always assumed"
+// (DeviceCapacity::builtIn()).
+constexpr uint8_t CMD_GET_CAPACITY = 0x50;
+constexpr uint8_t CAPACITY_REPORT_FORMAT = 1;
 
 constexpr int LICENSE_MANUFACTURER_LEN = 32;
 constexpr int LICENSE_MODEL_LEN        = 32;
@@ -383,6 +395,36 @@ constexpr int MAX_SCRIPT_CHUNKS     = 384;
 // The engine ticks at 100 Hz, so one step per tick is the ceiling — an
 // integrator cannot add more often than the evaluation pass runs.
 constexpr int INTEGRATOR_MAX_HZ     = 100;
+
+// The configuration tables as the device numbers them: the firmware's
+// EngineTable enum, which is also the order of its FLASH_TABLE_LIST and
+// therefore the order of the capacity report's entries. test_firmware_link
+// pins every value against the firmware's, because the index a report entry
+// sits at IS the table it describes — a slip would size the timer check from
+// the counter table. ConfigTransfer's per-step table indices are these same
+// numbers.
+enum class DeviceTable : uint8_t {
+    Messages = 0,
+    Signals = 1,
+    Math = 2,
+    Conditions = 3,
+    Counters = 4,
+    Timers = 5,
+    Constants = 6,
+    Relays = 7,
+    Tables2x16Def = 8,
+    Tables2x16Out = 9,
+    Tables8x8Def = 10,
+    Tables8x8Row = 11,
+    Integrators = 12,
+    Script = 13,
+    Crc8 = 14,
+};
+// FLASH_NUM_TABLES on the device. A newer firmware may report MORE entries
+// than this (an appended table); a host indexes by DeviceTable and ignores the
+// rest, so this is how many tables THIS build understands, not a ceiling on
+// what a reply may carry.
+constexpr int DEVICE_TABLE_COUNT = 15;
 
 constexpr uint8_t START_MARKER = 0x55;
 
@@ -1365,6 +1407,20 @@ struct FwUpdateStatus {
     uint8_t  reserved[3];
 };
 
+// CMD_GET_CAPACITY reply: this header, then table_count CapacityEntry records.
+// Self-describing — read table_count entries, never DEVICE_TABLE_COUNT — and
+// parsed with >= on length, like ScriptStatus: a .ctf carries the same bytes
+// followed by code. See protocol/capacity.h for the parser.
+struct CapacityReportHeader {
+    uint8_t  format;        // CAPACITY_REPORT_FORMAT; anything else = cannot read
+    uint8_t  table_count;   // entries that follow
+    uint16_t store_version; // FLASH_STORE_VERSION of the layout described
+};
+struct CapacityEntry {
+    uint16_t capacity;      // records the table holds
+    uint16_t item_size;     // bytes per record — the wire record size
+};
+
 // The FLASH_STORE_VERSION this build of the configurator speaks. Must equal the
 // firmware's; test_firmware_link asserts the two are the same, because it is the
 // one place that sees both headers.
@@ -1411,7 +1467,16 @@ struct FwUpdateStatus {
 // ConditionTerm shrank 10 -> 8 to pay for it. Both store hazards at once —
 // the record size changed AND every table after conditions shifted — so a
 // v10 image would be misread twice over. v10 was built but never released.
-constexpr uint16_t EXPECTED_STORE_VERSION = 18;
+//
+// 19: the LAYOUT IDENTITY (firmware 1.0.11). The configuration header gained
+// a CRC32 over the capacity report's entries, so a firmware refuses an image
+// written by another VARIANT of the same version — the same fifteen tables
+// laid out at different offsets — before reading a record. The field moved
+// the header's CRC span, hence the bump. From here on two capacities with
+// the same store version may still be different layouts: compare reports
+// (DeviceCapacity::sameLayout), never versions alone, when asking whether a
+// stored configuration survives an update.
+constexpr uint16_t EXPECTED_STORE_VERSION = 19;
 
 #pragma pack(pop)
 
@@ -1548,6 +1613,8 @@ static_assert(sizeof(FwUpdateBeginPayload) == 16, "must match firmware");
 static_assert(sizeof(FwUpdateStatus) == 32, "must match firmware");
 static_assert(sizeof(ScriptChunk) == 64, "must match firmware");
 static_assert(sizeof(ScriptStatus) == 29, "must match firmware");
+static_assert(sizeof(CapacityReportHeader) == 4, "must match firmware");
+static_assert(sizeof(CapacityEntry) == 4, "must match firmware");
 
 // Host->device wire frame limit. This was 127 for years because the firmware's
 // v1 UART RX DMA mangled bursts of 128 bytes or more (FIRMWARE-NOTES.md #5).

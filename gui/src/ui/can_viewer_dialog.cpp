@@ -30,7 +30,7 @@
 
 #include <cstring>
 
-#include "../protocol/asc_log.h"
+#include "../protocol/can_log_export.h"
 
 namespace ct {
 
@@ -732,14 +732,32 @@ void CanViewerDialog::onSaveClicked()
         return;
     }
 
-    const QString path = QFileDialog::getSaveFileName(
-        this, tr("Save CAN Log"), QStringLiteral("canviewer.asc"),
-        tr("Vector ASCII log (*.asc);;All files (*)"));
+    // Three formats, chosen by the file type in the dialog — or by the
+    // extension typed, which wins when it names one (canLogFormatFor). The
+    // type picked last time is offered first the next time, for as long as
+    // this dialog is open.
+    QString selectedFilter = m_lastLogFilter.isEmpty()
+                                 ? canLogFormatInfo(CanLogFormat::VectorAsc).filter()
+                                 : m_lastLogFilter;
+    // One clock reading names the file and stamps its header, so the two
+    // agree to the minute.
+    const QDateTime now = QDateTime::currentDateTime();
+    const QString suggested =
+        canLogSuggestedName(canLogFormatFor(selectedFilter, QString()), now);
+    QString path = QFileDialog::getSaveFileName(this, tr("Save CAN Log"), suggested,
+                                                canLogFilterString(), &selectedFilter);
     if (path.isEmpty())
         return;
+    m_lastLogFilter = selectedFilter;
+    const CanLogFormat format = canLogFormatFor(selectedFilter, path);
+    if (QFileInfo(path).suffix().isEmpty())
+        path += QLatin1Char('.') + canLogFormatInfo(format).suffix;
 
+    // Opened WITHOUT QIODevice::Text: each format brings its own line ending
+    // (CR/LF for .asc and .trc — what the .asc export always produced on
+    // Windows — and LF for a candump log, whose readers choke on a stray CR).
     QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    if (!file.open(QIODevice::WriteOnly)) {
         QMessageBox::warning(this, tr("Save to File"),
                              tr("Could not open '%1' for writing:\n%2")
                                  .arg(path, file.errorString()));
@@ -749,12 +767,16 @@ void CanViewerDialog::onSaveClicked()
     // Writing a large buffer (up to millions of lines) can take a while.
     QApplication::setOverrideCursor(Qt::WaitCursor);
     QTextStream out(&file);
-    out << ascHeader(QDateTime::currentDateTime());
+    const QString eol = canLogLineEnding(format);
+    QString header = canLogHeader(format, now);
+    header.replace(QLatin1Char('\n'), eol);
+    out << header;
     // Timestamps are relative to the first buffered frame so the log starts
     // near zero (the device reports absolute uptime milliseconds).
     const quint32 t0 = m_frames.front().timestamp_ms;
+    quint64 index = 0;
     for (const MonitorStreamPayload &f : m_frames)
-        out << ascFrameLine(f, t0) << '\n';
+        out << canLogFrameLine(format, f, t0, ++index) << eol;
     out.flush();
     QApplication::restoreOverrideCursor();
 

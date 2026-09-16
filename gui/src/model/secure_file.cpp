@@ -445,6 +445,15 @@ QJsonObject SecurePackagePolicy::toJson() const
         o[QStringLiteral("keyProofMac")] = toHex(keyProofMac);
     }
     o[QStringLiteral("configVersion")] = int(configVersion);
+    // What the stream writes, so the relay can hold it against the unit. Before
+    // the keysWithheld return below: a format-3 package is exactly the kind
+    // that needs it.
+    if (!tableCounts.isEmpty()) {
+        QJsonArray counts;
+        for (int n : tableCounts)
+            counts.append(n);
+        o[QStringLiteral("tableCounts")] = counts;
+    }
     // Written only when selected, so "leave this password alone" and "clear it"
     // are different documents rather than the same one read two ways. The value
     // is the DERIVED key in hex — see the struct — and kNoAccessKey means clear.
@@ -487,6 +496,8 @@ SecurePackagePolicy SecurePackagePolicy::fromJson(const QJsonObject &o)
     p.keyProofMac = QByteArray::fromHex(o[QStringLiteral("keyProofMac")].toString().toLatin1());
     p.key = QByteArray::fromHex(o[QStringLiteral("key")].toString().toLatin1());
     p.configVersion = quint16(o[QStringLiteral("configVersion")].toInt());
+    for (const QJsonValue &v : o[QStringLiteral("tableCounts")].toArray())
+        p.tableCounts.append(v.toInt());
     // contains(), not "is the key non-zero": a zero key means CLEAR it, which is
     // a real instruction and must survive the round trip.
     const auto keyAt = [&o](const QString &name) {
@@ -557,6 +568,13 @@ InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,
             v.mismatches.append(
                 {QStringLiteral("hwSerial"), QString::number(policy.matchSerial), have});
     }
+
+    // Does the unit hold what the stream writes? Judged only when both sides
+    // can say: a package built before the capacity report recorded nothing,
+    // and a unit whose capacity could not be read is not guessed at. Neither
+    // is a mismatch — nothing was asked for that the unit failed to be.
+    if (!policy.tableCounts.isEmpty() && device.capacityKnown)
+        v.shortfalls = countsExceeding(policy.tableCounts, device.capacity);
     return v;
 }
 

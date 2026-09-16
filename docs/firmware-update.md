@@ -41,6 +41,16 @@ If the backup *fails*, the update does not start. Continuing would destroy the v
 <td>The device will start up with no configuration. Keep the backup ticked; the
 program will offer to restore it afterwards.</td></tr>
 
+<tr><td>This image lays the configuration out differently from the firmware the
+device is running</td>
+<td>The image is a different <i>variant</i> of the firmware — the same
+version with some tables sized differently (the message lists which: "CRC8
+rules: 20 → 40"). The device stores a configuration only for the layout that
+wrote it, so it will start up with no configuration exactly as for a format
+change. Keep the backup ticked. After the update, open the document and set
+<b>File → Target Firmware…</b> to the connected device before
+sending, so the document is sized for what the unit now holds.</td></tr>
+
 <tr><td>This image is OLDER than the firmware the device is running</td>
 <td>Going backwards is allowed, but rarely intended. Check you picked the right
 file.</td></tr>

@@ -49,6 +49,10 @@ struct DbcMessage {
     QString name;
     int dlc = 8;
     QString transmitter;
+    // BA_ "GenMsgCycleTime": how often the message is sent, in milliseconds —
+    // the message's own line, else the file's BA_DEF_DEF_ default, else 0 for
+    // "not stated". Only a transmit import reads it.
+    int cycleTimeMs = 0;
     QList<DbcSignal> signalList; // "signals" is a Qt keyword macro
 
     bool hasMultiplexing() const;
@@ -92,6 +96,25 @@ QString channelNameFromDbcSignal(const QString &signalName);
 
 CommsChannelRow rowFromDbcSignal(const DbcSignal &sig, const QString &channelName);
 Channel channelFromDbcSignal(const DbcSignal &sig, const QString &channelName);
+
+// The same signal as a TRANSMIT row, sending `channelName`. One thing differs
+// from the receive row and it is the sign of the offset. A DBC scales one way
+// — physical = raw × factor + offset, so a sender computes raw = (physical
+// − offset) ÷ factor — and this application's transmit row ADDS its Offset
+// before dividing: raw = (physical + Offset) ÷ Bit Resolution (see
+// CommsChannelRow). The file's offset therefore goes in negated. A coolant
+// signal written (0.1,-40) transmits 25 °C as (25 + 40) ÷ 0.1 = 650, which is
+// the count a receiver decoding with the same DBC turns back into 25. The
+// factor is unchanged, and so is everything else about the row.
+CommsChannelRow transmitRowFromDbcSignal(const DbcSignal &sig, const QString &channelName);
+
+// A DBC cycle time as a section's transmit timing. The period is carried
+// exactly (CommsSection::transmitPeriodMs is authoritative when set, as after a
+// Get) and the rate is the nearest whole hertz for the editor to show, both
+// held to what the device honours: no faster than 5 ms (200 Hz), and a rate no
+// slower than 1 Hz, though the period itself may run to 65535 ms. A cycle time
+// of 0 means "not stated" and leaves both outputs untouched.
+void transmitTimingFromCycleTime(int cycleTimeMs, int *rateHz, int *periodMs);
 
 // The physical span an INTEGER-CODED signal can carry: both raw endpoints
 // through physical = raw × factor + offset (a negative factor flips the

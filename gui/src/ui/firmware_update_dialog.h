@@ -5,19 +5,22 @@
 // wait for the device to return, and report what the bootloader made of it.
 //
 // The backup is not decoration. A firmware update that changes
-// FLASH_STORE_VERSION makes the stored configuration unreadable, and the
-// device comes back blank with no way to recover it from the device — the
-// bytes are still in flash but nothing can interpret them. Reading the
-// configuration out BEFORE the update is the only moment that data can be
-// saved, so this dialog does it by default and offers to send it back
-// afterwards.
+// FLASH_STORE_VERSION — or, since firmware 1.0.11, that lays the tables out
+// differently at the same version (a different VARIANT) — makes the stored
+// configuration unreadable, and the device comes back blank with no way to
+// recover it from the device — the bytes are still in flash but nothing can
+// interpret them. Reading the configuration out BEFORE the update is the only
+// moment that data can be saved, so this dialog does it by default and offers
+// to send it back afterwards.
 #pragma once
 
 #include <QDialog>
+#include <QStringList>
 
 #include <functional>
 #include <optional>
 
+#include "../protocol/capacity.h"
 #include "../protocol/device_link.h"
 #include "../protocol/firmware_image.h"
 #include "../protocol/firmware_update.h"
@@ -98,12 +101,23 @@ private:
     // backup back. Only called when the device really did come back empty.
     void offerConfigurationRestore(const QString &backupPath);
 
+    // Why the stored configuration will NOT survive installing m_image on this
+    // unit, one line per difference — a store-version change, or a table the
+    // image lays out differently (a variant: "CRC8 rules: 20 → 40"). Empty
+    // when it survives, or when neither side can say more than its version
+    // and the versions agree. The one predicate behind the warning, the
+    // confirmation and the post-update wording, so they cannot disagree.
+    QStringList layoutChanges() const;
+
     DeviceLink *m_link;
     FirmwareUpdater m_updater;
     ReproveFn m_reproveSend;
 
     std::optional<FirmwareImage> m_image;
     FwUpdateStatus m_status {};
+    // The unit's capacity report, read with the status. nullopt when the
+    // firmware predates the report (then its version is all it can say).
+    std::optional<DeviceCapacity> m_deviceCapacity;
     bool m_statusValid = false;
     bool m_busy = false;            // an update is running; dismissal is blocked
     bool m_firstShow = true;        // defer the initial device read to showEvent

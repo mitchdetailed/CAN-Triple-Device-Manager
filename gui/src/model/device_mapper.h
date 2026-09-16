@@ -8,6 +8,7 @@
 #include <QStringList>
 #include <QVector>
 
+#include "../protocol/capacity.h"
 #include "../protocol/wire_structs.h"
 #include "comms_types.h"
 
@@ -16,6 +17,14 @@ namespace ct {
 class Configuration;
 
 struct DeviceTables {
+    // The firmware capacity these tables are sized against. mapToDevice fills
+    // it from the document (every "table is full" below is judged against it),
+    // a Get fills it with the unit's report (the range each table was read
+    // over), and mapFromDevice hands it on to the document it rebuilds. It
+    // travels WITH the tables because a table's size means nothing without
+    // the ceiling it was checked against: 25 CRC8 rules is a full table on one
+    // firmware and a comfortable one on another.
+    DeviceCapacity capacity = DeviceCapacity::builtIn();
     QVector<CanMessageConfig> messages; // receive AND transmit (direction is a flag)
     QVector<CanSignalConfig> signalConfigs;
     QVector<MathConfig> math;
@@ -101,6 +110,22 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config,
                    QStringList *notes = nullptr,
                    const QVector<ControlCanPayload> &busSetup = {});
 
+// Records per table, indexed by DeviceTable — the sizes a Send writes. A
+// sealed package records these in its policy so the unit can be checked
+// against a stream nobody but the device can read.
+QVector<int> tableCountsOf(const DeviceTables &tables);
+
+// Which of these tables a unit of capacity `device` cannot hold, one sentence
+// each ("40 CRC8 rules, but this device holds 20"); empty when everything
+// fits. The mapper sized the tables against the DOCUMENT's capacity, and the
+// unit on the cable may be a smaller variant — or the document may have come
+// from a larger one — so a Send asks this before CLEAR_CONFIG rather than
+// finding out from an ERR_OUT_OF_BOUNDS half way through, with the unit
+// already erased. Tables the device lacks entirely (capacity 0) are reported
+// only when the configuration actually uses them. countsExceeding
+// (capacity.h) over tableCountsOf().
+QStringList tablesExceeding(const DeviceTables &tables, const DeviceCapacity &device);
+
 // ---- The device script, as an image ---------------------------------------
 //
 // A retained script image is bytes off a wire that are about to be written back
@@ -114,8 +139,11 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config,
 // firmware's own verifier, byte for byte the function the unit runs before it
 // will execute a stored script — rather than a host-side opinion about the
 // format, so a yes here is the unit's yes. *reason, when given, gets the
-// verifier's verdict in words.
-bool validateScriptImage(const QByteArray &image, QString *reason = nullptr);
+// verifier's verdict in words. `signalSlots` is the channel table the script
+// may index — the unit's, when the caller knows which unit; this build's
+// ceiling otherwise.
+bool validateScriptImage(const QByteArray &image, QString *reason = nullptr,
+                         int signalSlots = MAX_SIGNALS);
 
 // One of the verifier's verdicts (SCRIPT_OK, SCRIPT_ERR_*) in words. Shared so
 // that a refusal reads the same wherever it surfaces — the Get note, the Send
@@ -138,7 +166,8 @@ struct RetainedScript {
     bool present = false; // the device's script table holds something
     QString error;        // why `image` is empty although something was there
 };
-RetainedScript scriptImageFromChunks(const QVector<ScriptChunk> &chunks);
+RetainedScript scriptImageFromChunks(const QVector<ScriptChunk> &chunks,
+                                     int signalSlots = MAX_SIGNALS);
 
 // Helper shared with validation: computes the firmware extraction fields for
 // a row. Returns false (with reason) when the current firmware cannot express

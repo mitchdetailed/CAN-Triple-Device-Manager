@@ -13,7 +13,7 @@ running its configuration; the live windows simply stop updating.</td></tr>
 <tr><td>Send Secure Configuration…</td><td></td><td>Installs a sealed <code>.ct3s</code> package without opening or displaying it.</td></tr>
 <tr><td>Get Configuration</td><td></td><td>Reads the device's configuration back into the editor.</td></tr>
 <tr><td>Monitor Channels…</td><td>F3</td><td>Live channel values — see <a href="monitor.md">Monitoring Live Values</a>.</td></tr>
-<tr><td>CAN Viewer…</td><td>F4</td><td>Raw frame monitor and inject-frame form, with Vector <code>.asc</code> export.</td></tr>
+<tr><td>CAN Viewer…</td><td>F4</td><td>Raw frame monitor and inject-frame form, with Vector <code>.asc</code>, SocketCAN <code>.log</code> and PEAK <code>.trc</code> export.</td></tr>
 <tr><td>Reset Device</td><td></td><td>Reboots the device; it reloads its saved configuration.</td></tr>
 <tr><td>Device Status…</td><td></td><td>Uptime, bus counters, identity, passwords and fleet information.</td></tr>
 <tr><td>Get Device Info…</td><td></td><td>The manufacturing record burned into the unit at build: maker, product, hardware version, serial and date, plus the chip's MCU ID.</td></tr>

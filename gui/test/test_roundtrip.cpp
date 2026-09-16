@@ -31,6 +31,7 @@
 #include "seal.h"
 #include "../src/model/validation.h"
 #include "../src/protocol/asc_log.h"
+#include "../src/protocol/can_log_export.h"
 #include "../src/protocol/cobs.h"
 #include "../src/protocol/config_transfer.h"
 #include "../src/protocol/crc16.h"
@@ -1061,6 +1062,122 @@ static MonitorStreamPayload makeFrame(quint32 ms, quint8 bus, quint8 dir, quint3
     for (uint8_t b : data)
         f.data[i++] = b;
     return f;
+}
+
+// The CAN Viewer's two newer export formats, beside the .asc one below, and
+// the format choice the save dialog makes.
+static void testCanLogExportFormats()
+{
+    // SocketCAN candump log: "(secs.usecs) canN id#data", seconds padded to
+    // ten digits, no separators in the data, the bus as the device numbers it.
+    const auto rx = makeFrame(54, 2, 0, 0xF3, 0x00,
+                              {0x7E, 0x0D, 0x00, 0x00, 0xF0, 0xC4, 0x00, 0xF0});
+    CHECK(socketCanLogLine(rx, 0) == QStringLiteral("(0000000000.054000) can2 0F3#7E0D0000F0C400F0"));
+    const auto tx = makeFrame(1500, 3, 1, 0x18DAF110, 0x01, {0x01, 0x02});
+    CHECK(socketCanLogLine(tx, 500) == QStringLiteral("(0000000001.000000) can3 18DAF110#0102"));
+    // No data: the line ends at the '#', as candump writes it.
+    const auto empty = makeFrame(0, 1, 0, 0x100, 0x00, {});
+    CHECK(socketCanLogLine(empty, 0) == QStringLiteral("(0000000000.000000) can1 100#"));
+    // A timestamp before the first frame (device reboot) clamps to zero.
+    CHECK(socketCanLogLine(rx, 1000).startsWith(QStringLiteral("(0000000000.000000)")));
+    // CAN FD: "##" then one hex digit of flags (bit 0 BRS, bit 1 ESI).
+    ct::MonitorStreamPayload fd{};
+    fd.timestamp_ms = 2000;
+    fd.bus_idx = 2;
+    fd.can_id = 0x1FF;
+    fd.data_len = 16;
+    for (int i = 0; i < 16; ++i)
+        fd.data[i] = quint8(i + 1);
+    fd.flags = ct::MONFLAG_FD | ct::MONFLAG_BRS;
+    CHECK(socketCanLogLine(fd, 0)
+          == QStringLiteral("(0000000002.000000) can2 1FF##1") + QStringLiteral("0102030405060708090A0B0C0D0E0F10"));
+    fd.flags = ct::MONFLAG_FD | ct::MONFLAG_ESI;
+    CHECK(socketCanLogLine(fd, 0).contains(QStringLiteral("1FF##2")));
+    fd.flags = ct::MONFLAG_FD | ct::MONFLAG_BRS | ct::MONFLAG_ESI;
+    CHECK(socketCanLogLine(fd, 0).contains(QStringLiteral("1FF##3")));
+    fd.flags = ct::MONFLAG_FD;
+    CHECK(socketCanLogLine(fd, 0).contains(QStringLiteral("1FF##0")));
+
+    // PEAK TRC 3.0 header: the version, the Delphi serial start time, the
+    // column declaration, and the start time spelled PEAK's way.
+    const QDateTime when(QDate(2025, 7, 8), QTime(7, 39, 10, 500));
+    const QString header = trcHeader(when);
+    CHECK(header.startsWith(QStringLiteral(";$FILEVERSION=3.0\n;$STARTTIME=")));
+    const qint64 days = QDate(1899, 12, 30).daysTo(QDate(2025, 7, 8));
+    CHECK(days == 45846);
+    const double serial = double(days) + ((7 * 3600 + 39 * 60 + 10) * 1000 + 500) / 86400000.0;
+    CHECK(header.contains(QStringLiteral(";$STARTTIME=") + QString::number(serial, 'f', 10)
+                          + QLatin1Char('\n')));
+    CHECK(header.contains(QStringLiteral(";$COLUMNS=N,O,T,B,I,d,R,L,D\n")));
+    CHECK(header.contains(QStringLiteral(";   Start time: 08.07.2025 07:39:10.500.000\n")));
+    // Every header line is a comment.
+    for (const QString &line : header.split(QLatin1Char('\n'), Qt::SkipEmptyParts))
+        CHECK(line.startsWith(QLatin1Char(';')));
+
+    // TRC records: index, offset in ms, type, bus, id, direction, '-', DLC, data.
+    CHECK(trcFrameLine(rx, 0, 1)
+          == QStringLiteral("       1         54.000 DT 2        0F3 Rx - 8    7E 0D 00 00 F0 C4 00 F0"));
+    CHECK(trcFrameLine(tx, 500, 2)
+          == QStringLiteral("       2       1000.000 DT 3   18DAF110 Tx - 2    01 02"));
+    CHECK(trcFrameLine(empty, 0, 3) == QStringLiteral("       3          0.000 DT 1        100 Rx - 0"));
+    // CAN FD types by flag, and the DLC code rather than the byte count.
+    fd.flags = ct::MONFLAG_FD | ct::MONFLAG_BRS;
+    QStringList tok = trcFrameLine(fd, 0, 4).split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    CHECK(tok.size() == 8 + 16);
+    CHECK(tok[0] == QStringLiteral("4"));
+    CHECK(tok[1] == QStringLiteral("2000.000"));
+    CHECK(tok[2] == QStringLiteral("FB"));
+    CHECK(tok[3] == QStringLiteral("2"));
+    CHECK(tok[4] == QStringLiteral("1FF"));
+    CHECK(tok[5] == QStringLiteral("Rx"));
+    CHECK(tok[6] == QStringLiteral("-"));
+    CHECK(tok[7] == QStringLiteral("10")); // 16 bytes -> DLC 10
+    CHECK(tok[8] == QStringLiteral("01") && tok[23] == QStringLiteral("10"));
+    fd.flags = ct::MONFLAG_FD | ct::MONFLAG_ESI;
+    CHECK(trcFrameLine(fd, 0, 5).split(QLatin1Char(' '), Qt::SkipEmptyParts)[2] == QStringLiteral("FE"));
+    fd.flags = ct::MONFLAG_FD | ct::MONFLAG_BRS | ct::MONFLAG_ESI;
+    CHECK(trcFrameLine(fd, 0, 6).split(QLatin1Char(' '), Qt::SkipEmptyParts)[2] == QStringLiteral("BI"));
+    fd.flags = ct::MONFLAG_FD;
+    CHECK(trcFrameLine(fd, 0, 7).split(QLatin1Char(' '), Qt::SkipEmptyParts)[2] == QStringLiteral("FD"));
+
+    // The dialog's choice: a typed extension wins, then the selected filter,
+    // then Vector ASCII.
+    const QString ascFilter = canLogFormatInfo(CanLogFormat::VectorAsc).filter();
+    const QString logFilter = canLogFormatInfo(CanLogFormat::SocketCanLog).filter();
+    const QString trcFilter = canLogFormatInfo(CanLogFormat::PeakTrc).filter();
+    CHECK(ascFilter == QStringLiteral("Vector ASCII log (*.asc)"));
+    CHECK(canLogFilterString().split(QStringLiteral(";;")).size() == 3);
+    CHECK(canLogFilterString().startsWith(ascFilter)); // Vector ASCII first, as before
+    CHECK(canLogFormatFor(QString(), QStringLiteral("x.log")) == CanLogFormat::SocketCanLog);
+    CHECK(canLogFormatFor(QString(), QStringLiteral("x.TRC")) == CanLogFormat::PeakTrc);
+    CHECK(canLogFormatFor(trcFilter, QStringLiteral("x")) == CanLogFormat::PeakTrc);
+    CHECK(canLogFormatFor(logFilter, QStringLiteral("x.asc")) == CanLogFormat::VectorAsc);
+    CHECK(canLogFormatFor(QString(), QStringLiteral("x.bin")) == CanLogFormat::VectorAsc);
+    CHECK(canLogFormatInfo(CanLogFormat::PeakTrc).suffix == QStringLiteral("trc"));
+
+    // The suggested file name: "Logged Msgs yyMMdd - HHmm" plus the extension
+    // of the type on offer.
+    const QDateTime named(QDate(2026, 9, 15), QTime(11, 27, 42));
+    CHECK(canLogSuggestedName(CanLogFormat::VectorAsc, named)
+          == QStringLiteral("Logged Msgs 260915 - 1127.asc"));
+    CHECK(canLogSuggestedName(CanLogFormat::SocketCanLog, named)
+          == QStringLiteral("Logged Msgs 260915 - 1127.log"));
+    CHECK(canLogSuggestedName(CanLogFormat::PeakTrc, named)
+          == QStringLiteral("Logged Msgs 260915 - 1127.trc"));
+    // Single-digit fields are zero-padded so names sort chronologically.
+    CHECK(canLogSuggestedName(CanLogFormat::VectorAsc, QDateTime(QDate(2026, 1, 5), QTime(7, 3)))
+          == QStringLiteral("Logged Msgs 260105 - 0703.asc"));
+
+    // Line endings and the dispatchers.
+    CHECK(canLogLineEnding(CanLogFormat::SocketCanLog) == QStringLiteral("\n"));
+    CHECK(canLogLineEnding(CanLogFormat::VectorAsc) == QStringLiteral("\r\n"));
+    CHECK(canLogLineEnding(CanLogFormat::PeakTrc) == QStringLiteral("\r\n"));
+    CHECK(canLogHeader(CanLogFormat::SocketCanLog, when).isEmpty());
+    CHECK(canLogHeader(CanLogFormat::VectorAsc, when) == ascHeader(when));
+    CHECK(canLogHeader(CanLogFormat::PeakTrc, when) == trcHeader(when));
+    CHECK(canLogFrameLine(CanLogFormat::VectorAsc, rx, 0, 1) == ascFrameLine(rx, 0));
+    CHECK(canLogFrameLine(CanLogFormat::SocketCanLog, rx, 0, 1) == socketCanLogLine(rx, 0));
+    CHECK(canLogFrameLine(CanLogFormat::PeakTrc, rx, 0, 1) == trcFrameLine(rx, 0, 1));
 }
 
 static void testAscLog()
@@ -6729,6 +6846,8 @@ static void testDeviceLinkReadCommands()
         // session that started with "the device answers instantly and the GUI
         // sees nothing".
         CMD_GET_DEVICE_INFO,
+        // The capacity report, listed in the edit that added it.
+        CMD_GET_CAPACITY,
     };
     for (quint8 cmd : reads)
         CHECK(DeviceLink::isReadResponse(cmd));
@@ -6778,7 +6897,7 @@ static void testDeviceLinkReadCommands()
     for (quint8 cmd : {CMD_GET_STATUS, CMD_READ_CONFIG_NAME, CMD_GET_DEVICE_ID,
                        CMD_READ_ACCESS_KEYS, CMD_ACCESS_CHALLENGE,
                        CMD_READ_CONFIG_VERSION, CMD_READ_CAN_SETUP, CMD_READ_DEVICE_CHANNELS,
-                       CMD_GET_DEVICE_INFO}) {
+                       CMD_GET_DEVICE_INFO, CMD_GET_CAPACITY}) {
         CHECK(DeviceLink::isReadResponse(cmd));
         CHECK(!DeviceLink::echoesRequestRange(cmd));
     }
@@ -7272,6 +7391,239 @@ static void testBusRates()
     CHECK(sawClassicWarn);
 }
 
+// The capacity plumbing: what a document is sized against reaches the mapper,
+// the dialogs' limits (through Configuration::capacity()), the validation
+// summary, the Get plan and the fit check — and comes back from a Get. Every
+// number below is deliberately NOT this build's constant, so a site that still
+// reads a MAX_* fails here rather than the day a variant ships.
+static void testCapacityPlumbing()
+{
+    // A firmware that holds two constants, forty CRC8 rules and no integrators.
+    DeviceCapacity small = DeviceCapacity::builtIn();
+    small.tables[int(DeviceTable::Constants)].capacity = 2;
+    small.tables[int(DeviceTable::Crc8)].capacity = 40;
+    small.tables[int(DeviceTable::Integrators)].capacity = 0;
+    small.reported = true;
+    CHECK(!small.sameLayout(DeviceCapacity::builtIn()));
+
+    // ---- how two layouts differ, as the update dialog says it ----
+    {
+        const QStringList diff = layoutDifferences(DeviceCapacity::builtIn(), small);
+        CHECK(diff.size() == 3);
+        CHECK(diff.contains(QStringLiteral("constants: 100 → 2")));
+        CHECK(diff.contains(QStringLiteral("CRC8 rules: 20 → 40")));
+        CHECK(diff.contains(QStringLiteral("integrators: 8 → 0")));
+        CHECK(layoutDifferences(small, small).isEmpty());
+        CHECK(layoutDifferences(DeviceCapacity::builtIn(), DeviceCapacity::builtIn()).isEmpty());
+        // A store-version change is a difference on its own, named first.
+        DeviceCapacity older = DeviceCapacity::builtIn();
+        older.storeVersion = 18;
+        const QStringList versioned = layoutDifferences(older, DeviceCapacity::builtIn());
+        CHECK(versioned.size() == 1);
+        CHECK(versioned.first() == QStringLiteral("configuration store: v18 → v19"));
+        // A record that grew is a layout change even at the same capacity.
+        DeviceCapacity fatter = DeviceCapacity::builtIn();
+        fatter.tables[int(DeviceTable::Timers)].itemSize += 8;
+        const QStringList grown = layoutDifferences(DeviceCapacity::builtIn(), fatter);
+        CHECK(grown.size() == 1 && grown.first().startsWith(QStringLiteral("timers: 32-byte")));
+        // A table one side lacks entirely reads as 0 on that side.
+        DeviceCapacity longer = DeviceCapacity::builtIn();
+        longer.tables.append(TableCapacity{10, 12});
+        CHECK(layoutDifferences(DeviceCapacity::builtIn(), longer).size() == 1);
+    }
+
+    // ---- the mapper judges "table is full" by the document's capacity ----
+    Configuration config;
+    for (int i = 0; i < 3; ++i) {
+        ConstantRow k;
+        k.name = QStringLiteral("K%1").arg(i);
+        k.dataType = QStringLiteral("u16");
+        k.value = i;
+        config.constantRows.append(k);
+    }
+    CHECK(mapToDevice(config).ok()); // built-in: a hundred constants
+    CHECK(mapToDevice(config).tables.capacity.sameLayout(DeviceCapacity::builtIn()));
+    config.setCapacity(small);
+    {
+        const MappingResult mr = mapToDevice(config);
+        CHECK(!mr.ok());
+        CHECK(mr.errors.join(QLatin1Char('\n'))
+                  .contains(QStringLiteral("constant table is full (2)")));
+        CHECK(mr.tables.capacity.sameLayout(small)); // stamped even on a refusal
+    }
+    config.constantRows.removeLast();
+    const MappingResult mr = mapToDevice(config);
+    CHECK(mr.ok());
+    CHECK(mr.tables.constants.size() == 2);
+    CHECK(mr.tables.capacity.sameLayout(small));
+
+    // ---- the fit check: fine on the firmware the tables were mapped for,
+    // refused on one that holds less, and named by table ----
+    CHECK(tablesExceeding(mr.tables, small).isEmpty());
+    {
+        DeviceCapacity smaller = small;
+        smaller.tables[int(DeviceTable::Constants)].capacity = 1;
+        const QStringList over = tablesExceeding(mr.tables, smaller);
+        CHECK(over.size() == 1);
+        CHECK(over.first() == QStringLiteral("2 constants, but this device holds 1"));
+        // A table the firmware lacks counts only when the configuration uses
+        // it: `small` has no integrator table and nothing here needs one.
+        DeviceCapacity none = small;
+        none.tables[int(DeviceTable::Constants)].capacity = 0;
+        CHECK(tablesExceeding(mr.tables, none).first()
+              == QStringLiteral("2 constants, but this device holds 0"));
+    }
+
+    // ---- a Get hands the unit's capacity to the document it rebuilds ----
+    {
+        Configuration back;
+        CHECK(back.capacity().sameLayout(DeviceCapacity::builtIn()));
+        mapFromDevice(mr.tables, back);
+        CHECK(back.capacity().sameLayout(small));
+        CHECK(back.constantRows.size() == 2);
+        // ...a live view sizes like its source, and a New document like this
+        // build again.
+        Configuration view;
+        back.copyContentTo(view);
+        CHECK(view.capacity().sameLayout(small));
+        back.clear();
+        CHECK(back.capacity().sameLayout(DeviceCapacity::builtIn()));
+    }
+
+    // ---- validation reports "n of m" against the document's numbers ----
+    {
+        Configuration v;
+        v.setCapacity(small);
+        bool found = false;
+        for (const ValidationIssue &issue : validateConfiguration(v))
+            if (issue.location == QStringLiteral("Device usage")
+                && issue.message.contains(QStringLiteral("/40 CRC8 rules")))
+                found = true;
+        CHECK(found);
+    }
+
+    // ---- the Get plan reads what the unit holds, not what this build assumes ----
+    const auto count = [](const QByteArray &p) {
+        return int(quint8(p[2])) | (int(quint8(p[3])) << 8);
+    };
+    const auto start = [](const QByteArray &p) {
+        return int(quint8(p[0])) | (int(quint8(p[1])) << 8);
+    };
+    {
+        int crc8Reads = 0, integReads = 0, constReads = 0;
+        for (const auto &r : ConfigTransfer::planGetRequestsForTest(small)) {
+            if (r.first == CMD_READ_CRC8_CFG) {
+                ++crc8Reads; // forty in one chunk, from zero
+                CHECK(start(r.second) == 0 && count(r.second) == 40);
+            }
+            if (r.first == CMD_READ_INTEG_CFG)
+                ++integReads;
+            if (r.first == CMD_READ_CONST_CFG) {
+                ++constReads;
+                CHECK(count(r.second) == 2);
+            }
+        }
+        CHECK(crc8Reads == 1);
+        CHECK(integReads == 0); // a table the firmware lacks is not asked for
+        CHECK(constReads == 1);
+    }
+    {
+        // 510 messages — the 9-bit ceiling — is eleven reads of fifty, the last
+        // of ten; and built-in reads exactly the ranges it always did.
+        DeviceCapacity wide = DeviceCapacity::builtIn();
+        wide.tables[int(DeviceTable::Messages)].capacity = 510;
+        int msgReads = 0, lastCount = 0;
+        for (const auto &r : ConfigTransfer::planGetRequestsForTest(wide))
+            if (r.first == CMD_READ_MSG_CFG) {
+                ++msgReads;
+                lastCount = count(r.second);
+            }
+        CHECK(msgReads == 11 && lastCount == 10);
+        int crc8Builtin = 0;
+        for (const auto &r : ConfigTransfer::planGetRequestsForTest(DeviceCapacity::builtIn()))
+            if (r.first == CMD_READ_CRC8_CFG) {
+                ++crc8Builtin;
+                CHECK(count(r.second) == MAX_CRC8_MESSAGES);
+            }
+        CHECK(crc8Builtin == 1);
+    }
+
+    // ---- the file records the target, but only once one was chosen ----
+    {
+        QTemporaryFile file;
+        CHECK(file.open());
+        const QString path = file.fileName();
+        file.close();
+        QString error;
+        // Never targeted: the file carries nothing and loads as built-in — the
+        // shape every .ct3 written before the report has.
+        Configuration plain;
+        CHECK(plain.saveToFile(path, &error));
+        Configuration plainBack;
+        CHECK(plainBack.loadFromFile(path, &error));
+        CHECK(!plainBack.capacity().reported);
+        CHECK(plainBack.capacity().sameLayout(DeviceCapacity::builtIn()));
+
+        Configuration targeted;
+        DeviceCapacity chosen = small;
+        chosen.label = QStringLiteral("can-triple-9.9.9.ctf (firmware 9.9.9)");
+        targeted.setCapacity(chosen);
+        CHECK(targeted.isDirty()); // choosing a target is an edit
+        targeted.setDirty(false);
+        targeted.setCapacity(chosen); // ...and choosing the same one again is not
+        CHECK(!targeted.isDirty());
+        CHECK(targeted.saveToFile(path, &error));
+        Configuration targetedBack;
+        CHECK(targetedBack.loadFromFile(path, &error));
+        CHECK(targetedBack.capacity().reported);
+        CHECK(targetedBack.capacity().sameLayout(small));
+        CHECK(targetedBack.capacity().label == chosen.label);
+        CHECK(targetedBack.capacity().storeVersion == small.storeVersion);
+        CHECK(!targetedBack.isDirty()); // a load is not an edit
+        // The JSON both ways, the shape the body holds; no tables is no target.
+        DeviceCapacity viaJson;
+        CHECK(DeviceCapacity::fromJson(chosen.toJson(), &viaJson));
+        CHECK(viaJson.sameLayout(chosen) && viaJson.label == chosen.label && viaJson.reported);
+        CHECK(!DeviceCapacity::fromJson(QJsonObject(), &viaJson));
+    }
+
+    // ---- a package records the sizes its stream writes, and the install
+    // verdict holds them against the unit ----
+    {
+        SecurePackagePolicy policy;
+        policy.key = deriveLicenseKey(QStringLiteral("fleet master phrase"));
+        policy.tableCounts = tableCountsOf(mr.tables); // two constants, nothing else
+        CHECK(policy.tableCounts.size() == DEVICE_TABLE_COUNT);
+        CHECK(policy.tableCounts[int(DeviceTable::Constants)] == 2);
+        CHECK(policy.tableCounts[int(DeviceTable::Crc8)] == 0);
+        CHECK(SecurePackagePolicy::fromJson(policy.toJson()).tableCounts == policy.tableCounts);
+        // A format-3 policy keeps them past the withheld-keys return.
+        SecurePackagePolicy sealed = policy;
+        sealed.keysWithheld = true;
+        CHECK(SecurePackagePolicy::fromJson(sealed.toJson()).tableCounts == policy.tableCounts);
+        SecurePackagePolicy older;
+        older.key = policy.key;
+        CHECK(SecurePackagePolicy::fromJson(older.toJson()).tableCounts.isEmpty());
+
+        DeviceMatchFacts unit;
+        unit.licensed = true;
+        unit.capacityKnown = true;
+        unit.capacity = small;
+        CHECK(packageInstallVerdict(policy, unit).ok());
+        unit.capacity.tables[int(DeviceTable::Constants)].capacity = 1;
+        const InstallVerdict v = packageInstallVerdict(policy, unit);
+        CHECK(!v.ok() && v.mismatches.isEmpty());
+        CHECK(v.shortfalls.size() == 1);
+        CHECK(v.shortfalls.first() == QStringLiteral("2 constants, but this device holds 1"));
+        // A unit whose capacity could not be read is not judged on it, and an
+        // older package that recorded nothing is not judged either.
+        unit.capacityKnown = false;
+        CHECK(packageInstallVerdict(policy, unit).ok());
+        unit.capacityKnown = true;
+        CHECK(packageInstallVerdict(older, unit).ok());
+    }
+}
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
@@ -7329,7 +7681,9 @@ int main(int argc, char *argv[])
     testProtectedMessage();
     testMonitorPayloadShapes();
     testDeviceLinkReadCommands();
+    testCapacityPlumbing();
     testAscLog();
+    testCanLogExportFormats();
     testDeviceChannelsAlwaysMapped();
     testDeviceChannelTransmitRowSurvivesGet();
     testDisabledBusSectionsSurviveGet();

@@ -8,6 +8,7 @@
 
 #include <functional>
 
+#include "../protocol/capacity.h"
 #include "access_keys.h"
 #include "channel_catalog.h"
 #include "comms_types.h"
@@ -89,6 +90,22 @@ public:
     // hasCommsPassword() was false, commsRevealed() was true, and every
     // protection tier in the document could be lowered with no challenge at all.
     void clearContent();
+
+    // The firmware capacity this document is sized against — its TARGET
+    // FIRMWARE: what the editing dialogs let the user add, which Calculations
+    // items are offered at all, what the mapper refuses as "table is full",
+    // and what the summary reports as "n of m". builtIn() for a new document;
+    // File > Target Firmware… sets it from a connected unit or a .ctf, and a
+    // Get sets it to the unit's report (mapFromDevice), so a document read
+    // from a larger variant can carry everything that unit held. A chosen
+    // target (`reported`) is written to the file and restored on load; a
+    // document that never chose one carries nothing and loads as builtIn().
+    // Choosing is an edit, so setCapacity marks the document dirty when the
+    // layout or its label changes. A Send to a DIFFERENT unit checks the
+    // mapped tables against that unit's own report (tablesExceeding) rather
+    // than trusting this.
+    const DeviceCapacity &capacity() const { return m_capacity; }
+    void setCapacity(const DeviceCapacity &capacity);
 
     // -------------------------------------------------------- access passwords
     // Only ONE of the three access passwords has a document-side meaning at all:
@@ -709,6 +726,10 @@ public:
 signals:
     void dirtyChanged(bool dirty);
     void documentReset(); // after clear/load
+    // The target firmware changed under an open document (setCapacity) — the
+    // menu gates and anything else sized by it should look again. Not emitted
+    // by a load or a clear; those end in documentReset.
+    void capacityChanged();
     // A channel rename has just been applied to this document's stored
     // references (renameChannelReferences). The signal exists for the one
     // holder of references that walk cannot reach: a grid dialog's PRIVATE
@@ -783,6 +804,7 @@ private:
     QString m_configTitle;
     bool m_dirty = false;
     ChannelCatalog m_catalog;
+    DeviceCapacity m_capacity = DeviceCapacity::builtIn();
 
     // The script pair. Private precisely so the invariant above can be a fact
     // about the type rather than a convention: these were a single public

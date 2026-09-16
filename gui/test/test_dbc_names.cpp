@@ -17,11 +17,13 @@
 // Both halves are pinned here, together, because either alone would look fine.
 
 #include <QApplication>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QPushButton>
 #include <QTimer>
 #include <QTreeWidget>
 
+#include <cmath>
 #include <cstdio>
 
 #include "../src/model/channel_catalog.h"
@@ -566,6 +568,403 @@ void testAMessageWithNoMuxedSignalsPickedStaysPlain()
 
 } // namespace
 
+// ------------------------------------------------------------- the details
+
+void testAFloatSignalIsLabelledIEEE754InTheDetails()
+{
+    // Reported as a bug: the Details column read the SG_ line's sign flag and
+    // never looked at the SIG_VALTYPE_ marker, so a float signal was labelled
+    // "unsigned" (its line reads @1+) while the import made it an IEEE754 row.
+    // kDbc marks Boost_Pressure as a float; the other two are integers.
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kDbc), &warnings);
+    Configuration config;
+    config.clear();
+    ImportDbcDialog dialog(&config, file, QStringLiteral("unit-test.dbc"), 0, {});
+    auto *tree = dialog.findChild<QTreeWidget *>();
+    REQUIRE(tree && tree->topLevelItemCount() == 1 && tree->topLevelItem(0)->childCount() == 3);
+    const QString speed = tree->topLevelItem(0)->child(0)->text(2);
+    const QString coolant = tree->topLevelItem(0)->child(1)->text(2);
+    const QString boost = tree->topLevelItem(0)->child(2)->text(2);
+    std::printf("  Boost Pressure details             : %s\n", qPrintable(boost));
+    CHECK(boost.contains(QStringLiteral("IEEE754")));
+    CHECK(!boost.contains(QStringLiteral("unsigned")));
+    CHECK(!boost.contains(QStringLiteral(" signed")));
+    // The integer signals still say what they are.
+    CHECK(speed.contains(QStringLiteral("unsigned")));
+    CHECK(coolant.contains(QStringLiteral(" signed")));
+    CHECK(!speed.contains(QStringLiteral("IEEE754")));
+    // And in transmit mode the column reads the same.
+    auto *mode = dialog.findChild<QComboBox *>(QStringLiteral("importAs"));
+    REQUIRE(mode);
+    mode->setCurrentIndex(1);
+    CHECK(tree->topLevelItem(0)->child(2)->text(2).contains(QStringLiteral("IEEE754")));
+}
+
+// ---------------------------------------------------------------- transmit
+
+// THE OTHER DIRECTION. A .dbc written from the far side of the wire \u2014 what a
+// cluster, a dash or a gearbox controller expects to RECEIVE \u2014 is, from this
+// device's side, a list of messages to send. The same tree imports it as
+// transmit sections, and three things are different: no channel is created (a
+// row SENDS an existing channel, named in the Send Channel column and
+// prefilled by name); the file's offset changes sign, because this
+// application's transmit row ADDS its Offset where a DBC subtracts; and the
+// file's cycle time becomes the section's period.
+
+Channel userChannel(const QString &name)
+{
+    Channel c;
+    c.name = name;
+    c.dataType = QStringLiteral("u16");
+    c.category = QStringLiteral("User Channels");
+    c.userDefined = true;
+    return c;
+}
+
+// Import with the dialog in transmit mode: every signal ticked, an optional
+// Send Channel typed into one row (the picker writes the same cell), and the
+// column as first shown returned for inspection.
+QList<CommsSection> importTransmit(Configuration &config, const DbcFile &file,
+                                   QStringList *sendColumn = nullptr, int linkRow = -1,
+                                   const QString &linkTo = QString(),
+                                   bool *importEnabled = nullptr)
+{
+    ImportDbcDialog dialog(&config, file, QStringLiteral("unit-test.dbc"), 0, {});
+    auto *mode = dialog.findChild<QComboBox *>(QStringLiteral("importAs"));
+    auto *tree = dialog.findChild<QTreeWidget *>();
+    if (!mode || !tree)
+        return {};
+    mode->setCurrentIndex(1); // Transmit Messages
+    int n = 0;
+    for (int m = 0; m < tree->topLevelItemCount(); ++m) {
+        QTreeWidgetItem *msg = tree->topLevelItem(m);
+        for (int s = 0; s < msg->childCount(); ++s, ++n) {
+            QTreeWidgetItem *sig = msg->child(s);
+            if (sendColumn)
+                sendColumn->append(sig->text(1));
+            if (n == linkRow && !linkTo.isEmpty())
+                sig->setText(1, linkTo);
+            if (sig->flags() & Qt::ItemIsUserCheckable)
+                sig->setCheckState(0, Qt::Checked);
+        }
+    }
+    auto *box = dialog.findChild<QDialogButtonBox *>();
+    if (!box || !box->button(QDialogButtonBox::Ok))
+        return {};
+    if (importEnabled)
+        *importEnabled = box->button(QDialogButtonBox::Ok)->isEnabled();
+    if (!box->button(QDialogButtonBox::Ok)->isEnabled())
+        return {};
+    // The notes box is modal; see importAll.
+    QTimer notes;
+    int ticks = 0;
+    QObject::connect(&notes, &QTimer::timeout, [&notes, &ticks]() {
+        if (QWidget *modal = QApplication::activeModalWidget()) {
+            modal->close();
+            notes.stop();
+        } else if (++ticks > 200) {
+            notes.stop();
+        }
+    });
+    notes.start(5);
+    box->button(QDialogButtonBox::Ok)->click();
+    notes.stop();
+    return dialog.importedSections();
+}
+
+void testATransmitImportSendsExistingChannels()
+{
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kDbc), &warnings);
+    Configuration config;
+    config.clear();
+    // Two of the three signals already have a channel. The file's case differs
+    // from the catalogue's on one of them, and the catalogue's spelling wins.
+    config.catalog().addOrUpdateUserChannel(userChannel(QStringLiteral("Engine Speed")));
+    config.catalog().addOrUpdateUserChannel(userChannel(QStringLiteral("coolant temp sensor")));
+    const int before = config.catalog().userChannels().size();
+
+    QStringList sendColumn;
+    const QList<CommsSection> sections = importTransmit(config, file, &sendColumn);
+    std::printf("  Send Channel column as shown       : %s\n",
+                qPrintable(sendColumn.join(QStringLiteral(" | "))));
+    CHECK(sendColumn == QStringList({QStringLiteral("Engine Speed"),
+                                     QStringLiteral("coolant temp sensor"),
+                                     QStringLiteral("(pick one)")}));
+
+    REQUIRE(sections.size() == 1);
+    const CommsSection &s = sections.first();
+    CHECK(s.device == SectionDevice::TransmitMessage);
+    CHECK(s.isTransmit());
+    CHECK(s.cyclic);
+    CHECK(s.name == QStringLiteral("EngineData"));
+    CHECK(s.baseAddress == 1600u);
+    CHECK(s.messageLengthBytes == 8);
+    // The dialog's rate, since this file states no cycle time.
+    CHECK(s.transmitRateHz == 50);
+    CHECK(s.transmitPeriodMs == 0);
+    // Two rows: the third signal was ticked but had nothing to send.
+    REQUIRE(s.rows.size() == 2);
+    std::printf("  rows                               : %s, %s\n",
+                qPrintable(s.rows[0].channelName), qPrintable(s.rows[1].channelName));
+    CHECK(s.rows[0].channelName == QStringLiteral("Engine Speed"));
+    CHECK(s.rows[1].channelName == QStringLiteral("coolant temp sensor"));
+    CHECK(s.rows[0].startBit == 0 && s.rows[0].bitLength == 16);
+    CHECK(s.rows[1].startBit == 16 && s.rows[1].bitLength == 16);
+    CHECK(s.rows[1].dbcType == int(DbcType::Signed));
+    // And nothing was created: not the matched ones again, not the skipped one.
+    CHECK(config.catalog().userChannels().size() == before);
+    CHECK(!config.catalog().findByName(QStringLiteral("Boost Pressure")).isValid());
+}
+
+void testTheTransmitOffsetChangesSign()
+{
+    // The rule on its own first.
+    DbcSignal sig;
+    sig.factor = 0.1;
+    sig.offset = -40.0;
+    const CommsChannelRow rx = rowFromDbcSignal(sig, QStringLiteral("Coolant"));
+    const CommsChannelRow tx = transmitRowFromDbcSignal(sig, QStringLiteral("Coolant"));
+    std::printf("  (0.1,-40): receive Offset %g, transmit Offset %g\n", rx.dbcOffset, tx.dbcOffset);
+    CHECK(rx.dbcOffset == -40.0);
+    CHECK(tx.dbcOffset == 40.0);
+    CHECK(tx.dbcFactor == 0.1);
+    // The transmit arithmetic as comms_types.h states it, raw = (physical +
+    // Offset) / resolution: 25 degrees goes out as the count a DBC receiver
+    // turns back into 25.
+    CHECK(qRound((25.0 + tx.dbcOffset) / tx.dbcFactor) == 650);
+    CHECK(650 * sig.factor + sig.offset == 25.0);
+    // A positive offset \u2014 an absolute pressure carried as gauge, say \u2014 goes
+    // negative.
+    sig.factor = 4.0;
+    sig.offset = 101.3;
+    CHECK(transmitRowFromDbcSignal(sig, QStringLiteral("x")).dbcOffset == -101.3);
+    // Zero stays zero, and not negative zero.
+    sig.offset = 0.0;
+    CHECK(transmitRowFromDbcSignal(sig, QStringLiteral("x")).dbcOffset == 0.0);
+    CHECK(!std::signbit(transmitRowFromDbcSignal(sig, QStringLiteral("x")).dbcOffset));
+
+    // Through the dialog: the row the import makes carries the negated offset.
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kDbc), &warnings);
+    Configuration config;
+    config.clear();
+    config.catalog().addOrUpdateUserChannel(userChannel(QStringLiteral("Coolant Temp Sensor")));
+    const QList<CommsSection> sections = importTransmit(config, file);
+    REQUIRE(sections.size() == 1);
+    REQUIRE(sections.first().rows.size() == 1);
+    const CommsChannelRow &row = sections.first().rows.first();
+    CHECK(row.channelName == QStringLiteral("Coolant Temp Sensor"));
+    CHECK(row.dbcOffset == 40.0);
+    CHECK(row.dbcFactor == 0.1);
+
+    // And the receive import of the same file keeps the file's sign.
+    Configuration rxConfig;
+    rxConfig.clear();
+    const QList<CommsSection> received = importAll(rxConfig, file, nullptr);
+    REQUIRE(received.size() == 1);
+    REQUIRE(received.first().rows.size() == 3);
+    CHECK(received.first().rows[1].dbcOffset == -40.0);
+}
+
+const char *const kCycleDbc = R"DBC(VERSION "unit-test"
+
+BO_ 1600 Fast: 8 ECU
+ SG_ Speed_A : 0|16@1+ (1,0) [0|20000] "rpm" Dash
+
+BO_ 1601 Plain: 8 ECU
+ SG_ Speed_B : 0|16@1+ (1,0) [0|20000] "rpm" Dash
+
+BO_ 1602 TooFast: 8 ECU
+ SG_ Speed_C : 0|16@1+ (1,0) [0|20000] "rpm" Dash
+
+BO_ 1603 Slow: 8 ECU
+ SG_ Speed_D : 0|16@1+ (1,0) [0|20000] "rpm" Dash
+
+BA_DEF_ BO_  "GenMsgCycleTime" INT 0 65535;
+BA_DEF_DEF_  "GenMsgCycleTime" 100;
+BA_ "GenMsgCycleTime" BO_ 1600 20;
+BA_ "GenMsgCycleTime" BO_ 1602 2;
+BA_ "GenMsgCycleTime" BO_ 1603 2000;
+)DBC";
+
+void testTheCycleTimeBecomesThePeriod()
+{
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kCycleDbc), &warnings);
+    REQUIRE(file.messages.size() == 4);
+    // Parsed: the message's own line, else the file's default.
+    std::printf("  cycle times parsed                 : %d %d %d %d ms\n",
+                file.messages[0].cycleTimeMs, file.messages[1].cycleTimeMs,
+                file.messages[2].cycleTimeMs, file.messages[3].cycleTimeMs);
+    CHECK(file.messages[0].cycleTimeMs == 20);
+    CHECK(file.messages[1].cycleTimeMs == 100);
+    CHECK(file.messages[2].cycleTimeMs == 2);
+    CHECK(file.messages[3].cycleTimeMs == 2000);
+
+    // The rule on its own.
+    int rate = 50, period = 0;
+    transmitTimingFromCycleTime(0, &rate, &period);
+    CHECK(rate == 50 && period == 0); // not stated: untouched
+    transmitTimingFromCycleTime(20, &rate, &period);
+    CHECK(rate == 50 && period == 20);
+    transmitTimingFromCycleTime(100, &rate, &period);
+    CHECK(rate == 10 && period == 100);
+    transmitTimingFromCycleTime(33, &rate, &period);
+    CHECK(rate == 30 && period == 33); // the period exact, the rate the nearest hertz
+    transmitTimingFromCycleTime(2, &rate, &period);
+    CHECK(rate == 200 && period == 5); // the device's floor
+    transmitTimingFromCycleTime(2000, &rate, &period);
+    CHECK(rate == 1 && period == 2000); // slower than 1 Hz: the period stands
+
+    // Through the dialog.
+    Configuration config;
+    config.clear();
+    for (const char *n : {"Speed A", "Speed B", "Speed C", "Speed D"})
+        config.catalog().addOrUpdateUserChannel(userChannel(QString::fromLatin1(n)));
+    const QList<CommsSection> sections = importTransmit(config, file);
+    REQUIRE(sections.size() == 4);
+    for (const CommsSection &s : sections)
+        std::printf("  %-8s rate %3d Hz, period %4d ms\n", qPrintable(s.name), s.transmitRateHz,
+                    s.transmitPeriodMs);
+    CHECK(sections[0].transmitRateHz == 50 && sections[0].transmitPeriodMs == 20);
+    CHECK(sections[1].transmitRateHz == 10 && sections[1].transmitPeriodMs == 100);
+    CHECK(sections[2].transmitRateHz == 200 && sections[2].transmitPeriodMs == 5);
+    CHECK(sections[3].transmitRateHz == 1 && sections[3].transmitPeriodMs == 2000);
+    for (const CommsSection &s : sections)
+        CHECK(s.cyclic && s.isTransmit());
+
+    // A receive import reads none of it.
+    Configuration rxConfig;
+    rxConfig.clear();
+    const QList<CommsSection> received = importAll(rxConfig, file, nullptr);
+    REQUIRE(received.size() == 4);
+    for (const CommsSection &s : received) {
+        CHECK(s.isReceive());
+        CHECK(s.transmitPeriodMs == 0);
+    }
+}
+
+void testSwitchingModesKeepsTheTicksAndTheChoices()
+{
+    // The tree is rebuilt on every switch. What the user did to it \u2014 the
+    // ticks, and a channel chosen for sending \u2014 has to come back.
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kDbc), &warnings);
+    Configuration config;
+    config.clear();
+    config.catalog().addOrUpdateUserChannel(userChannel(QStringLiteral("Water Temp")));
+
+    ImportDbcDialog dialog(&config, file, QStringLiteral("unit-test.dbc"), 0, {});
+    auto *mode = dialog.findChild<QComboBox *>(QStringLiteral("importAs"));
+    auto *tree = dialog.findChild<QTreeWidget *>();
+    REQUIRE(mode && tree);
+    CHECK(!dialog.transmitMode());
+    CHECK(tree->headerItem()->text(1) == QStringLiteral("Channel Type"));
+    REQUIRE(tree->topLevelItemCount() == 1 && tree->topLevelItem(0)->childCount() == 3);
+    tree->topLevelItem(0)->child(0)->setCheckState(0, Qt::Checked);
+    tree->topLevelItem(0)->child(2)->setCheckState(0, Qt::Checked);
+    CHECK(tree->topLevelItem(0)->checkState(0) == Qt::PartiallyChecked);
+
+    mode->setCurrentIndex(1);
+    CHECK(dialog.transmitMode());
+    CHECK(tree->headerItem()->text(1) == QStringLiteral("Send Channel"));
+    QTreeWidgetItem *msg = tree->topLevelItem(0);
+    REQUIRE(msg && msg->childCount() == 3);
+    CHECK(msg->child(0)->checkState(0) == Qt::Checked);
+    CHECK(msg->child(1)->checkState(0) == Qt::Unchecked);
+    CHECK(msg->child(2)->checkState(0) == Qt::Checked);
+    CHECK(msg->checkState(0) == Qt::PartiallyChecked);
+    // Nothing matches by name, so every cell asks.
+    for (int i = 0; i < 3; ++i)
+        CHECK(msg->child(i)->text(1) == QStringLiteral("(pick one)"));
+    // Nothing is edited inline in transmit mode; the one choice is picked.
+    CHECK(!(msg->child(0)->flags() & Qt::ItemIsEditable));
+    msg->child(1)->setText(1, QStringLiteral("Water Temp")); // what the picker writes
+
+    // Back to receive: the ticks survive and the receive columns are back.
+    mode->setCurrentIndex(0);
+    msg = tree->topLevelItem(0);
+    REQUIRE(msg && msg->childCount() == 3);
+    CHECK(tree->headerItem()->text(1) == QStringLiteral("Channel Type"));
+    CHECK(msg->child(0)->checkState(0) == Qt::Checked);
+    CHECK(msg->child(1)->checkState(0) == Qt::Unchecked);
+    CHECK(msg->child(2)->checkState(0) == Qt::Checked);
+    CHECK(msg->child(1)->text(1) == QStringLiteral("Temperature"));
+    CHECK(msg->child(0)->flags() & Qt::ItemIsEditable);
+
+    // And to transmit again: the choice made earlier is still there.
+    mode->setCurrentIndex(1);
+    msg = tree->topLevelItem(0);
+    REQUIRE(msg && msg->childCount() == 3);
+    std::printf("  after a round trip, row 1 sends    : %s\n", qPrintable(msg->child(1)->text(1)));
+    CHECK(msg->child(1)->text(1) == QStringLiteral("Water Temp"));
+    CHECK(msg->child(0)->text(1) == QStringLiteral("(pick one)"));
+    CHECK(msg->child(0)->checkState(0) == Qt::Checked);
+}
+
+void testNothingToSendDisablesImport()
+{
+    // Every signal ticked and no channel anywhere to send: the count says so
+    // and Import stays off \u2014 a section of nothing is not worth a dialog.
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kDbc), &warnings);
+    Configuration config;
+    config.clear();
+    bool enabled = true;
+    const QList<CommsSection> none =
+        importTransmit(config, file, nullptr, -1, QString(), &enabled);
+    CHECK(!enabled);
+    CHECK(none.isEmpty());
+
+    // One choice made: that row imports, the other two are skipped with a
+    // note, and the placeholder never becomes a channel name.
+    Configuration one;
+    one.clear();
+    one.catalog().addOrUpdateUserChannel(userChannel(QStringLiteral("Boost Target")));
+    const QList<CommsSection> picked =
+        importTransmit(one, file, nullptr, 2, QStringLiteral("Boost Target"), &enabled);
+    CHECK(enabled);
+    REQUIRE(picked.size() == 1);
+    REQUIRE(picked.first().rows.size() == 1);
+    const CommsChannelRow &row = picked.first().rows.first();
+    CHECK(row.channelName == QStringLiteral("Boost Target"));
+    // An IEEE754 signal is a 32-bit float row in either direction.
+    CHECK(row.dbcType == int(DbcType::IEEE754));
+    CHECK(row.bitLength == 32);
+    CHECK(row.channelName != QStringLiteral("(pick one)"));
+}
+
+void testAMultiplexedMessageTransmitsAsCompound()
+{
+    // Same shape as the receive import: each multiplexor value an identifier
+    // the device writes into the frame, the multiplexor itself never a row \u2014
+    // even when a channel of its name exists to tempt the match.
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(kMuxDbc), &warnings);
+    Configuration config;
+    config.clear();
+    for (const char *n : {"Common Value", "Val A", "Val B", "Selector"})
+        config.catalog().addOrUpdateUserChannel(userChannel(QString::fromLatin1(n)));
+    const QList<CommsSection> sections = importTransmit(config, file);
+    REQUIRE(sections.size() == 1);
+    const CommsSection &s = sections.first();
+    CHECK(s.isTransmit());
+    CHECK(s.compound);
+    REQUIRE(s.identifiers.size() == 2);
+    CHECK(s.identifiers[0].id == 0u && s.identifiers[1].id == 1u);
+    for (const CompoundIdentifier &ident : s.identifiers) {
+        REQUIRE(ident.rows.size() == 2);
+        CHECK(ident.rows[0].channelName == QStringLiteral("Common Value"));
+        for (const CommsChannelRow &r : ident.rows)
+            CHECK(r.channelName != QStringLiteral("Selector"));
+    }
+    CHECK(s.identifiers[0].rows[1].channelName == QStringLiteral("Val A"));
+    CHECK(s.identifiers[1].rows[1].channelName == QStringLiteral("Val B"));
+    CHECK(s.rows.isEmpty());
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -589,6 +988,13 @@ int main(int argc, char **argv)
     testTheMessageRowStillReadsFullyChecked();
     testSelectAllLeavesTheMultiplexorAlone();
     testAMessageWithNoMuxedSignalsPickedStaysPlain();
+    testAFloatSignalIsLabelledIEEE754InTheDetails();
+    testATransmitImportSendsExistingChannels();
+    testTheTransmitOffsetChangesSign();
+    testTheCycleTimeBecomesThePeriod();
+    testSwitchingModesKeepsTheTicksAndTheChoices();
+    testNothingToSendDisablesImport();
+    testAMultiplexedMessageTransmitsAsCompound();
 
     if (fails == 0)
         std::printf("test_dbc_names: all checks passed\n");

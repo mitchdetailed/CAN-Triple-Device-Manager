@@ -54,7 +54,11 @@ rules, 8 integrators, and
   rename channels and set their Channel Type inline, then import. Motorola
   start bits are converted to the app's LSB convention automatically, and
   multiplexed messages import as **compound sections** (one per multiplexor
-  value).
+  value). Set **Import as** to Transmit Messages to go the other way: each
+  ticked signal becomes a row sending an existing channel (prefilled by name,
+  or double-click to pick), no channel is created, the DBC offset changes
+  sign to suit the transmit row's added Offset, and a `GenMsgCycleTime`
+  becomes the message's period.
 - **Select Channel** — searchable list of the document's user-created
   channels with any-order word-prefix matching ("temp eng oil" finds
   Engine Oil Temp); create and edit channels via New…/Edit….

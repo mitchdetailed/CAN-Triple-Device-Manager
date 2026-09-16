@@ -41,8 +41,9 @@ The buttons beside the list:
 <tr><td><b>Select…</b></td><td>Predefined device templates — planned; currently
 disabled. <b>Load…</b> below does the same job from a template file you or a
 supplier saved.</td></tr>
-<tr><td><b>Import DBC…</b></td><td>Import messages and signals from a .dbc file —
-see <a href="dbc-import.md">DBC Import</a>.</td></tr>
+<tr><td><b>Import DBC…</b></td><td>Import messages and signals from a .dbc file,
+as receive or transmit messages — see <a href="dbc-import.md">DBC
+Import</a>.</td></tr>
 <tr><td><b>New…</b></td><td>Create a section and open the section
 editor.</td></tr>
 <tr><td><b>Edit…</b></td><td>Open the selected section in the section editor.

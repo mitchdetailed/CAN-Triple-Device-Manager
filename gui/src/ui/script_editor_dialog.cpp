@@ -480,7 +480,10 @@ void ScriptEditorDialog::onCompile()
     if (!compileCurrent()) {
         return;
     }
-    const quint8 rc = m_sim.load(m_image);
+    // Simulated against the channel table the script was compiled for — the
+    // document's target firmware — so a script for a larger variant is not
+    // refused here by this build's constant.
+    const quint8 rc = m_sim.load(m_image, m_symbols.signalSlots);
     if (rc != SCRIPT_OK) {
         // Cannot happen — the compiler verifies its own output — so if it does,
         // it is a compiler bug and should say so rather than blame the script.

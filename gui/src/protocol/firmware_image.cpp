@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
+#include <QtEndian>
 
 #include <cstring>
 
@@ -126,6 +127,22 @@ std::optional<FirmwareImage> FirmwareImage::load(const QString &path, QString *e
                         .arg(QFileInfo(path).fileName())
                         .arg(image.m_header.image_size)
                         .arg(image.m_bytes.size()));
+    }
+
+    // The capacity block, if this image carries one. The magic is what tells a
+    // block from the code an older image has at the same offset. The parser
+    // tolerates the code that follows the block, so it is handed the rest of
+    // the file rather than a guessed length. Read AFTER the CRC has passed:
+    // the block is inside it, so a tampered capacity is a rejected file, never
+    // a wrong number.
+    if (image.m_bytes.size() >= int(FW_CAPS_OFFSET) + 4) {
+        const quint32 magic =
+            qFromLittleEndian<quint32>(image.m_bytes.constData() + FW_CAPS_OFFSET);
+        if (magic == FW_CAPS_MAGIC) {
+            DeviceCapacity capacity;
+            if (parseCapacityReport(image.m_bytes.mid(int(FW_CAPS_OFFSET) + 4), &capacity))
+                image.m_capacity = capacity;
+        }
     }
 
     return image;

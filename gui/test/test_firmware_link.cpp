@@ -10,6 +10,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QList>
+#include <QtEndian>
 
 #include <cstddef>
 #include <cstdio>
@@ -188,6 +189,13 @@ constexpr unsigned kAllCommandIds[] = {
     CMD_FW_UPDATE_STATUS, CMD_FW_UPDATE_ABORT, CMD_WRITE_SCRIPT,
     CMD_READ_SCRIPT, CMD_SCRIPT_STATUS, CMD_ACK, CMD_NACK, CMD_MONITOR_STREAM,
     CMD_VALUE_STREAM, CMD_LOG,
+    // The ids added after this list was written and, until the capacity report
+    // joined it, never listed: the message passwords, the OTP record, the
+    // licence block, the sealed tunnel and the protection level.
+    CMD_WRITE_MSG_PASSWORDS, CMD_READ_MSG_PASSWORDS, CMD_GET_DEVICE_INFO,
+    CMD_READ_LICENSE, CMD_WRITE_LICENSE, CMD_LICENSE_CHALLENGE, CMD_LICENSE_RESPONSE,
+    CMD_LICENSE_KEY_PROVE, CMD_SEAL_BEGIN, CMD_SEAL_FRAME, CMD_SEAL_END,
+    CMD_GET_PROTECTION, CMD_GET_CAPACITY,
     // The RETIRED ids, in the set for the same reason the live ones are: each
     // is a number some shipped host still speaks, and it must keep answering
     // ERR_INVALID_CMD — 0x40 most of all, which 2.2.x Managers send before
@@ -215,6 +223,15 @@ static_assert(commandIdsDistinct(),
 // answer, on a record that cannot be corrected afterwards.
 constexpr unsigned kCmdGetDeviceInfo = CMD_GET_DEVICE_INFO;
 constexpr unsigned kCmdGetProtection = CMD_GET_PROTECTION;
+// v24: the capacity report. The id and the format byte are spelled on both
+// sides; the report ITSELF is expanded here from the firmware's own
+// FLASH_TABLE_LIST while the MAX_* macros still exist, so the test can hold the
+// wire bytes against the list the flash layout is built from — not against a
+// second copy of the numbers.
+constexpr unsigned kCmdGetCapacity = CMD_GET_CAPACITY;
+constexpr unsigned kCapacityReportFormat = CAPACITY_REPORT_FORMAT;
+constexpr int kFlashNumTables = FLASH_NUM_TABLES;
+static const ::CapacityReport kCapacityFromList = CAPACITY_REPORT_INIT;
 constexpr int kOtpInfoLen = OTP_INFO_LEN;
 constexpr int kOtpManufacturerAt = OTP_INFO_MANUFACTURER_AT;
 constexpr int kOtpManufacturerLen = OTP_INFO_MANUFACTURER_LEN;
@@ -313,6 +330,8 @@ constexpr unsigned kLicenseKeyClear = LICENSE_KEY_CLEAR;
 #undef CMD_WRITE_CONFIG_BINDING
 #undef CMD_GET_DEVICE_INFO
 #undef CMD_GET_PROTECTION
+#undef CMD_GET_CAPACITY
+#undef CAPACITY_REPORT_FORMAT
 #undef OTP_INFO_LEN
 #undef OTP_INFO_MANUFACTURER_AT
 #undef OTP_INFO_MANUFACTURER_LEN
@@ -4992,6 +5011,7 @@ static void testReadResponseMatching(const SerialProtoCallbacks *restore)
         {ct::CMD_READ_CONFIG_VERSION, QByteArray(), "READ_CONFIG_VERSION"},
         {ct::CMD_READ_CAN_SETUP, QByteArray(), "READ_CAN_SETUP"},
         {ct::CMD_FW_UPDATE_STATUS, QByteArray(), "FW_UPDATE_STATUS"},
+        {ct::CMD_GET_CAPACITY, QByteArray(), "GET_CAPACITY"},
         {ct::CMD_READ_MSG_CFG, rangeReq, "READ_MSG_CFG (range control)"},
     };
 
@@ -5847,6 +5867,73 @@ static void testDeviceBinding(const SerialProtoCallbacks *restore)
     serial_proto_init(restore);
 }
 
+// v19 layout identity: a header says which LAYOUT wrote it, so a variant of the
+// same store version laying the tables out differently (firmware 1.0.11,
+// include/variant.h) is refused before a record is read. One binary holds one
+// layout, so the foreign-layout case is modelled the way the device meets it:
+// a header whose identity is not this build's, everything else intact.
+static void testLayoutIdentity(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+    serial_proto_init(restore);
+    flash_store_set_device_uid(nullptr);
+
+    // The identity IS the CRC32 of the report's entries — pinned so fwstat.py
+    // (zlib.crc32 over the same bytes) and any future host reader agree.
+    const ::CapacityReport *report = flash_store_capacity_report();
+    const uint32_t id = flash_store_layout_id();
+    CHECK(id == fw_crc32(report->tables, sizeof(report->tables)));
+    CHECK(id == flash_store_layout_id());
+    // ...and NOT over the header: a report that merely says more (a later
+    // format) must not change the identity of a layout that did not change.
+    CHECK(id != fw_crc32(report, sizeof(*report)));
+
+    uint16_t counts[FLASH_NUM_TABLES] = {0};
+    flashErase();
+    CHECK(flash_store_commit(counts, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr));
+    CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+    CHECK(flash_store_config_status() == ct::CONFIG_STATUS_OK);
+    const uint16_t crc = flash_store_config_crc();
+    CHECK(crc != 0);
+
+    // Written at byte 6, little-endian, right after magic and version — the
+    // offset flash_store.c pins and fwstat.py reads.
+    uint32_t stored = 0;
+    std::memcpy(&stored, g_flash + 6, sizeof(stored));
+    CHECK(stored == id);
+    uint16_t version = 0;
+    std::memcpy(&version, g_flash + 4, sizeof(version));
+    CHECK(version == FLASH_STORE_VERSION);
+
+    // The same version, another layout: refused. config_crc() checks magic,
+    // version and identity WITHOUT the CRC, so it isolates this refusal from
+    // the checksum failure the same edit also causes; and the status is
+    // "absent", not "wrong device" — a foreign layout is not a diagnosis the
+    // host is offered, because the fix is the same as for a version change.
+    g_flash[6] ^= 0x5A;
+    CHECK(flash_store_config_crc() == 0);
+    CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+    CHECK(flash_store_config_status() == ct::CONFIG_STATUS_NONE);
+    CHECK(!flash_store_present());
+    CHECK(!engine_load_config(nullptr));
+    g_flash[6] ^= 0x5A;
+    CHECK(flash_store_config_crc() == crc);
+    CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+
+    // The commit a host actually performs carries it too: SAVE_TO_FLASH is
+    // the only path by which a configuration reaches the header.
+    flashErase();
+    CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, QByteArray()));
+    std::memcpy(&stored, g_flash + 6, sizeof(stored));
+    CHECK(stored == id);
+
+    flashErase();
+    serial_proto_init(restore);
+}
+
 // The 7.37 Mbaud soak failure, replayed end to end. Roughly one WRITE chunk in
 // 250 died on the wire AFTER its records had landed (a config-store program in
 // the same bank the core executes from stalls the CPU, the RX ring overruns,
@@ -5924,12 +6011,18 @@ static void testRetransmitSafety()
 // Build a valid image the way ctfpack does: fill the header, write the size,
 // THEN compute the CRC over everything except the CRC field itself. The order
 // matters â€” image_size is inside the CRC's span.
+// `capsBlock`, when given, is laid at FW_CAPS_OFFSET before the CRC is taken —
+// the capacity block a 1.0.10+ image carries. Empty leaves filler there, which
+// is what an older image looks like to a reader hunting for the magic.
 static QByteArray makeFirmwareImage(quint32 size, quint16 major, quint16 minor,
-                                    quint16 patch, quint16 productId = FW_PRODUCT_CAN_TRIPLE)
+                                    quint16 patch, quint16 productId = FW_PRODUCT_CAN_TRIPLE,
+                                    const QByteArray &capsBlock = QByteArray())
 {
     QByteArray img(int(size), char(0));
     for (int i = 0; i < img.size(); ++i)
         img[i] = char((i * 7 + 11) & 0xFF); // recognisable filler
+    if (!capsBlock.isEmpty())
+        std::memcpy(img.data() + FW_CAPS_OFFSET, capsBlock.constData(), size_t(capsBlock.size()));
 
     FwImageHeader hdr{};
     hdr.magic = FW_IMAGE_MAGIC;
@@ -6192,6 +6285,74 @@ static void testFirmwareUpdate()
 // idea of a conversation and the firmware's shows up here rather than on a
 // bench unit.
 
+// The capacity report read out of a .ctf. An image carries the block right
+// after its header; FirmwareImage finds it by magic, parses it with the SAME
+// function the wire path uses, and answers nullopt for an image built before
+// the block existed — which the Manager treats exactly as a unit that cannot
+// say. The block is inside the image CRC, so a tampered one is a rejected file,
+// not a wrong capacity.
+static void testFirmwareImageCapacityBlock()
+{
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const auto write = [&dir](const char *name, const QByteArray &bytes) {
+        const QString path = dir.filePath(QString::fromLatin1(name));
+        QFile f(path);
+        CHECK(f.open(QIODevice::WriteOnly));
+        f.write(bytes);
+        f.close();
+        return path;
+    };
+    // The block as the device lays it out: the magic, then its own report.
+    QByteArray block(4, char(0));
+    qToLittleEndian<quint32>(FW_CAPS_MAGIC, block.data());
+    block.append(reinterpret_cast<const char *>(flash_store_capacity_report()),
+                 int(sizeof(::CapacityReport)));
+
+    // With the block: the file says what the device would.
+    {
+        QString err;
+        const auto img = ct::FirmwareImage::load(
+            write("caps.ctf", makeFirmwareImage(8192, 1, 0, 10, FW_PRODUCT_CAN_TRIPLE, block)),
+            &err);
+        CHECK(img.has_value());
+        CHECK(img->capacity().has_value());
+        CHECK(img->capacity()->reported);
+        CHECK(img->capacity()->sameLayout(ct::DeviceCapacity::builtIn()));
+        CHECK(img->capacity()->storeVersion == img->flashStoreVersion());
+    }
+    // Without it: an older image, and nothing invented for it.
+    {
+        QString err;
+        const auto img = ct::FirmwareImage::load(write("old.ctf", makeFirmwareImage(8192, 1, 0, 9)),
+                                                 &err);
+        CHECK(img.has_value());
+        CHECK(!img->capacity().has_value());
+    }
+    // A block whose report this build cannot read counts as absent rather
+    // than half-read: the image still loads, it just cannot say.
+    {
+        QByteArray newer = block;
+        newer[4] = char(2); // format
+        QString err;
+        const auto img = ct::FirmwareImage::load(
+            write("newer.ctf", makeFirmwareImage(8192, 1, 0, 10, FW_PRODUCT_CAN_TRIPLE, newer)),
+            &err);
+        CHECK(img.has_value());
+        CHECK(!img->capacity().has_value());
+    }
+    // The block is under the image CRC: flipping one capacity byte is a
+    // corrupt file, never a plausible-looking different capacity.
+    {
+        QByteArray img = makeFirmwareImage(8192, 1, 0, 10, FW_PRODUCT_CAN_TRIPLE, block);
+        const int firstEntry = int(FW_CAPS_OFFSET) + 4 + int(sizeof(::CapacityReportHeader));
+        img[firstEntry] = char(quint8(img[firstEntry]) ^ 1u);
+        QString err;
+        CHECK(!ct::FirmwareImage::load(write("tampered.ctf", img), &err).has_value());
+        CHECK(err.contains(QStringLiteral("checksum")));
+    }
+}
+
 // Feed one host command to the firmware and translate what came back into the
 // link-level answer DeviceLink would have produced.
 static ct::FakeDeviceLink::Reply firmwareReply(quint8 cmd, const QByteArray &payload)
@@ -6317,13 +6478,22 @@ static void testConfigTransferSendAndGetAgainstTheDevice(const SerialProtoCallba
     CHECK(link.sentAny(ct::CMD_WRITE_MSG_CFG));
     CHECK(link.sentAny(ct::CMD_READ_MSG_CFG)); // the verify pass read it back
 
-    // And a Get returns what the Send left on the device.
+    // And a Get returns what the Send left on the device — read over the
+    // capacity the DEVICE reports, as the application does, and handed back
+    // with that capacity attached.
     ct::FakeDeviceLink getLink(firmwareReply);
+    ct::DeviceCapacity deviceCap;
+    {
+        QString capErr;
+        CHECK(ct::device_session::readCapacity(&getLink, &deviceCap, &capErr));
+        CHECK(deviceCap.reported);
+    }
     TransferOutcome got;
-    runTransfer(ct::ConfigTransfer::get(&getLink), &got);
+    runTransfer(ct::ConfigTransfer::get(&getLink, nullptr, deviceCap), &got);
     CHECK(got.done);
     CHECK(got.ok);
     CHECK(got.gotTables);
+    CHECK(got.tables.capacity.sameLayout(deviceCap));
     // A Get reads the WHOLE device table, capacity and all - the inactive
     // entries beyond the configuration are the device's, and mapFromDevice is
     // what filters them later. So what is asserted here is that the records
@@ -6556,6 +6726,159 @@ static void testReadoutProtection(const SerialProtoCallbacks *restore)
         QString err;
         CHECK(ct::device_session::readReadoutProtection(&link, &rp, &err));
         CHECK(rp.supported && rp.level == 1);
+    }
+    serial_proto_init(restore);
+}
+
+// CMD_GET_CAPACITY — the capacity report. Three things are held here, and the
+// third is the one that matters. The reply is the store's own report byte for
+// byte, and that report is FLASH_TABLE_LIST's expansion; every entry equals
+// the geometry the store actually runs (flash_store_capacity / item_size, the
+// numbers every WRITE is bounds-checked against); and the whole report equals
+// what THIS build of the Manager has always assumed (DeviceCapacity::builtIn),
+// table for table. That last check is what makes the report safe to start
+// trusting: until a variant ships, a device that says anything other than the
+// compiled-in numbers is a device the two headers have drifted about.
+static void testCapacityReport(const SerialProtoCallbacks *restore)
+{
+    CHECK(ct::CMD_GET_CAPACITY == fw::kCmdGetCapacity);
+    CHECK(ct::CAPACITY_REPORT_FORMAT == fw::kCapacityReportFormat);
+    CHECK(ct::DEVICE_TABLE_COUNT == fw::kFlashNumTables);
+    static_assert(sizeof(ct::CapacityReportHeader) == sizeof(::CapacityReportHeader),
+                  "GUI and firmware capacity report headers differ in size");
+    static_assert(sizeof(ct::CapacityEntry) == sizeof(::CapacityEntry),
+                  "GUI and firmware capacity entries differ in size");
+    // The host's table numbering IS the firmware's enum. The index a reply
+    // entry sits at is the table it describes, so a slip here would size the
+    // timer check from the counter table and nothing else would notice.
+    CHECK(int(ct::DeviceTable::Messages) == ENGINE_TABLE_MESSAGES);
+    CHECK(int(ct::DeviceTable::Signals) == ENGINE_TABLE_SIGNALS);
+    CHECK(int(ct::DeviceTable::Math) == ENGINE_TABLE_MATH);
+    CHECK(int(ct::DeviceTable::Conditions) == ENGINE_TABLE_CONDITIONS);
+    CHECK(int(ct::DeviceTable::Counters) == ENGINE_TABLE_COUNTERS);
+    CHECK(int(ct::DeviceTable::Timers) == ENGINE_TABLE_TIMERS);
+    CHECK(int(ct::DeviceTable::Constants) == ENGINE_TABLE_CONSTANTS);
+    CHECK(int(ct::DeviceTable::Relays) == ENGINE_TABLE_RELAYS);
+    CHECK(int(ct::DeviceTable::Tables2x16Def) == ENGINE_TABLE_TABLES_2X16_DEF);
+    CHECK(int(ct::DeviceTable::Tables2x16Out) == ENGINE_TABLE_TABLES_2X16_OUT);
+    CHECK(int(ct::DeviceTable::Tables8x8Def) == ENGINE_TABLE_TABLES_8X8_DEF);
+    CHECK(int(ct::DeviceTable::Tables8x8Row) == ENGINE_TABLE_TABLES_8X8_ROW);
+    CHECK(int(ct::DeviceTable::Integrators) == ENGINE_TABLE_INTEGRATORS);
+    CHECK(int(ct::DeviceTable::Script) == ENGINE_TABLE_SCRIPT);
+    CHECK(int(ct::DeviceTable::Crc8) == ENGINE_TABLE_CRC8);
+
+    serial_proto_init(restore);
+    engine_set_access_keys(nullptr);
+    CHECK(ct::DeviceLink::isReadResponse(ct::CMD_GET_CAPACITY));
+    CHECK(!ct::DeviceLink::echoesRequestRange(ct::CMD_GET_CAPACITY));
+
+    // The raw reply: the store's report, byte for byte, and nothing else —
+    // and that report is the X-macro's expansion, entry for entry.
+    const auto packets = exchange(ct::CMD_GET_CAPACITY, QByteArray());
+    CHECK(packets.size() == 1 && packets[0].cmd == ct::CMD_GET_CAPACITY);
+    const QByteArray raw = packets[0].payload;
+    CHECK(raw.size() == int(sizeof(::CapacityReport)));
+    CHECK(std::memcmp(raw.constData(), flash_store_capacity_report(), sizeof(::CapacityReport))
+          == 0);
+    CHECK(std::memcmp(&fw::kCapacityFromList, flash_store_capacity_report(),
+                      sizeof(::CapacityReport))
+          == 0);
+    // A payload is a confused host, not a longer question.
+    CHECK(expectNack(ct::CMD_GET_CAPACITY, QByteArray(1, char(0)), ct::ERR_INVALID_LEN));
+
+    // Parsed by the host's reader, through a link, as the application will.
+    ct::DeviceCapacity cap;
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        QString err;
+        CHECK(ct::device_session::readCapacity(&link, &cap, &err));
+        CHECK(cap.reported && err.isEmpty());
+    }
+    CHECK(cap.storeVersion == FLASH_STORE_VERSION);
+    CHECK(cap.tables.size() == FLASH_NUM_TABLES);
+    for (int t = 0; t < FLASH_NUM_TABLES; ++t) {
+        CHECK(cap.tables[t].capacity == flash_store_capacity(t));
+        CHECK(cap.tables[t].itemSize == flash_store_item_size(t));
+        CHECK(cap.tables[t].capacity == engine_table_capacity(EngineTable(t)));
+    }
+    // The whole point: what the device reports is what this build assumed.
+    const ct::DeviceCapacity assumed = ct::DeviceCapacity::builtIn();
+    CHECK(!assumed.reported);
+    CHECK(cap.sameLayout(assumed));
+    CHECK(cap.capacityOf(ct::DeviceTable::Crc8) == ct::MAX_CRC8_MESSAGES);
+    CHECK(cap.capacityOf(ct::DeviceTable::Tables8x8Row) == ct::MAX_TABLE_8X8_ROWS);
+    CHECK(cap.itemSizeOf(ct::DeviceTable::Signals) == int(sizeof(ct::CanSignalConfig)));
+    // A table this build does not know reads as absent, not as a fault.
+    CHECK(cap.capacityOf(ct::DeviceTable(200)) == 0);
+    CHECK(cap.itemSizeOf(ct::DeviceTable(200)) == 0);
+
+    // Ungated. A unit whose Get is locked still says what it holds — the
+    // negative control first, so "answered" means "not gated" rather than
+    // "no gate was armed".
+    {
+        const QByteArray getKey =
+            ct::accessKeyBytes(ct::deriveAccessKey(QStringLiteral("hold-the-door")));
+        ::AccessKeyRecord keys{};
+        keys.set_mask = ct::ACCESS_MASK_GET;
+        std::memcpy(keys.keys[ct::ACCESS_FN_GET], getKey.constData(), ct::ACCESS_KEY_LEN);
+        engine_set_access_keys(&keys);
+        serial_proto_init(restore); // nothing proved
+        CHECK(expectNack(ct::CMD_READ_CONFIG_NAME, QByteArray(), ct::ERR_LOCKED));
+        const auto locked = exchange(ct::CMD_GET_CAPACITY, QByteArray());
+        CHECK(locked.size() == 1 && locked[0].cmd == ct::CMD_GET_CAPACITY
+              && locked[0].payload == raw);
+        engine_set_access_keys(nullptr);
+        serial_proto_init(restore);
+    }
+
+    // The parser's refusals, and the one tolerance it must have.
+    {
+        ct::DeviceCapacity bad;
+        CHECK(!ct::parseCapacityReport(QByteArray(), &bad));
+        CHECK(!ct::parseCapacityReport(raw.left(3), &bad));             // short header
+        CHECK(!ct::parseCapacityReport(raw.left(raw.size() - 1), &bad)); // an entry cut short
+        QByteArray newer = raw;
+        newer[0] = char(2);
+        CHECK(!ct::parseCapacityReport(newer, &bad)); // a format this build cannot read
+        CHECK(!bad.reported);
+        // Trailing bytes are the image case — code follows the block — and
+        // must not disturb the reading.
+        CHECK(ct::parseCapacityReport(raw + QByteArray(100, char(0xAB)), &bad));
+        CHECK(bad.sameLayout(cap));
+        // An appended sixteenth table parses, indexes past everything this
+        // build names, and makes the layout a different one.
+        QByteArray longer = raw;
+        longer[1] = char(FLASH_NUM_TABLES + 1);
+        longer.append(QByteArray::fromHex("0a000c00")); // 10 records of 12 bytes
+        CHECK(ct::parseCapacityReport(longer, &bad));
+        CHECK(bad.tables.size() == FLASH_NUM_TABLES + 1);
+        CHECK(bad.capacityOf(ct::DeviceTable::Crc8) == ct::MAX_CRC8_MESSAGES);
+        CHECK(bad.tables.last().capacity == 10 && bad.tables.last().itemSize == 12);
+        CHECK(!bad.sameLayout(cap));
+    }
+    // The reader on a unit whose report this build cannot read: an error that
+    // names the update, not a silent fall back to numbers the unit has just
+    // said are wrong.
+    {
+        ct::FakeDeviceLink link([&raw](quint8, const QByteArray &) {
+            QByteArray newer = raw;
+            newer[0] = char(2);
+            return ct::FakeDeviceLink::Reply::ack(newer);
+        });
+        ct::DeviceCapacity c;
+        QString err;
+        CHECK(!ct::device_session::readCapacity(&link, &c, &err));
+        CHECK(err.contains(QStringLiteral("format")));
+    }
+    // Older firmware: no report, no error, and nothing assumed HERE — the
+    // caller substitutes builtIn(), and must be able to tell it did.
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        link.nackCommand(ct::CMD_GET_CAPACITY, ct::ERR_INVALID_CMD);
+        ct::DeviceCapacity c;
+        QString err;
+        CHECK(ct::device_session::readCapacity(&link, &c, &err));
+        CHECK(!c.reported && err.isEmpty() && c.tables.isEmpty());
     }
     serial_proto_init(restore);
 }
@@ -7148,7 +7471,12 @@ int main(int argc, char *argv[])
         // behind messages shifts and a v17 image is refused rather than misread
         // -- v4's hazard again, and the reason this one could not ride along in
         // place the way triggered transmit did. The WIRE version stays put.
-        CHECK(FLASH_STORE_VERSION == 18u);
+        // v19: the LAYOUT IDENTITY joined the header (firmware 1.0.11), so a
+        // variant of the same version laying the tables out differently is
+        // refused by the store rather than misread. The field moved the
+        // header's CRC span -- the v16 rule -- hence the bump. The WIRE
+        // version stays put: not one record changed shape.
+        CHECK(FLASH_STORE_VERSION == 19u);
         // The configurator carries its own copy so a Send can check the device
         // before writing to it. This file is the only place that sees both, so
         // it is the only place the two can be held equal.
@@ -9541,6 +9869,7 @@ int main(int argc, char *argv[])
     testDeviceAccess(&protoCb);
     testOtpDeviceInfo(&protoCb);
     testReadoutProtection(&protoCb);
+    testCapacityReport(&protoCb);
     testFirmwareLicense(&protoCb);
     testConfigVersion(&protoCb);
     testSealedInstallAgainstTheDevice(&protoCb);
@@ -9589,8 +9918,10 @@ int main(int argc, char *argv[])
     testMessageProtectionIsHostOnly(&protoCb);
     testAccessKeyDurability(&protoCb);
     testDeviceBinding(&protoCb);
+    testLayoutIdentity(&protoCb);
     testRetransmitSafety();
     testFirmwareUpdate();
+    testFirmwareImageCapacityBlock();
 
     if (failures == 0)
         std::printf("ALL FIRMWARE-LINK TESTS PASSED\n");

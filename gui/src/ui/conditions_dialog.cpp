@@ -1151,10 +1151,10 @@ void ConditionsDialog::rebuild()
 
 void ConditionsDialog::onAdd()
 {
-    if (m_rows.size() >= MAX_CONDITIONS) {
+    const int limit = m_config->capacity().capacityOf(DeviceTable::Conditions);
+    if (m_rows.size() >= limit) {
         QMessageBox::warning(this, tr("User Conditions"),
-                             tr("The device supports at most %1 User Conditions.")
-                                 .arg(MAX_CONDITIONS));
+                             tr("The device supports at most %1 User Conditions.").arg(limit));
         return;
     }
     ConditionRow row;

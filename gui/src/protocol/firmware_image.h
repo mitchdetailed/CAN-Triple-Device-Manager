@@ -22,6 +22,7 @@
 
 #include <optional>
 
+#include "capacity.h"
 #include "fw_image.h"
 
 namespace ct {
@@ -44,6 +45,14 @@ public:
     quint32 crc32() const { return m_header.image_crc32; }
     quint32 minBootloaderVersion() const { return m_header.min_bootloader_version; }
 
+    // The capacity block after the header (FW_CAPS_OFFSET, fw_image.h): what
+    // this image can hold, table by table, read from the file alone and
+    // parsed by the same function that reads a unit's reply. nullopt for an
+    // image built before the block existed, or whose report this build cannot
+    // read — the Manager then assumes DeviceCapacity::builtIn() for it, which
+    // is what such firmware holds.
+    const std::optional<DeviceCapacity> &capacity() const { return m_capacity; }
+
     // Compare against a device's running version. Returns <0 older, 0 same,
     // >0 newer. Used to warn about installing an older build, which is legal
     // and occasionally intended, but should never happen by accident.
@@ -58,6 +67,7 @@ private:
 
     QByteArray m_bytes;
     FwImageHeader m_header {};
+    std::optional<DeviceCapacity> m_capacity;
 };
 
 } // namespace ct

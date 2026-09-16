@@ -21,13 +21,16 @@
 #include <QLineEdit>
 #include <QPushButton> // QDialogButtonBox::button() returns one; the base-class conversion needs the full type
 #include <QSpinBox>
+#include <QTableWidget>
 
 #include <cstdio>
 
+#include "../src/model/configuration.h"
 #include "../src/protocol/device_link.h"
 #include "../src/protocol/wire_structs.h"
 #include "../src/ui/firmware_license_dialog.h"
 #include "../src/ui/secure_builder_dialog.h"
+#include "../src/ui/target_firmware_dialog.h"
 
 static int fails = 0;
 
@@ -318,6 +321,101 @@ void testBuilderHardwareMatches()
     CHECK(build->isEnabled()); // install-only again, whatever the fields hold
 }
 
+// ------------------------------------------------------- Target Firmware
+//
+// The dialog with no device: what it says about a document sized against the
+// built-in numbers, what it shows for a target that lacks a table, and that
+// "Use Built-in Numbers" is the way back. The device and image routes are a
+// round trip and a file chooser, exercised on a bench; the parsing behind them
+// is pinned in test_firmware_link and test_roundtrip.
+static void testTargetFirmwareDialog()
+{
+    Configuration cfg;
+    DeviceLink link; // never opened
+    {
+        TargetFirmwareDialog dlg(&cfg, &link);
+        CHECK(labelStartingWith(&dlg, QStringLiteral("<b>Target:</b> this program's built-in "
+                                                     "numbers"))
+              != nullptr);
+        auto *table = dlg.findChild<QTableWidget *>();
+        CHECK(table != nullptr);
+        if (!table)
+            return;
+        CHECK(table->rowCount() == 13);
+        // The first row is messages: holds the built-in number, uses nothing.
+        CHECK(table->item(0, 0)->text() == QStringLiteral("messages"));
+        CHECK(table->item(0, 1)->text() == QString::number(MAX_MESSAGES));
+        CHECK(table->item(0, 2)->text() == QStringLiteral("0"));
+        // No device: that route is off, the file route is live.
+        for (QPushButton *b : dlg.findChildren<QPushButton *>()) {
+            if (b->text() == QStringLiteral("Use Connected Device"))
+                CHECK(!b->isEnabled());
+            if (b->text() == QStringLiteral("Choose Firmware Image…"))
+                CHECK(b->isEnabled());
+        }
+    }
+
+    // A target that lacks integrators and holds forty CRC8 rules, under a
+    // document using two constants.
+    DeviceCapacity small = DeviceCapacity::builtIn();
+    small.tables[int(DeviceTable::Integrators)].capacity = 0;
+    small.tables[int(DeviceTable::Crc8)].capacity = 40;
+    small.reported = true;
+    small.label = QStringLiteral("can-triple-9.9.9.ctf (firmware 9.9.9)");
+    cfg.setCapacity(small);
+    for (int i = 0; i < 2; ++i) {
+        ConstantRow k;
+        k.name = QStringLiteral("K%1").arg(i);
+        k.dataType = QStringLiteral("u16");
+        k.value = i;
+        cfg.constantRows.append(k);
+    }
+    {
+        TargetFirmwareDialog dlg(&cfg, &link);
+        CHECK(labelStartingWith(&dlg, QStringLiteral("<b>Target:</b> can-triple-9.9.9.ctf"))
+              != nullptr);
+        auto *table = dlg.findChild<QTableWidget *>();
+        CHECK(table != nullptr);
+        if (!table)
+            return;
+        int integratorsRow = -1, crc8Row = -1, constantsRow = -1;
+        for (int r = 0; r < table->rowCount(); ++r) {
+            const QString name = table->item(r, 0)->text();
+            if (name == QStringLiteral("integrators"))
+                integratorsRow = r;
+            else if (name == QStringLiteral("CRC8 rules"))
+                crc8Row = r;
+            else if (name == QStringLiteral("constants"))
+                constantsRow = r;
+        }
+        CHECK(integratorsRow >= 0 && crc8Row >= 0 && constantsRow >= 0);
+        if (integratorsRow < 0 || crc8Row < 0 || constantsRow < 0)
+            return;
+        CHECK(table->item(integratorsRow, 1)->text() == QStringLiteral("none"));
+        CHECK(table->item(crc8Row, 1)->text() == QStringLiteral("40"));
+        CHECK(table->item(constantsRow, 2)->text() == QStringLiteral("2"));
+
+        // Back to the built-in numbers through the button: the document's
+        // target and the dialog both follow, and the document knows it changed.
+        cfg.setDirty(false);
+        QPushButton *builtIn = nullptr;
+        for (QPushButton *b : dlg.findChildren<QPushButton *>())
+            if (b->text() == QStringLiteral("Use Built-in Numbers"))
+                builtIn = b;
+        CHECK(builtIn != nullptr);
+        if (!builtIn)
+            return;
+        builtIn->click();
+        CHECK(!cfg.capacity().reported);
+        CHECK(cfg.capacity().sameLayout(DeviceCapacity::builtIn()));
+        CHECK(cfg.isDirty());
+        CHECK(labelStartingWith(&dlg, QStringLiteral("<b>Target:</b> this program's built-in "
+                                                     "numbers"))
+              != nullptr);
+        CHECK(table->item(integratorsRow, 1)->text() == QString::number(MAX_INTEGRATORS));
+    }
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -327,6 +425,7 @@ int main(int argc, char **argv)
     testBuilderRefusesWhatCannotInstall();
     testBuilderHardwareMatches();
     testLicenseDialogOfflineAndTheClearBox();
+    testTargetFirmwareDialog();
 
     if (fails == 0)
         std::printf("test_license_dialogs: all checks passed\n");

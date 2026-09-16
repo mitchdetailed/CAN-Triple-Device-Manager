@@ -531,7 +531,8 @@ QWidget *CommunicationsDialog::buildBusTab(int busIndex)
                                 "a supplier saved."));
     buttonColumn->addWidget(selectButton);
     auto *importButton = new QPushButton(tr("Import DBC…"));
-    importButton->setToolTip(tr("Import messages and signals from a .dbc file"));
+    importButton->setToolTip(tr("Import messages and signals from a .dbc file, as receive "
+                                "or transmit messages"));
     connect(importButton, &QPushButton::clicked, this, [this, busIndex]() { onImportDbc(busIndex); });
     buttonColumn->addWidget(importButton);
     tab.newButton = new QPushButton(tr("New…"));
@@ -646,7 +647,7 @@ void CommunicationsDialog::rebuildSections(int busIndex)
                 ++totalMessages;
     tab.availableLabel->setText(tr("%1 of %2 device messages used")
                                     .arg(totalMessages)
-                                    .arg(MAX_MESSAGES));
+                                    .arg(m_config->capacity().capacityOf(DeviceTable::Messages)));
     updateChannelPane(busIndex);
 }
 
@@ -1337,14 +1338,15 @@ void CommunicationsDialog::onLoadTemplate(int busIndex)
     // CHECKED BEFORE ANYTHING IS CREATED. The alternative is a document over the
     // device's limit and a Send that refuses it, with the repair being to work
     // out which of the thirty messages just added are the surplus.
-    if (used + adding > MAX_MESSAGES) {
+    const int limit = m_config->capacity().capacityOf(DeviceTable::Messages);
+    if (used + adding > limit) {
         QMessageBox::warning(this, tr("Load Communications Template"),
                              tr("This template adds %1 message(s), and this configuration "
                                 "already uses %2 of the device's %3. Remove some messages "
                                 "first.")
                                  .arg(adding)
                                  .arg(used)
-                                 .arg(MAX_MESSAGES));
+                                 .arg(limit));
         return;
     }
 
@@ -1585,7 +1587,10 @@ void CommunicationsDialog::onImportDbc(int busIndex)
         return;
     }
 
-    ImportDbcDialog dlg(m_config, dbc, QFileInfo(path).fileName(), busIndex, warnings, this);
+    // liveView(): the picker behind a transmit row's Send Channel annotates
+    // channels by what generates them, and this dialog's unsaved sections count.
+    ImportDbcDialog dlg(m_config, dbc, QFileInfo(path).fileName(), busIndex, warnings, this,
+                        liveView());
     if (dlg.exec() != QDialog::Accepted)
         return;
 

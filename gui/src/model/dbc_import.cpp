@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QPair>
 #include <QRegularExpression>
+#include <QSet>
 
 #include <algorithm>
 #include <cmath>
@@ -43,6 +44,17 @@ DbcFile parseDbc(const QString &text, QStringList *warnings)
     // marker a float imports as an integer and decodes to garbage on-device.
     static const QRegularExpression valTypeRe(QStringLiteral(
         R"(^\s*SIG_VALTYPE_\s+(\d+)\s+([A-Za-z_]\w*)\s*:\s*(\d+))"));
+    // BA_ "GenMsgCycleTime" BO_ <msgId> <ms>;  and its file-wide default,
+    // BA_DEF_DEF_ "GenMsgCycleTime" <ms>;  The one attribute a transmit import
+    // wants: how often the message goes out. Every other attribute is still
+    // ignored. The value is an integer in every file seen, but some tools
+    // write "100.0", so a fraction is accepted and rounded.
+    static const QRegularExpression cycleRe(QStringLiteral(
+        R"RX(^\s*BA_\s+"GenMsgCycleTime"\s+BO_\s+(\d+)\s+(\d+(?:\.\d+)?)\s*;)RX"));
+    static const QRegularExpression cycleDefaultRe(QStringLiteral(
+        R"RX(^\s*BA_DEF_DEF_\s+"GenMsgCycleTime"\s+(\d+(?:\.\d+)?)\s*;)RX"));
+    int defaultCycleMs = 0;
+    QSet<int> statedCycle; // message indices with a BA_ line of their own
 
     // Track the current message by index, not pointer: appending another
     // message can reallocate the QList and dangle a cached pointer.
@@ -112,6 +124,29 @@ DbcFile parseDbc(const QString &text, QStringList *warnings)
             continue;
         }
 
+        // BA_ lines come after the BO_/SG_ blocks too. The message is looked
+        // up the way SIG_VALTYPE_ does it, on either spelling of the id.
+        if (trimmed.startsWith(QStringLiteral("BA_"))) {
+            const auto cd = cycleDefaultRe.match(line);
+            if (cd.hasMatch()) {
+                defaultCycleMs = qRound(cd.captured(1).toDouble());
+                continue;
+            }
+            const auto cy = cycleRe.match(line);
+            if (!cy.hasMatch())
+                continue; // some other attribute
+            const quint32 rawId = cy.captured(1).toUInt();
+            for (int i = 0; i < file.messages.size(); ++i) {
+                DbcMessage &msg = file.messages[i];
+                if (msg.rawId != rawId && msg.canId != (rawId & 0x1FFFFFFFu))
+                    continue;
+                msg.cycleTimeMs = qRound(cy.captured(2).toDouble());
+                statedCycle.insert(i);
+                break;
+            }
+            continue;
+        }
+
         // SIG_VALTYPE_ lines come after the BO_/SG_ blocks, so every signal
         // they reference is already parsed.
         if (trimmed.startsWith(QStringLiteral("SIG_VALTYPE_"))) {
@@ -155,6 +190,15 @@ DbcFile parseDbc(const QString &text, QStringList *warnings)
             continue;
         }
     }
+
+    // The file-wide default applies to every message without a line of its
+    // own. Applied after the loop, because BA_DEF_DEF_ may come either side of
+    // the BA_ lines, and before the sort, because statedCycle holds file-order
+    // indices.
+    if (defaultCycleMs > 0)
+        for (int i = 0; i < file.messages.size(); ++i)
+            if (!statedCycle.contains(i))
+                file.messages[i].cycleTimeMs = defaultCycleMs;
 
     // Order the messages by arbitration id, lowest first, which is the order a
     // bus arbitrates in and the order every other CAN tool lists them in. A DBC
@@ -223,6 +267,29 @@ CommsChannelRow rowFromDbcSignal(const DbcSignal &sig, const QString &channelNam
     row.dbcOffset = sig.offset;
     row.defaultValue = 0.0;
     return row;
+}
+
+CommsChannelRow transmitRowFromDbcSignal(const DbcSignal &sig, const QString &channelName)
+{
+    CommsChannelRow row = rowFromDbcSignal(sig, channelName);
+    // Negated — see the declaration — and 0 stays 0 rather than becoming -0:
+    // the two compare equal but do not serialise alike, and "-0" in a file is
+    // a question nobody should have to answer.
+    row.dbcOffset = sig.offset == 0.0 ? 0.0 : -sig.offset;
+    return row;
+}
+
+void transmitTimingFromCycleTime(int cycleTimeMs, int *rateHz, int *periodMs)
+{
+    if (cycleTimeMs <= 0)
+        return;
+    // The mapper's own bounds (device_mapper: period_ms 5..65535) so the
+    // record says what the device will do.
+    const int period = qBound(5, cycleTimeMs, 65535);
+    if (periodMs)
+        *periodMs = period;
+    if (rateHz)
+        *rateHz = qBound(1, qRound(1000.0 / period), 200);
 }
 
 // Decimal places implied by a scaling factor (0.1 -> 1, 0.05 -> 2, 1 -> 0).

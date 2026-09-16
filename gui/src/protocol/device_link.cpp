@@ -85,6 +85,11 @@ bool DeviceLink::isReadResponse(quint8 cmd)
     // KEY_PROVE answers with the device's HMAC over the host's own nonce, so it
     // carries data and belongs here, exactly as the access challenge does.
     case CMD_LICENSE_KEY_PROVE:
+    // v24: the capacity report. Fixed shape, no echo — listed in the same edit
+    // as the command, and in test_roundtrip's fixed-shape list in that edit
+    // too, so this is the first read command in the family not to earn its
+    // entry on a bench.
+    case CMD_GET_CAPACITY:
         return true;
     default:
         return false;

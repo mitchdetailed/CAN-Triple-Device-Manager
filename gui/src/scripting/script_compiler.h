@@ -84,6 +84,11 @@ class Configuration;
 // a script names channels the same way the rest of the program does.
 struct ScriptSymbols {
     QHash<QString, quint16> signalIndex;
+    // The channel table of the firmware the indices were resolved for — the
+    // tables' capacity — which is what the device's verifier bounds a script's
+    // channel references against. This build's ceiling until a mapping says
+    // otherwise.
+    int signalSlots = MAX_SIGNALS;
 
     // Build from a configuration by running the device mapper. Returns false
     // with *error when the configuration itself cannot be mapped (the same

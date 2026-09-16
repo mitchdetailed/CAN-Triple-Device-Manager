@@ -373,9 +373,10 @@ static QStringList reservedNames(Configuration *config, const QList<ConstantRow>
 
 void ConstantsDialog::onAdd()
 {
-    if (m_rows.size() >= MAX_CONSTANTS) {
+    const int limit = m_config->capacity().capacityOf(DeviceTable::Constants);
+    if (m_rows.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
-                             tr("The device supports at most %1 constants.").arg(MAX_CONSTANTS));
+                             tr("The device supports at most %1 constants.").arg(limit));
         return;
     }
     ConstantRowEditor editor(m_rows, -1, reservedNames(m_config, m_rows, m_originalNames),

@@ -1147,6 +1147,20 @@ void Configuration::setConfigTitle(const QString &title)
     setDirty();
 }
 
+void Configuration::setCapacity(const DeviceCapacity &capacity)
+{
+    const bool changed = !m_capacity.sameLayout(capacity) || m_capacity.label != capacity.label
+                         || m_capacity.reported != capacity.reported;
+    m_capacity = capacity;
+    if (!changed)
+        return;
+    // An edit: the target is written to the file, so a document whose target
+    // moved has something to save. The dirty flag stays put when nothing
+    // moved, so re-choosing the same unit is not a phantom change.
+    setDirty();
+    emit capacityChanged();
+}
+
 QString Configuration::effectiveTitle() const
 {
     if (!m_configTitle.isEmpty())
@@ -1209,6 +1223,10 @@ void Configuration::clearContent()
     m_configTitle.clear();
     m_catalog.setUserChannels({});
     m_filePath.clear();
+    // Back to this build's numbers. A Get sets the unit's report straight
+    // after this call; a New document is sized like every firmware that has
+    // never said otherwise.
+    m_capacity = DeviceCapacity::builtIn();
     setDirty(false);
     emit documentReset();
 }
@@ -1712,6 +1730,19 @@ bool Configuration::setCommsPassword(const QString &password)
 // HOLDS at the limit where the author asked it to wrap. A distance or fuel
 // total silently pinned at its ceiling is the same class of quiet behaviour
 // change that earned v19 its bump for clampToRange, so it earns one too.
+//
+// "targetCapacity" (the firmware capacity a document is sized against, written
+// only once a target has been chosen) deliberately did NOT bump this, and the
+// reason is the test every entry above applies: what does an older build do
+// with the key it does not know? It sizes the document against its own
+// constants instead — and that is not a silent misread. A document that fits
+// them loads and sends exactly as it always did; one that does not fit them is
+// refused BY NAME at Check Channels and at Send ("device CRC8 table is full
+// (20)"), which is loud, and is the same refusal that build would give the
+// same rows had they been typed in by hand. Nothing the device runs is lost or
+// changed in meaning; only a sizing assumption is, and the older build
+// recomputes it. A bump would refuse every file this version saves to a 1.2.x
+// build for the sake of information that build cannot use.
 static constexpr int kConfigSchemaVersion = 21;
 
 // The one accessor, so nothing outside this file has to hold a second copy of
@@ -2173,6 +2204,16 @@ void Configuration::loadBody(const QJsonObject &root, int fileVersion)
     setScript(root["scriptSource"].toString(),
               QByteArray::fromBase64(root["scriptBytecode"].toString().toLatin1()));
     m_configTitle = root["configTitle"].toString();
+    // The target firmware, present only in a document that chose one (File >
+    // Target Firmware…, or a Get). Absent — every file written before the
+    // capacity report, and every document that never targeted anything —
+    // means this build's numbers, which is what such a document was sized
+    // against when it was written. Directly, not through setCapacity: a load
+    // is not an edit, and documentReset follows.
+    DeviceCapacity target;
+    m_capacity = DeviceCapacity::fromJson(root["targetCapacity"].toObject(), &target)
+                     ? target
+                     : DeviceCapacity::builtIn();
     // v8. Absent in every older file, and absent is right: a pre-v8 document had
     // no access passwords, so the default set says exactly what was true of it.
     // A migrated read-protected file lands here too, which is where its old lock
@@ -2282,6 +2323,12 @@ QJsonObject Configuration::buildBody() const
     root["tables8x8"] = tables8x8;
     root["configTitle"] = m_configTitle;
     root["comments"] = comments;
+    // The target firmware, only when one was chosen: a document sized against
+    // this build's assumptions records nothing, so every existing .ct3 stays
+    // byte-identical on save and loads as it always did. See the note beside
+    // kConfigSchemaVersion for why this key earned no bump.
+    if (m_capacity.reported)
+        root["targetCapacity"] = m_capacity.toJson();
     // The script, in whichever of its two forms this document holds. Both keys
     // are written only when non-empty, so every existing .ct3 stays
     // byte-identical and a document with no script carries no trace of the
@@ -2790,6 +2837,9 @@ void Configuration::copyContentTo(Configuration &target) const
     // it in existence.
     target.setScript(m_scriptSource, m_scriptBytecode);
     target.m_catalog = m_catalog;
+    // A live view maps against the same ceiling as its source, or a picker
+    // would judge "fits" by different numbers than the Send it previews.
+    target.m_capacity = m_capacity;
     // m_accessVerifiers and m_commsRevealed ARE copied, and that reversed a
     // deliberate-looking omission. A live view is a Configuration, so anything
     // asked of a Configuration can be asked of it — including

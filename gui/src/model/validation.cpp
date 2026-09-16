@@ -515,12 +515,13 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
     // Named the way the preserved-values overflow is: the total, the limit, and
     // how many to take back, because "over capacity" without a number sends the
     // user counting sections by hand.
-    if (crc8Sections > MAX_CRC8_MESSAGES)
+    const int maxCrc8 = config.capacity().capacityOf(DeviceTable::Crc8);
+    if (crc8Sections > maxCrc8)
         add(ValidationIssue::Error, QStringLiteral("Transmit CRC8"),
             QStringLiteral("%1 messages stamp a CRC8, but the device runs at most %2 CRC8 "
                            "rules across all buses — remove the checksum from %3 of them")
-                .arg(crc8Sections).arg(MAX_CRC8_MESSAGES)
-                .arg(crc8Sections - MAX_CRC8_MESSAGES));
+                .arg(crc8Sections).arg(maxCrc8)
+                .arg(crc8Sections - maxCrc8));
 
     // ---------------------------------------------------------------------
     // The one channel-level conflict that matters: two things WRITING the same
@@ -1113,28 +1114,33 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
     int rxCount = 0, txCount = 0;
     for (const CanMessageConfig &m : mapped.tables.messages)
         (m.flags & MSGFLAG_TRANSMIT) ? ++txCount : ++rxCount;
+    // The "of" figures are the capacity the tables were mapped against — the
+    // document's, which a Get set to the unit's report — not this build's
+    // constants.
+    const auto holds = [&mapped](DeviceTable t) { return mapped.tables.capacity.capacityOf(t); };
     add(ValidationIssue::Info, QStringLiteral("Device usage"),
         // The 8x8 figure counts DEFINITIONS, which is the capacity a user can
-        // exhaust. Its grid rows are a second device table of
-        // MAX_TABLES_8X8 * TABLE_8X8_SITES entries, but every table always
-        // contributes exactly eight of them, so that count can never run out
-        // first and reporting it would be one more number saying the same thing.
+        // exhaust. Its grid rows are a second device table of eight rows per
+        // definition, but every table always contributes exactly eight of
+        // them, so that count can never run out first and reporting it would
+        // be one more number saying the same thing.
         QStringLiteral("%1/%2 messages (%3 receive + %4 transmit), %5/%6 signals, "
                        "%7/%8 math, %9/%10 conditions, %11/%12 counters, %13/%14 timers, "
                        "%15/%16 constants, %17/%18 relays, %19/%20 2x16 + %21/%22 8x8 tables, "
                        "%23/%24 integrators, %25/%26 CRC8 rules")
-            .arg(mapped.tables.messages.size()).arg(MAX_MESSAGES).arg(rxCount).arg(txCount)
-            .arg(mapped.tables.signalConfigs.size()).arg(MAX_SIGNALS)
-            .arg(mapped.tables.math.size()).arg(MAX_MATH_COMPUTATIONS)
-            .arg(mapped.tables.conditions.size()).arg(MAX_CONDITIONS)
-            .arg(mapped.tables.counters.size()).arg(MAX_COUNTERS)
-            .arg(mapped.tables.timers.size()).arg(MAX_TIMERS)
-            .arg(mapped.tables.constants.size()).arg(MAX_CONSTANTS)
-            .arg(mapped.tables.relays.size()).arg(MAX_RELAYS)
-            .arg(mapped.tables.tables2x16Def.size()).arg(MAX_TABLES_2X16)
-            .arg(mapped.tables.tables8x8Def.size()).arg(MAX_TABLES_8X8)
-            .arg(mapped.tables.integrators.size()).arg(MAX_INTEGRATORS)
-            .arg(mapped.tables.crc8.size()).arg(MAX_CRC8_MESSAGES));
+            .arg(mapped.tables.messages.size()).arg(holds(DeviceTable::Messages))
+            .arg(rxCount).arg(txCount)
+            .arg(mapped.tables.signalConfigs.size()).arg(holds(DeviceTable::Signals))
+            .arg(mapped.tables.math.size()).arg(holds(DeviceTable::Math))
+            .arg(mapped.tables.conditions.size()).arg(holds(DeviceTable::Conditions))
+            .arg(mapped.tables.counters.size()).arg(holds(DeviceTable::Counters))
+            .arg(mapped.tables.timers.size()).arg(holds(DeviceTable::Timers))
+            .arg(mapped.tables.constants.size()).arg(holds(DeviceTable::Constants))
+            .arg(mapped.tables.relays.size()).arg(holds(DeviceTable::Relays))
+            .arg(mapped.tables.tables2x16Def.size()).arg(holds(DeviceTable::Tables2x16Def))
+            .arg(mapped.tables.tables8x8Def.size()).arg(holds(DeviceTable::Tables8x8Def))
+            .arg(mapped.tables.integrators.size()).arg(holds(DeviceTable::Integrators))
+            .arg(mapped.tables.crc8.size()).arg(holds(DeviceTable::Crc8)));
 
     return issues;
 }

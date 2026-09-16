@@ -17,6 +17,7 @@ class CanViewerDialog;
 class HelpWindow;
 class LuaConsoleDialog;
 class MonitorChannelsDialog;
+struct DeviceTables;
 
 class MainWindow : public QMainWindow
 {
@@ -36,6 +37,9 @@ private:
     void onSecureBuilder();
     void onCheckChannels();
     void onConfigSummary();
+    // Which firmware's capacities the document is sized against — see
+    // TargetFirmwareDialog and Configuration::capacity().
+    void onTargetFirmware();
     void onRevealProtectedComms();
     // Opens `path`, asking for a password when the file needs one. Shared by
     // Open… and the recent-files list so both handle a locked file identically.
@@ -119,6 +123,17 @@ private:
     // locked configuration is never asked for a password they were never given.
     bool ensureDeviceAccess(AccessFunction fn);
 
+    // Do these mapped tables fit the connected unit's reported capacity? Reads
+    // CMD_GET_CAPACITY and, on a shortfall, names the tables in a warning
+    // titled `title`. False means the caller must not send. See the definition.
+    bool tablesFitDevice(const DeviceTables &tables, const QString &title);
+
+    // Enables each Calculations item only when the target firmware has that
+    // table at all: a variant built without integrators offers no Integrators
+    // dialog, with a tooltip on the disabled item saying where to change the
+    // target. Runs on document reset and whenever the target changes.
+    void updateCapacityGates();
+
     // "May this session lower a Protect Communication marking?" — which by spec
     // means a CONNECTED DEVICE confirming the Protected Comms password.
     // Handed to Communications Setup as a ProtectedCommsProver so the dialogs
@@ -153,6 +168,15 @@ private:
     QAction *m_concealAction = nullptr;
     QAction *m_connectAction = nullptr;
     QAction *m_disconnectAction = nullptr;
+    // The Calculations items updateCapacityGates() switches.
+    QAction *m_mathAction = nullptr;
+    QAction *m_conditionsAction = nullptr;
+    QAction *m_timersAction = nullptr;
+    QAction *m_countersAction = nullptr;
+    QAction *m_integratorsAction = nullptr;
+    QAction *m_constantsAction = nullptr;
+    QAction *m_tablesAction = nullptr;
+    QAction *m_scriptAction = nullptr;
     // Online > Connect's memory, this session only: the port is chosen fresh
     // every run by design, but within a run "the one I was just using" is
     // almost always the answer.

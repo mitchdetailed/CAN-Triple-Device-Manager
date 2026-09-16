@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.2.1 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.2.2 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -259,7 +259,9 @@ endif()
 qt_add_executable(CANTripleDeviceManager WIN32
     src/main.cpp
     src/protocol/asc_log.cpp
+    src/protocol/can_log_export.cpp
     src/protocol/asc_log.h
+    src/protocol/can_log_export.h
     src/protocol/cobs.cpp
     src/protocol/cobs.h
     src/protocol/config_transfer.cpp
@@ -277,6 +279,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/protocol/access_state.h
     src/protocol/device_session.cpp
     src/protocol/device_session.h
+    src/protocol/capacity.cpp
+    src/protocol/capacity.h
     src/protocol/framer.cpp
     src/protocol/framer.h
     src/protocol/firmware_image.cpp
@@ -379,6 +383,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/ui/integrators_dialog.h
     src/ui/connection_settings_dialog.cpp
     src/ui/connection_settings_dialog.h
+    src/ui/target_firmware_dialog.cpp
+    src/ui/target_firmware_dialog.h
     src/ui/edit_channel_dialog.cpp
     src/ui/edit_channel_dialog.h
     src/ui/firmware_update_dialog.cpp
@@ -545,6 +551,7 @@ add_dependencies(CANTripleDeviceManager help_docs)
 qt_add_executable(test_roundtrip
     test/test_roundtrip.cpp
     src/protocol/asc_log.cpp
+    src/protocol/can_log_export.cpp
     src/model/sealed_stream.cpp
     src/protocol/cobs.cpp
     src/protocol/framer.cpp
@@ -562,6 +569,7 @@ qt_add_executable(test_roundtrip
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -605,6 +613,7 @@ qt_add_executable(test_firmware_link
     src/protocol/cobs.cpp
     src/protocol/framer.cpp
     src/protocol/device_session.cpp
+    src/protocol/capacity.cpp
     src/protocol/device_link.cpp
     src/model/access_keys.cpp
     src/model/channel_catalog.cpp
@@ -708,6 +717,7 @@ qt_add_executable(scriptc
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -733,6 +743,7 @@ qt_add_executable(test_script_compiler
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -764,6 +775,7 @@ qt_add_executable(test_script_sim
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -795,6 +807,7 @@ qt_add_executable(test_script_editor
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -819,12 +832,14 @@ qt_add_executable(test_help_access
     src/ui/lua_console_dialog.cpp
     src/protocol/device_link.cpp
     src/protocol/device_session.cpp
+    src/protocol/capacity.cpp
     src/protocol/framer.cpp
     src/protocol/cobs.cpp
     src/protocol/firmware_image.cpp
     src/protocol/firmware_update.cpp
     src/protocol/config_transfer.cpp
     src/protocol/asc_log.cpp
+    src/protocol/can_log_export.cpp
     src/scripting/script_compiler.cpp
     src/scripting/script_disassembler.cpp
     src/scripting/script_simulator.cpp
@@ -874,6 +889,7 @@ qt_add_executable(test_channel_labels
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -898,6 +914,7 @@ qt_add_executable(ct3check
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -952,6 +969,7 @@ qt_add_executable(test_comms_multiselect
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -994,6 +1012,7 @@ qt_add_executable(test_message_type_gating
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1025,6 +1044,7 @@ qt_add_executable(test_add_channel_preview
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1061,6 +1081,7 @@ qt_add_executable(test_name_limits
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1088,7 +1109,13 @@ qt_add_executable(test_license_dialogs
     test/test_license_dialogs.cpp
     src/ui/secure_builder_dialog.cpp
     src/ui/firmware_license_dialog.cpp
+    # The Target Firmware dialog is driven here too: same shape (a document, a
+    # link that never opens), and its Choose Firmware Image… needs the image
+    # loader, which needs the device's validator from ct_device_core.
+    src/ui/target_firmware_dialog.cpp
+    src/protocol/firmware_image.cpp
     src/protocol/device_session.cpp
+    src/protocol/capacity.cpp
     src/protocol/device_link.cpp
     src/protocol/access_state.cpp
     src/protocol/cobs.cpp
@@ -1139,6 +1166,7 @@ qt_add_executable(test_dbc_names
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1176,6 +1204,7 @@ qt_add_executable(test_channel_source
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1207,6 +1236,7 @@ qt_add_executable(test_json_format
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1244,6 +1274,7 @@ qt_add_executable(test_frame_layout
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1286,6 +1317,7 @@ qt_add_executable(test_comms_template
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1304,6 +1336,7 @@ qt_add_executable(test_can_viewer
     test/test_can_viewer.cpp
     src/ui/can_viewer_dialog.cpp
     src/protocol/asc_log.cpp
+    src/protocol/can_log_export.cpp
     src/protocol/cobs.cpp
     src/protocol/device_link.cpp
     src/protocol/framer.cpp
@@ -1328,6 +1361,7 @@ qt_add_executable(test_script_examples
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1357,6 +1391,7 @@ qt_add_executable(test_tables
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1382,6 +1417,7 @@ qt_add_executable(test_lua
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1429,6 +1465,7 @@ qt_add_executable(test_protection
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
