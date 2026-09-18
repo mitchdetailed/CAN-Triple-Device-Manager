@@ -52,6 +52,36 @@ things a Protect Communication message asks for. A <b>Read Only</b> message
 reports its errors in full; it conceals nothing (see
 <a href="communications.html#marking">Marking a message</a>).</p>
 
+<h3 id="override">Overriding a channel</h3>
+
+<p>With device firmware 1.0.12 or newer, two more columns appear: <b>Override</b>
+and <b>Override Value</b>. Tick a channel's Override box and the device pins
+that channel at the value in the box beside it, whatever its own message,
+calculation or script would have made it — transmit messages, conditions, maths
+and tables all see the pinned value, so a cluster can be driven with a made-up
+engine speed, or a condition tripped, without a sensor or a second tool on the
+bus. Untick to release. The <b>Value</b> column keeps showing what the device
+actually holds, so a pinned channel reads back its override.</p>
+
+<ul>
+<li>The editor follows the channel: a boolean or enumerated channel offers its
+choices; a numeric channel takes a number with the channel's decimal places,
+stepping by its base resolution and limited to what its data type can hold and
+to the channel's own range. The device applies the channel's range too.</li>
+<li><b>Device channels</b> — MCU temperature, bus states and the like — are
+written by the hardware and cannot be overridden; their cells are blank.</li>
+<li>Overrides live only while this window is open: closing it releases every
+one, and <b>Clear All Overrides</b> does the same at any time. Nothing is saved
+to the device's flash, and a reset or Clear Device Config releases them.</li>
+<li><b>The lease.</b> The device drops every override on its own about three
+seconds after it last heard from this window, which refreshes them each second
+while anything is pinned. A pulled cable or a crashed Manager therefore cannot
+leave a pinned value driving a transmit message. If the refresh fails, the
+window unticks everything and says so.</li>
+<li>On older firmware the two columns are absent and the label above the grid
+says what is needed.</li>
+</ul>
+
 <h2>CAN Viewer (F4)</h2>
 
 <p>Choose <b>Online → CAN Viewer…</b> or press <b>F4</b>. The viewer

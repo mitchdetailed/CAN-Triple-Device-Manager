@@ -229,6 +229,11 @@ constexpr unsigned kCmdGetProtection = CMD_GET_PROTECTION;
 // wire bytes against the list the flash layout is built from — not against a
 // second copy of the numbers.
 constexpr unsigned kCmdGetCapacity = CMD_GET_CAPACITY;
+// v25: channel overrides (firmware 1.0.12).
+constexpr unsigned kCmdSetOverride = CMD_SET_OVERRIDE;
+constexpr unsigned kCmdOverrideLease = CMD_OVERRIDE_LEASE;
+constexpr unsigned kCmdClearOverrides = CMD_CLEAR_OVERRIDES;
+constexpr unsigned kOverrideLeaseMs = OVERRIDE_LEASE_MS;
 constexpr unsigned kCapacityReportFormat = CAPACITY_REPORT_FORMAT;
 constexpr int kFlashNumTables = FLASH_NUM_TABLES;
 static const ::CapacityReport kCapacityFromList = CAPACITY_REPORT_INIT;
@@ -331,6 +336,10 @@ constexpr unsigned kLicenseKeyClear = LICENSE_KEY_CLEAR;
 #undef CMD_GET_DEVICE_INFO
 #undef CMD_GET_PROTECTION
 #undef CMD_GET_CAPACITY
+#undef CMD_SET_OVERRIDE
+#undef CMD_OVERRIDE_LEASE
+#undef CMD_CLEAR_OVERRIDES
+#undef OVERRIDE_LEASE_MS
 #undef CAPACITY_REPORT_FORMAT
 #undef OTP_INFO_LEN
 #undef OTP_INFO_MANUFACTURER_AT
@@ -6557,6 +6566,147 @@ static void runRelay(ct::SealedInstall *r, RelayOutcome *out)
     loop.exec();
 }
 
+// Channel overrides (firmware 1.0.12): a host pins a signal, and the engine
+// keeps it pinned against its own writers and the receive decoder, until the
+// host releases it, clears everything, or the lease runs out. Driven through
+// the real serial handler by the same session calls the Monitor dialog makes.
+
+// What the value stream would show for a signal, or a sentinel when the
+// signal is not in it.
+static float overrideTestValue(quint16 idx)
+{
+    ::SignalValueEntry out[64];
+    uint16_t cursor = 0;
+    const uint16_t n = engine_collect_values(&cursor, out, 64);
+    for (uint16_t i = 0; i < n; ++i)
+        if (out[i].signal_idx == idx)
+            return out[i].physical_value;
+    return -12345.0f;
+}
+
+static void testChannelOverrides(const SerialProtoCallbacks *restore)
+{
+    CHECK(ct::CMD_SET_OVERRIDE == fw::kCmdSetOverride);
+    CHECK(ct::CMD_OVERRIDE_LEASE == fw::kCmdOverrideLease);
+    CHECK(ct::CMD_CLEAR_OVERRIDES == fw::kCmdClearOverrides);
+    CHECK(unsigned(ct::OVERRIDE_LEASE_MS) == fw::kOverrideLeaseMs);
+    static_assert(sizeof(ct::OverridePayload) == sizeof(::OverridePayload),
+                  "GUI and firmware override payloads differ in size");
+    CHECK(sizeof(::OverridePayload) == 7);
+
+    serial_proto_init(restore);
+    engine_clear_config();
+    CHECK(t8::installAxes()); // X = signal 0, Y = signal 1, range ±1e9
+    engine_clear_overrides();
+    t8::feed(100, 200);
+    CHECK(overrideTestValue(0) == 100.0f);
+    CHECK(overrideTestValue(1) == 200.0f);
+
+    ct::FakeDeviceLink link(firmwareReply);
+    QString err;
+
+    // Pinned: visible at once, and the bus loses from then on while the
+    // neighbour still updates.
+    CHECK(ct::device_session::setChannelOverride(&link, 0, true, 1234.5f, &err));
+    CHECK(overrideTestValue(0) == 1234.5f);
+    t8::feed(100, 300);
+    CHECK(overrideTestValue(0) == 1234.5f);
+    CHECK(overrideTestValue(1) == 300.0f);
+    // The calculation tick — every writer, then the override — keeps it too.
+    engine_tick_calc(10);
+    CHECK(overrideTestValue(0) == 1234.5f);
+    CHECK(engine_override_count() == 1);
+    CHECK(engine_signal_overridden(0));
+    CHECK(!engine_signal_overridden(1));
+    std::printf("  pinned X at 1234.5, fed 100       : stream says %g\n",
+                double(overrideTestValue(0)));
+
+    // Held to the signal's own range, like any other write to it.
+    CHECK(ct::device_session::setChannelOverride(&link, 0, true, 5.0e9f, &err));
+    CHECK(overrideTestValue(0) == 1.0e9f);
+    CHECK(engine_override_count() == 1); // re-pinning is not a second pin
+
+    // Refused: past the table, past the capacity, a value that is not one.
+    CHECK(!ct::device_session::setChannelOverride(&link, 2, true, 1.0f, &err));
+    CHECK(!ct::device_session::setChannelOverride(&link, 5000, true, 1.0f, &err));
+    CHECK(!ct::device_session::setChannelOverride(&link, 1, true, std::numeric_limits<float>::quiet_NaN(), &err));
+    // And a device channel's slot: the hardware writes it, nobody pins it.
+    ::DeviceChannelsConfig dc;
+    for (int i = 0; i < ct::DEVCH_COUNT; ++i)
+        dc.signal_idx[i] = ct::SIG_MSG_NONE;
+    dc.signal_idx[0] = 1;
+    engine_set_device_channels(&dc);
+    CHECK(!ct::device_session::setChannelOverride(&link, 1, true, 1.0f, &err));
+    dc.signal_idx[0] = ct::SIG_MSG_NONE;
+    engine_set_device_channels(&dc);
+    CHECK(ct::device_session::setChannelOverride(&link, 1, true, 7.0f, &err));
+    CHECK(engine_override_count() == 2);
+    // A wrong-sized payload is refused before the engine sees it.
+    CHECK(!link.requestSync(ct::CMD_SET_OVERRIDE, QByteArray(3, '\0'), nullptr, &err));
+    CHECK(!link.requestSync(ct::CMD_OVERRIDE_LEASE, QByteArray(1, '\0'), nullptr, &err));
+
+    // Released one at a time: the bus reaches it again.
+    CHECK(ct::device_session::setChannelOverride(&link, 0, false, 0.0f, &err));
+    CHECK(engine_override_count() == 1);
+    t8::feed(100, 300);
+    CHECK(overrideTestValue(0) == 100.0f);
+    CHECK(overrideTestValue(1) == 7.0f);
+
+    // THE LEASE. Pinned, then three seconds of ticks with no word from the
+    // host: everything is released and the bus is back.
+    CHECK(ct::device_session::setChannelOverride(&link, 0, true, 42.0f, &err));
+    for (int i = 0; i < 299; ++i)
+        engine_tick_calc(10);
+    CHECK(engine_override_count() == 2);
+    CHECK(overrideTestValue(0) == 42.0f);
+    engine_tick_calc(10); // 3,000 ms
+    CHECK(engine_override_count() == 0);
+    t8::feed(8, 9);
+    CHECK(overrideTestValue(0) == 8.0f);
+    CHECK(overrideTestValue(1) == 9.0f);
+    std::printf("  after %u ms of silence           : %u overrides left\n",
+                unsigned(fw::kOverrideLeaseMs), unsigned(engine_override_count()));
+
+    // A lease call restarts the clock: four seconds pinned with a word at two.
+    CHECK(ct::device_session::setChannelOverride(&link, 0, true, 42.0f, &err));
+    for (int i = 0; i < 200; ++i)
+        engine_tick_calc(10);
+    bool supported = false;
+    CHECK(ct::device_session::overrideLease(&link, &supported, &err));
+    CHECK(supported);
+    for (int i = 0; i < 200; ++i)
+        engine_tick_calc(10);
+    CHECK(engine_override_count() == 1);
+    CHECK(overrideTestValue(0) == 42.0f);
+
+    // Clear releases everything at once.
+    CHECK(ct::device_session::clearChannelOverrides(&link, &err));
+    CHECK(engine_override_count() == 0);
+    CHECK(!engine_signal_overridden(0));
+    t8::feed(11, 12);
+    CHECK(overrideTestValue(0) == 11.0f);
+
+    // Clear Config releases them as well.
+    CHECK(ct::device_session::setChannelOverride(&link, 0, true, 42.0f, &err));
+    CHECK(engine_override_count() == 1);
+    engine_clear_config();
+    CHECK(engine_override_count() == 0);
+
+    // Older firmware: the lease probe reads as "no overrides here", not as an
+    // error, and the session says so.
+    ct::FakeDeviceLink older([](quint8, const QByteArray &) {
+        return ct::FakeDeviceLink::Reply::nack(ct::ERR_INVALID_CMD);
+    });
+    supported = true;
+    err.clear();
+    CHECK(ct::device_session::overrideLease(&older, &supported, &err));
+    CHECK(!supported);
+    CHECK(err.isEmpty());
+    CHECK(!ct::device_session::setChannelOverride(&older, 0, true, 1.0f, &err));
+
+    serial_proto_init(restore);
+}
+
 static void testSealedInstallAgainstTheDevice(const SerialProtoCallbacks *restore)
 {
     EngineCallbacks cb{};
@@ -9869,6 +10019,7 @@ int main(int argc, char *argv[])
     testDeviceAccess(&protoCb);
     testOtpDeviceInfo(&protoCb);
     testReadoutProtection(&protoCb);
+    testChannelOverrides(&protoCb);
     testCapacityReport(&protoCb);
     testFirmwareLicense(&protoCb);
     testConfigVersion(&protoCb);

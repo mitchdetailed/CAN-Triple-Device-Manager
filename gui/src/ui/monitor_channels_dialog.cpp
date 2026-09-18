@@ -4,6 +4,11 @@
 #include "monitor_channels_dialog.h"
 
 #include <QBrush>
+#include <QCloseEvent>
+#include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QHBoxLayout>
+#include <QPushButton>
 #include <QHeaderView>
 #include <QLabel>
 #include <QTableWidget>
@@ -16,6 +21,7 @@
 
 #include "../model/channel.h"
 #include "../model/device_mapper.h"
+#include "../protocol/device_session.h"
 
 namespace ct {
 
@@ -24,6 +30,12 @@ namespace {
 constexpr int kColChannel = 0;
 constexpr int kColValue = 1;
 constexpr int kColUnits = 2;
+constexpr int kColOverride = 3;
+constexpr int kColOverrideValue = 4;
+// How often the device's override lease is refreshed while anything is pinned.
+// The device releases everything at OVERRIDE_LEASE_MS (3 s) of silence, so a
+// second gives two missed refreshes of slack before a live override drops.
+constexpr int kLeaseTickMs = 1000;
 
 constexpr int kStaleTickMs = 500;
 constexpr qint64 kStaleAfterMs = 2000;
@@ -31,6 +43,48 @@ constexpr qint64 kStaleAfterMs = 2000;
 // Role on the Value item that remembers whether it is currently grayed, so
 // the stale tick only touches items whose state actually changes.
 constexpr int kGrayedRole = Qt::UserRole + 1;
+
+// The override editor's limits for a channel: what its data type can hold at
+// its decimal places (an integer channel stores a scaled integer, so u8 at one
+// decimal place reaches 25.5), narrowed to the channel's own range. The same
+// arithmetic the constants editor applies to a constant's type, spelled for
+// the catalogue's type names; a float channel takes the dialogs' nominal span.
+struct OverrideSpan {
+    double lo = -1e9;
+    double hi = 1e9;
+    double step = 1.0;
+    int decimals = 0;
+};
+
+OverrideSpan overrideSpanFor(const Channel &ch)
+{
+    OverrideSpan s;
+    s.decimals = qBound(0, ch.decimalPlaces, 6);
+    const double res = std::pow(10.0, -s.decimals);
+    s.step = ch.baseResolution > 0.0 ? ch.baseResolution : res;
+    struct Reach {
+        const char *type;
+        double lo;
+        double hi;
+    };
+    static const Reach kReach[] = {
+        {"u8", 0.0, 255.0},           {"u16", 0.0, 65535.0},
+        {"u32", 0.0, 4294967295.0},   {"s8", -128.0, 127.0},
+        {"s16", -32768.0, 32767.0},   {"s32", -2147483648.0, 2147483647.0},
+    };
+    for (const Reach &r : kReach) {
+        if (ch.dataType == QLatin1String(r.type)) {
+            s.lo = r.lo * res;
+            s.hi = r.hi * res;
+            break;
+        }
+    }
+    s.lo = std::max(s.lo, ch.minValue);
+    s.hi = std::min(s.hi, ch.maxValue);
+    if (s.hi < s.lo)
+        s.hi = s.lo;
+    return s;
+}
 
 // A mapper error, made safe to print on this dialog.
 //
@@ -100,16 +154,16 @@ MonitorChannelsDialog::MonitorChannelsDialog(DeviceLink *link, Configuration *co
     , m_staleTimer(nullptr)
 {
     setWindowTitle(tr("Monitor Channels"));
-    resize(500, 600);
+    resize(760, 600);
 
     m_clock.start();
 
     m_infoLabel = new QLabel(this);
     m_infoLabel->setWordWrap(true);
 
-    m_table = new QTableWidget(0, 3, this);
-    m_table->setHorizontalHeaderLabels(
-        QStringList() << tr("Channel") << tr("Value") << tr("Units"));
+    m_table = new QTableWidget(0, 5, this);
+    m_table->setHorizontalHeaderLabels(QStringList() << tr("Channel") << tr("Value") << tr("Units")
+                                                     << tr("Override") << tr("Override Value"));
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -120,13 +174,33 @@ MonitorChannelsDialog::MonitorChannelsDialog(DeviceLink *link, Configuration *co
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->setColumnWidth(kColChannel, 220);
     m_table->setColumnWidth(kColValue, 110);
+    m_table->setColumnWidth(kColUnits, 70);
+    m_table->setColumnWidth(kColOverride, 76);
     m_table->setSortingEnabled(false);
+    // Hidden until the device says it can (probeOverrideSupport).
+    m_table->setColumnHidden(kColOverride, true);
+    m_table->setColumnHidden(kColOverrideValue, true);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(8, 8, 8, 8);
     layout->setSpacing(6);
     layout->addWidget(m_infoLabel);
     layout->addWidget(m_table, 1);
+
+    auto *buttons = new QHBoxLayout;
+    m_clearOverridesButton = new QPushButton(tr("Clear All Overrides"), this);
+    m_clearOverridesButton->setEnabled(false);
+    m_clearOverridesButton->setVisible(false);
+    connect(m_clearOverridesButton, &QPushButton::clicked, this,
+            [this]() { clearAllOverrides(true); });
+    buttons->addWidget(m_clearOverridesButton);
+    buttons->addStretch();
+    layout->addLayout(buttons);
+
+    m_leaseTimer = new QTimer(this);
+    m_leaseTimer->setInterval(kLeaseTickMs);
+    connect(m_leaseTimer, &QTimer::timeout, this, &MonitorChannelsDialog::onLeaseTick);
+    connect(m_table, &QTableWidget::itemChanged, this, &MonitorChannelsDialog::onOverrideToggled);
 
     m_staleTimer = new QTimer(this);
     m_staleTimer->setInterval(kStaleTickMs);
@@ -147,7 +221,10 @@ MonitorChannelsDialog::MonitorChannelsDialog(DeviceLink *link, Configuration *co
 
 void MonitorChannelsDialog::rebuild()
 {
+    clearAllOverrides(true); // the rows they belonged to are about to go
+    m_updatingChecks = true;
     m_signalToRow.clear();
+    m_rowToSignal.clear();
     m_lastUpdateMs.clear();
     m_signalUnits.clear();
     m_signalDecimals.clear();
@@ -156,6 +233,7 @@ void MonitorChannelsDialog::rebuild()
 
     if (!m_config) {
         m_infoLabel->setText(tr("No configuration."));
+        m_updatingChecks = false;
         return;
     }
 
@@ -210,8 +288,30 @@ void MonitorChannelsDialog::rebuild()
         m_table->setItem(row, kColChannel, nameItem);
         m_table->setItem(row, kColValue, valueItem);
         m_table->setItem(row, kColUnits, unitItem);
-    }
 
+        // The override cells. A device channel — written by the hardware every
+        // tick — gets no tick box and says why; the firmware refuses it too.
+        m_rowToSignal.insert(row, signalIdx);
+        auto *overrideItem = new QTableWidgetItem;
+        overrideItem->setTextAlignment(Qt::AlignCenter);
+        const bool overridable = ch.isValid() && ch.deviceChannelId < 0;
+        if (overridable) {
+            overrideItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+            overrideItem->setCheckState(Qt::Unchecked);
+            overrideItem->setToolTip(tr("Tick to pin this channel on the device at the value "
+                                        "beside it; untick to release it."));
+            m_table->setCellWidget(row, kColOverrideValue, makeOverrideEditor(ch, row));
+        } else {
+            overrideItem->setFlags(Qt::NoItemFlags);
+            overrideItem->setToolTip(
+                tr("A device channel is written by the hardware and cannot be overridden."));
+        }
+        m_table->setItem(row, kColOverride, overrideItem);
+    }
+    m_updatingChecks = false;
+    updateOverrideSummary();
+
+    probeOverrideSupport();
     if (!mapping.errors.isEmpty())
         m_infoLabel->setText(tr("%n channels — the document has %1 mapping error(s); the device "
                                 "mapping may be incomplete. First: %2",
@@ -226,6 +326,11 @@ void MonitorChannelsDialog::rebuild()
 
 void MonitorChannelsDialog::onSignalValues(const QList<ct::SignalValueEntry> &values)
 {
+    // The first word from the device is the moment to ask whether it does
+    // overrides: the link is certainly open by then.
+    if (!m_overrideProbeDone)
+        probeOverrideSupport();
+
     const qint64 now = m_clock.elapsed();
 
     for (const SignalValueEntry &entry : values) {
@@ -289,6 +394,182 @@ void MonitorChannelsDialog::onStaleTick()
             valueItem->setData(kGrayedRole, false);
         }
     }
+}
+
+// ---------------------------------------------------------------- overrides
+
+void MonitorChannelsDialog::probeOverrideSupport()
+{
+    if (m_overrideProbeDone || !m_link || !m_link->isOpen())
+        return;
+    m_overrideProbeDone = true;
+    bool supported = false;
+    QString error;
+    // The lease command is the probe: harmless with nothing pinned, and older
+    // firmware answers it "unknown command". No answer at all counts as
+    // absent for this opening of the dialog; the next opening asks again.
+    if (!device_session::overrideLease(m_link, &supported, &error))
+        supported = false;
+    m_overridesSupported = supported;
+    m_table->setColumnHidden(kColOverride, !supported);
+    m_table->setColumnHidden(kColOverrideValue, !supported);
+    m_clearOverridesButton->setVisible(supported);
+    if (!supported)
+        m_infoLabel->setText(m_infoLabel->text()
+                             + (error.isEmpty()
+                                    ? tr(" Overrides need device firmware 1.0.12.")
+                                    : tr(" Overrides unavailable: %1").arg(error)));
+}
+
+QWidget *MonitorChannelsDialog::makeOverrideEditor(const Channel &ch, int row)
+{
+    // An edit while the row is pinned re-sends; while it is not, it just waits
+    // for the tick.
+    const auto resend = [this, row]() {
+        QTableWidgetItem *tick = m_table->item(row, kColOverride);
+        if (tick && tick->checkState() == Qt::Checked)
+            sendOverride(row);
+    };
+    if (ch.dataType == QStringLiteral("boolean") || !ch.enumLabels.isEmpty()) {
+        auto *combo = new QComboBox(m_table);
+        if (ch.enumLabels.isEmpty()) {
+            combo->addItem(tr("Off (0)"), 0.0);
+            combo->addItem(tr("On (1)"), 1.0);
+        } else {
+            for (auto it = ch.enumLabels.constBegin(); it != ch.enumLabels.constEnd(); ++it)
+                combo->addItem(QStringLiteral("%1 (%2)").arg(it.value()).arg(it.key()),
+                               double(it.key()));
+        }
+        connect(combo, &QComboBox::currentIndexChanged, this, resend);
+        return combo;
+    }
+    const OverrideSpan span = overrideSpanFor(ch);
+    auto *spin = new QDoubleSpinBox(m_table);
+    spin->setDecimals(span.decimals);
+    spin->setRange(span.lo, span.hi);
+    spin->setSingleStep(span.step);
+    // A typed value, not a nudged one: the step still quantises what is sent
+    // (editorValue), but the arrows are noise in a grid of short rows.
+    spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    spin->setKeyboardTracking(false); // one send per committed edit, not per keystroke
+    if (!ch.unit.isEmpty())
+        spin->setSuffix(QStringLiteral(" ") + ch.unit);
+    spin->setValue(qBound(span.lo, 0.0, span.hi));
+    connect(spin, &QDoubleSpinBox::valueChanged, this, resend);
+    return spin;
+}
+
+double MonitorChannelsDialog::editorValue(int row) const
+{
+    QWidget *w = m_table->cellWidget(row, kColOverrideValue);
+    if (auto *spin = qobject_cast<QDoubleSpinBox *>(w)) {
+        // Quantised to the channel's resolution before it goes, so a channel
+        // stepping by 0.25 never asks the device for 12.3.
+        const double step = spin->singleStep();
+        return step > 0.0 ? std::round(spin->value() / step) * step : spin->value();
+    }
+    if (auto *combo = qobject_cast<QComboBox *>(w))
+        return combo->currentData().toDouble();
+    return 0.0;
+}
+
+void MonitorChannelsDialog::onOverrideToggled(QTableWidgetItem *item)
+{
+    if (m_updatingChecks || !item || item->column() != kColOverride)
+        return;
+    const int row = item->row();
+    if (item->checkState() == Qt::Checked) {
+        sendOverride(row);
+        return;
+    }
+    const int signalIdx = m_rowToSignal.value(row, -1);
+    QString error;
+    if (signalIdx >= 0 && m_link && m_link->isOpen())
+        (void)device_session::setChannelOverride(m_link, quint16(signalIdx), false, 0.0f, &error);
+    m_overriddenRows.remove(row);
+    updateOverrideSummary();
+}
+
+void MonitorChannelsDialog::sendOverride(int row)
+{
+    const int signalIdx = m_rowToSignal.value(row, -1);
+    if (signalIdx < 0 || !m_link)
+        return;
+    const double value = editorValue(row);
+    QString error;
+    const bool ok = m_link->isOpen()
+                    && device_session::setChannelOverride(m_link, quint16(signalIdx), true, float(value), &error);
+    if (!ok) {
+        // The tick comes off again: a box that stays ticked would claim a pin
+        // the device never took.
+        m_updatingChecks = true;
+        if (QTableWidgetItem *tick = m_table->item(row, kColOverride))
+            tick->setCheckState(Qt::Unchecked);
+        m_updatingChecks = false;
+        m_overriddenRows.remove(row);
+        m_infoLabel->setText(tr("Override refused: %1")
+                                 .arg(error.isEmpty() ? tr("the device is not connected") : error));
+        updateOverrideSummary();
+        return;
+    }
+    m_overriddenRows.insert(row);
+    updateOverrideSummary();
+}
+
+void MonitorChannelsDialog::onLeaseTick()
+{
+    if (m_overriddenRows.isEmpty()) {
+        m_leaseTimer->stop();
+        return;
+    }
+    bool supported = true;
+    QString error;
+    if (!m_link || !m_link->isOpen() || !device_session::overrideLease(m_link, &supported, &error) || !supported) {
+        // No word reached the device, so it will drop the overrides on its own
+        // within the lease. Show the same truth here rather than boxes that
+        // stay ticked over values the device stopped honouring.
+        clearAllOverrides(false);
+        m_infoLabel->setText(tr("Overrides released: the device could not be reached."));
+    }
+}
+
+void MonitorChannelsDialog::clearAllOverrides(bool tellDevice)
+{
+    if (tellDevice && !m_overriddenRows.isEmpty() && m_link && m_link->isOpen()) {
+        QString error;
+        (void)device_session::clearChannelOverrides(m_link, &error);
+    }
+    m_overriddenRows.clear();
+    if (m_table) {
+        m_updatingChecks = true;
+        for (int row = 0; row < m_table->rowCount(); ++row)
+            if (QTableWidgetItem *tick = m_table->item(row, kColOverride))
+                if (tick->flags() & Qt::ItemIsUserCheckable)
+                    tick->setCheckState(Qt::Unchecked);
+        m_updatingChecks = false;
+    }
+    updateOverrideSummary();
+}
+
+void MonitorChannelsDialog::updateOverrideSummary()
+{
+    const int n = m_overriddenRows.size();
+    setWindowTitle(n > 0 ? tr("Monitor Channels — %n overridden", nullptr, n)
+                         : tr("Monitor Channels"));
+    if (m_clearOverridesButton)
+        m_clearOverridesButton->setEnabled(n > 0);
+    if (m_leaseTimer) {
+        if (n > 0 && !m_leaseTimer->isActive())
+            m_leaseTimer->start();
+        else if (n == 0 && m_leaseTimer->isActive())
+            m_leaseTimer->stop();
+    }
+}
+
+void MonitorChannelsDialog::closeEvent(QCloseEvent *event)
+{
+    clearAllOverrides(true);
+    QDialog::closeEvent(event);
 }
 
 } // namespace ct

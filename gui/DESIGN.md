@@ -1444,7 +1444,14 @@ to be sent, and the help says so.
   showing any of it — see that section; it sits immediately under Send because
   the two are the same verb with different subjects, and adjacency is what makes
   the distinction findable), Get Configuration, Verify
-  Configuration, Monitor Channels **F3** (live grid from value stream),
+  Configuration, Monitor Channels **F3** (live grid from value stream; on
+  firmware 1.0.12 an Override tick and a per-type editor per channel pin the
+  signal on the device — `CMD_SET_OVERRIDE`/`OVERRIDE_LEASE`/`CLEAR_OVERRIDES`,
+  `device_session::setChannelOverride` et al.; the engine puts the pinned
+  values back at the end of every calculation pass and its receive decoder
+  skips them, device channels are refused, and the device releases everything
+  after `OVERRIDE_LEASE_MS` of silence, the dialog refreshing the lease each
+  second and clearing on close),
   CAN Viewer (raw frame monitor + inject-frame form; buffers up to 10M frames
   and exports them via "Save to File…" as a Vector ASCII `.asc` log — classic
   frames as standard lines, CAN FD frames as Vector `CANFD` lines carrying

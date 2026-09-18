@@ -318,6 +318,47 @@ bool readReadoutProtection(DeviceLink *link, ReadoutProtection *out, QString *er
     return true;
 }
 
+bool setChannelOverride(DeviceLink *link, quint16 signalIdx, bool enable, float value,
+                        QString *error)
+{
+    if (!link)
+        return false;
+    OverridePayload p{};
+    p.signal_idx = signalIdx;
+    p.enable = enable ? 1 : 0;
+    p.value = value;
+    const QByteArray raw(reinterpret_cast<const char *>(&p), int(sizeof(p)));
+    return link->requestSync(CMD_SET_OVERRIDE, raw, nullptr, error);
+}
+
+bool overrideLease(DeviceLink *link, bool *supported, QString *error)
+{
+    if (!link)
+        return false;
+    if (supported)
+        *supported = false;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_OVERRIDE_LEASE, QByteArray(), nullptr, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        if (unsupported(code)) {
+            if (error)
+                error->clear();
+            return true; // older firmware: no overrides there, not an error
+        }
+        return false;
+    }
+    if (supported)
+        *supported = true;
+    return true;
+}
+
+bool clearChannelOverrides(DeviceLink *link, QString *error)
+{
+    if (!link)
+        return false;
+    return link->requestSync(CMD_CLEAR_OVERRIDES, QByteArray(), nullptr, error);
+}
+
 bool readCapacity(DeviceLink *link, DeviceCapacity *out, QString *error)
 {
     if (!link || !out)

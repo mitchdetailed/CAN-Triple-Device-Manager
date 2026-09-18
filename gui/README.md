@@ -73,7 +73,8 @@ rules, 8 integrators, and
   Discrete (centered); the looked-up value drives a generated output channel.
 - **Online** — Send Configuration (F5, chunked + read-back verified, applies
   bus rates via CONTROL_CAN), **Send Secure Configuration…**, Get Configuration,
-  Monitor Channels (F3, live value stream), CAN Viewer (raw
+  Monitor Channels (F3, live value stream, per-channel overrides on
+  firmware 1.0.12), CAN Viewer (raw
   frame monitor + frame injection), Reset Device, Device Status…, **Get Device
   Info…**, Update Firmware…, **Firmware License Manager…** and **Set Access
   Passwords…**. Get also reads the buses' modes, rates

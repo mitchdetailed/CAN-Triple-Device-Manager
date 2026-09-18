@@ -171,6 +171,19 @@ bool readReadoutProtection(DeviceLink *link, ReadoutProtection *out, QString *er
 // silent fallback — falling back would size checks against numbers the unit
 // has just said are wrong.
 bool readCapacity(DeviceLink *link, DeviceCapacity *out, QString *error);
+
+// Channel overrides (CMD_SET_OVERRIDE / OVERRIDE_LEASE / CLEAR_OVERRIDES,
+// firmware 1.0.12). setChannelOverride pins `signalIdx` at `value` (physical
+// units; the device clamps to the signal's range) or releases it. The device
+// drops every override after OVERRIDE_LEASE_MS without a set or a lease, so a
+// caller holding overrides calls overrideLease about once a second and
+// clearChannelOverrides when it is done. On firmware without the commands
+// overrideLease returns true with *supported false; the other two return
+// false with the device's refusal in `error`.
+bool setChannelOverride(DeviceLink *link, quint16 signalIdx, bool enable, float value,
+                        QString *error);
+bool overrideLease(DeviceLink *link, bool *supported, QString *error);
+bool clearChannelOverrides(DeviceLink *link, QString *error);
 bool readAccessState(DeviceLink *link, AccessState *out, QString *error);
 bool readConfigVersion(DeviceLink *link, ConfigVersionState *out, QString *error);
 bool readDeviceInfo(DeviceLink *link, DeviceInfo *out, QString *error);

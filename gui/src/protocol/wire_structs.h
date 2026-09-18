@@ -178,6 +178,19 @@ constexpr uint8_t CMD_GET_PROTECTION = 0x4F;
 // (DeviceCapacity::builtIn()).
 constexpr uint8_t CMD_GET_CAPACITY = 0x50;
 constexpr uint8_t CAPACITY_REPORT_FORMAT = 1;
+// v25 (firmware 1.0.12): channel overrides. SET pins one signal at a value in
+// its physical units (OverridePayload below, 7 bytes) or releases it; LEASE
+// keeps every override alive and CLEAR releases them all; both carry nothing.
+// The firmware releases every override on its own when OVERRIDE_LEASE_MS pass
+// without a SET or a LEASE, so a Manager that dies or loses its cable cannot
+// leave a pinned value driving a transmit message — the Monitor Channels
+// dialog refreshes the lease each second while anything is pinned. Ungated.
+// An index that is not an active signal, or that a device channel is written
+// to, is refused ERR_OUT_OF_BOUNDS; older firmware NACKs ERR_INVALID_CMD.
+constexpr uint8_t CMD_SET_OVERRIDE = 0x51;
+constexpr uint8_t CMD_OVERRIDE_LEASE = 0x52;
+constexpr uint8_t CMD_CLEAR_OVERRIDES = 0x53;
+constexpr int OVERRIDE_LEASE_MS = 3000;
 
 constexpr int LICENSE_MANUFACTURER_LEN = 32;
 constexpr int LICENSE_MODEL_LEN        = 32;
@@ -1090,6 +1103,13 @@ struct InjectCanPayload {
     uint8_t data[64];
 };
 
+// CMD_SET_OVERRIDE payload: enable 1 pins signal_idx at value, 0 releases it.
+struct OverridePayload {
+    uint16_t signal_idx;
+    uint8_t enable;
+    float value;
+};
+
 struct MonitorStreamPayload {
     uint32_t timestamp_ms;
     uint8_t bus_idx;        // 1..3
@@ -1585,6 +1605,7 @@ static_assert(sizeof(MathConfig) == 24, "must match firmware");
 static_assert(sizeof(ConditionTerm) == 8, "must match firmware");
 static_assert(sizeof(ConditionConfig) == 62, "must match firmware");
 static_assert(sizeof(DeviceStatus) == 39, "must match firmware");
+static_assert(sizeof(OverridePayload) == 7, "must match firmware");
 static_assert(sizeof(InjectCanPayload) == 71, "must match firmware");
 static_assert(sizeof(MonitorStreamPayload) == 76, "must match firmware");
 // The wire length is built from this, so it has to BE the offset of data[]

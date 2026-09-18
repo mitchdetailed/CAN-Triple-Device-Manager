@@ -12,6 +12,17 @@ The label above the grid states what is being shown: the channel mapping of the 
 
 If the document has mapping errors, the label reports how many and shows the first one; the device mapping may then be incomplete. Run **File → Check Channels** for the full list — see [Validation &amp; the Config Summary](validation-report.md). For a **concealed** message — one marked Hidden or Protect Communication — the error detail is withheld: the label names the message and tells you to open it in **Connections → Communications** with its own **Message Password**, since what is wrong with it cannot be shown without that. It does *not* point at File → Reveal Protected Comms: that is the document-wide Protected Comms password, which opens no Hidden message at all and is only one of the two things a Protect Communication message asks for. A **Read Only** message reports its errors in full; it conceals nothing (see [Marking a message](communications.md#marking)).
 
+<a id="override"></a>
+
+### Overriding a channel
+
+With device firmware 1.0.12 or newer, two more columns appear: **Override** and **Override Value**. Tick a channel's Override box and the device pins that channel at the value in the box beside it, whatever its own message, calculation or script would have made it — transmit messages, conditions, maths and tables all see the pinned value, so a cluster can be driven with a made-up engine speed, or a condition tripped, without a sensor or a second tool on the bus. Untick to release. The **Value** column keeps showing what the device actually holds, so a pinned channel reads back its override.
+- The editor follows the channel: a boolean or enumerated channel offers its choices; a numeric channel takes a number with the channel's decimal places, stepping by its base resolution and limited to what its data type can hold and to the channel's own range. The device applies the channel's range too.
+- **Device channels** — MCU temperature, bus states and the like — are written by the hardware and cannot be overridden; their cells are blank.
+- Overrides live only while this window is open: closing it releases every one, and **Clear All Overrides** does the same at any time. Nothing is saved to the device's flash, and a reset or Clear Device Config releases them.
+- **The lease.** The device drops every override on its own about three seconds after it last heard from this window, which refreshes them each second while anything is pinned. A pulled cable or a crashed Manager therefore cannot leave a pinned value driving a transmit message. If the refresh fails, the window unticks everything and says so.
+- On older firmware the two columns are absent and the label above the grid says what is needed.
+
 ## CAN Viewer (F4)
 
 Choose **Online → CAN Viewer…** or press **F4**. The viewer shows raw frames from all three buses as they arrive, with columns **Time (s)**, **Bus**, **Dir** (Rx or Tx), **ID**, **Len** and **Data**, plus a **Count** column in [Overwrite Mode](#overwrite). Standard IDs are shown as three hex digits (0x123), extended IDs as eight (0x18FEF100).
