@@ -207,6 +207,52 @@ the independent watchdog and was restarted by it.</td></tr>
 state.</td></tr>
 </table>
 
+<h3>Load</h3>
+
+<p>Five channels, from firmware 1.0.13, say whether the device is keeping up with
+the traffic and the configuration it has been given.</p>
+
+<table>
+<tr><th>Channel</th><th>Type</th><th>Meaning</th></tr>
+<tr><td>Device CAN<i>n</i> Rx Dropped</td><td>u32</td>
+<td>Frames bus <i>n</i> delivered that the device lost before it could act on
+them, since power-up. <b>At least</b> this many — see below. On a healthy unit
+it stays at 0.</td></tr>
+<tr><td>Device CPU Load</td><td>u16, 1&nbsp;dp, %</td>
+<td>The share of the last second the processor spent working, interrupts
+included. 0 on an idle unit.</td></tr>
+<tr><td>Device Loop Time</td><td>u32, 2&nbsp;dp, ms</td>
+<td>The longest the device went, in the last second, between two visits to
+any one of its jobs. A few milliseconds on a unit with a working
+configuration; well under one on an idle unit.</td></tr>
+</table>
+
+<p>Everything the device does — receiving, calculating, transmitting, answering
+this application — is serviced in turn from one loop. <b>Device Loop Time</b> is
+the slowest turn of that loop in the last second, so it is the longest anything
+had to wait. Past <b>10&nbsp;ms</b> a 100&nbsp;Hz evaluation ran late (it then
+covers the time it missed, so timers and integrators stay correct, but outputs
+update less often). <b>Device CPU Load</b> is the same second seen as a whole.
+A unit at 60&nbsp;% is comfortable; one above 90&nbsp;% has no margin left for a
+burst, and the next place it shows is <b>Rx Dropped</b>.</p>
+
+<p><b>Rx Dropped</b> counts frames that were on the wire, acknowledged, and then
+lost inside the device because it was too busy to take them: nothing downstream
+— no channel, no gateway route, no CAN Viewer row — ever saw them. It is a
+floor rather than an exact count, because one of the two places a frame can be
+lost reports only <i>that</i> it overflowed, not by how many. Read 0 as "nothing
+lost" and anything else as "at least this many".</p>
+
+<p class="warn"><b>Saving a configuration adds to Rx Dropped on a busy bus, and
+that is a true reading.</b> Writing the device's flash stops the loop for about
+a second — Device Loop Time shows it — and a bus carrying more than a few dozen
+frames in that second overflows the receive buffer. Those frames really were
+lost. It is a reason to send configurations with the vehicle's buses quiet where
+that matters, not a fault.</p>
+
+<p>Like the other totals, Rx Dropped is kept <b>since power-up</b> and survives
+sending or clearing a configuration.</p>
+
 <p>A device channel cannot be edited or deleted: its type, resolution and range
 are fixed by the firmware, so the Channel Editor opens it read-only.</p>
 
@@ -233,8 +279,8 @@ the seconds it holds stop resolving 0.01 above <b>131,072</b> — roughly
 36&nbsp;hours of uptime. Past that the hundredths coarsen, and later the tenths
 do too. The clock behind the reading is exact and does not drift; the loss is in
 the value slot. For a long-running unit, treat the seconds as reliable and the
-fraction as decorative. The same limit applies to the frame counts, which
-coarsen past about 16.7&nbsp;million frames. It does <i>not</i> apply to the
+fraction as decorative. The same limit applies to the frame counts and to Rx
+Dropped, which coarsen past about 16.7&nbsp;million frames. It does <i>not</i> apply to the
 error counters, the state flags, Bus Load or the MCU health channels: those
 stay small enough that a 32-bit float holds them exactly, however long the unit
 runs.</p>

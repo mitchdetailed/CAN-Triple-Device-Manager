@@ -222,6 +222,38 @@ const QList<Channel> &ChannelCatalog::deviceChannels()
             {RESET_REASON_WWDG, QStringLiteral("Window Watchdog")},
             {RESET_REASON_LOW_POWER, QStringLiteral("Low Power Reset")},
         };
+
+        // The load block (store v20, firmware 1.0.13): whether the unit is
+        // keeping up. APPENDED after the MCU block — these sit apart from the
+        // per-bus rows above even though three of them are per-bus, because a
+        // device channel's id is its wire index and widening the per-bus block
+        // would renumber every channel after CAN1.
+        //
+        // Rx Dropped counts frames the bus DELIVERED and the firmware lost
+        // before the engine saw them: the receive ring was full because the main
+        // loop was behind, or the peripheral's three-deep FIFO overran. The ring
+        // half is exact and the FIFO half is a floor, so the help page says "at
+        // least". Since boot, and unbounded, so it inherits the counters' float32
+        // caveat past 2^24. A configuration save stalls the loop for the second
+        // its flash erase takes, so on a live bus every Send adds to it —
+        // truthfully: those frames were lost.
+        for (int bus0 = 0; bus0 < DEVCH_BUS_COUNT; ++bus0) {
+            const QByteArray name =
+                QStringLiteral("Device CAN%1 Rx Dropped").arg(bus0 + 1).toLatin1();
+            mcuChannel(name.constData(), "Unitless", "", "u32", 0, 1.0, 0.0,
+                       4294967295.0, DEVCH_RX_DROPPED_BASE + bus0);
+        }
+        // The share of the last second the processor was busy, interrupts
+        // included. u16 at one decimal for the reason Bus Load is: 0…100.0 is
+        // 0…1000 raw counts, and u8 would clip everything above 25.5 %.
+        mcuChannel("Device CPU Load", "Ratio", "%", "u16", 1, 0.1, 0.0, 100.0,
+                   DEVCH_CPU_LOAD);
+        // The longest single turn of the main loop in that same second. Past
+        // 10 ms a calculation pass ran late. u32 at two decimals: a turn is
+        // normally well under a millisecond, and the ceiling has to clear the
+        // 8,000 ms at which the watchdog ends one.
+        mcuChannel("Device Loop Time", "Time", "ms", "u32", 2, 0.01, 0.0, 10000.0,
+                   DEVCH_LOOP_TIME);
         return list;
     }();
     return channels;

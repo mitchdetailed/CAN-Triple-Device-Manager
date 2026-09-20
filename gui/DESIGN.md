@@ -920,9 +920,52 @@ reads the unit's report beside the image's and warns from
 `layoutDifferences` ("CRC8 rules: 20 → 40") through the one predicate
 (`FirmwareUpdateDialog::layoutChanges`) that also words the confirmation and
 the post-update message, falling back to the version comparison only when a
-side predates the report. `EXPECTED_STORE_VERSION` is 19; `test_firmware_link`
+side predates the report. `test_firmware_link`
 pins the identity to `fw_crc32` over the entries at header byte 6 and shows
 a header with any other identity refused, CRC or no CRC.
+
+**Keeping up under load (firmware 1.0.13, store v20).** A bench sweep on three
+PCAN channels found that 1.0.12 did not degrade under overload, it stopped.
+1.0.13 is the firmware's answer, and what it changes for the Manager is short:
+
+- *Five device channels appended after the MCU block* — `Device CAN1..3 Rx
+  Dropped`, `Device CPU Load`, `Device Loop Time` (`channel_catalog.cpp`; the
+  ids are in `wire_structs.h`). `DeviceChannelsConfig` grew 72 → 82 bytes in
+  the configuration header; no table moved and the layout identity is
+  unchanged, but the header's CRC span is, hence store **v20** and
+  `EXPECTED_STORE_VERSION` 20. The old 72-byte payload is still a valid prefix
+  on the wire. An update across v19 → v20 costs the unit its stored
+  configuration once; the update dialog backs it up and offers the re-Send.
+- *A configuration does not run until it is saved.* `CMD_CLEAR_CONFIG` puts the
+  engine in a held state: table writes land and read back, but nothing runs
+  until `CMD_SAVE_TO_FLASH` publishes the tables together. The Manager needs
+  no change — it always ended a Send with a save — and a Send over a live bus
+  no longer runs half-written tables against the traffic.
+- *The streams start with the host.* Both were on from boot whether or not
+  anything was listening. They now start at the first frame that passes its
+  CRC, so every released Manager — none of which sends `CMD_STREAM_VALUES` —
+  sees no difference, and a host that does send it owns the mask. (A tool that
+  leaves an explicit mask of 0 behind leaves the next Manager an empty Monitor
+  until the unit is power-cycled.)
+- *Overload costs frames and nothing else.* The unit keeps its transmit timing
+  and the host link, drops from the bus that is over its share, and counts
+  what it dropped. It also recalculates only what a frame or a clock changed,
+  and the claim there is equivalence, not approximation:
+  `testIncrementalEqualsFull` in `test_firmware_link` drives random hostile
+  configurations and traffic through the incremental chain and the full one
+  and compares every channel bitwise after every step. `testMessageRowLists`
+  and `testSerialRxWrap` hold the transmit scheduler and the host link's
+  receive path to their previous behaviour the same way, each beside a
+  reference that is required to agree (or, for the rule that was wrong, to
+  fail).
+- *Two host-link defects are fixed*, neither needing a Manager change: a
+  request frame that ended exactly on the device's receive-buffer wrap had
+  stale requests answered a second time (a long stall every minute or two on a
+  polled unit, and replies nobody was waiting for), and a UART error — noise
+  on the cable, a terminal opened at the wrong baud rate — could stop the unit
+  answering until its power was cycled.
+
+The firmware's own account of these changes is kept with the firmware.
 
 ## Send Secure Configuration
 

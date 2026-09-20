@@ -7420,7 +7420,11 @@ static void testCapacityPlumbing()
         older.storeVersion = 18;
         const QStringList versioned = layoutDifferences(older, DeviceCapacity::builtIn());
         CHECK(versioned.size() == 1);
-        CHECK(versioned.first() == QStringLiteral("configuration store: v18 → v19"));
+        // Against the constant, not a literal: this line is about how the
+        // difference is WORDED, and pinning the number here only made it fail
+        // on every store bump for a reason that had nothing to do with it.
+        CHECK(versioned.first()
+              == QStringLiteral("configuration store: v18 → v%1").arg(EXPECTED_STORE_VERSION));
         // A record that grew is a layout change even at the same capacity.
         DeviceCapacity fatter = DeviceCapacity::builtIn();
         fatter.tables[int(DeviceTable::Timers)].itemSize += 8;

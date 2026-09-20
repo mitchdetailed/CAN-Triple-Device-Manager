@@ -1212,7 +1212,16 @@ constexpr int DEVCH_MCU_VDDA     = DEVCH_MCU_TEMP + 1; // 32
 constexpr int DEVCH_MCU_VDDA_MIN = DEVCH_MCU_TEMP + 2; // 33
 constexpr int DEVCH_MCU_TEMP_MAX = DEVCH_MCU_TEMP + 3; // 34
 constexpr int DEVCH_RESET_REASON = DEVCH_MCU_TEMP + 4; // 35
-constexpr int DEVCH_COUNT        = DEVCH_MCU_TEMP + 5; // 36
+// Store v20 (firmware 1.0.13): the LOAD block — whether the unit is keeping up.
+// Appended again, so every index above survives. Frames each bus received and
+// the firmware lost before the engine saw them (one channel per bus, here and
+// not in the per-bus block because widening DEVCH_PER_BUS would renumber
+// everything after CAN1), the share of the last second the processor was busy,
+// and the longest single turn of the main loop in that second.
+constexpr int DEVCH_RX_DROPPED_BASE = DEVCH_MCU_TEMP + 5;                 // 36..38
+constexpr int DEVCH_CPU_LOAD     = DEVCH_RX_DROPPED_BASE + DEVCH_BUS_COUNT; // 39
+constexpr int DEVCH_LOOP_TIME    = DEVCH_CPU_LOAD + 1;                    // 40
+constexpr int DEVCH_COUNT        = DEVCH_CPU_LOAD + 2;                    // 41
 constexpr int devChBus(int bus0, int field)
 {
     return DEVCH_BUS_BASE + bus0 * DEVCH_PER_BUS + field;
@@ -1496,7 +1505,14 @@ struct CapacityEntry {
 // the same store version may still be different layouts: compare reports
 // (DeviceCapacity::sameLayout), never versions alone, when asking whether a
 // stored configuration survives an update.
-constexpr uint16_t EXPECTED_STORE_VERSION = 19;
+//
+// 20: the load device channels (firmware 1.0.13). DEVCH_COUNT 36 -> 41 grows
+// DeviceChannelsConfig 72 -> 82 bytes in the configuration header. No table
+// moves and the layout identity is unchanged, but the header's CRC span is not
+// what it was, so a v19 image is refused by version rather than by a checksum
+// that happens to fail. One re-Send after the update, which Update Firmware
+// backs up for and offers to do.
+constexpr uint16_t EXPECTED_STORE_VERSION = 20;
 
 #pragma pack(pop)
 
@@ -1616,7 +1632,7 @@ static_assert(offsetof(MonitorStreamPayload, data) == MONITOR_HEADER_BYTES,
               "MONITOR_HEADER_BYTES must equal offsetof(MonitorStreamPayload, data)");
 static_assert(sizeof(SignalValueEntry) == 6, "must match firmware");
 static_assert(sizeof(CounterConfig) == 32, "must match firmware");
-static_assert(sizeof(DeviceChannelsConfig) == 72, "must match firmware"); // 36 * 2
+static_assert(sizeof(DeviceChannelsConfig) == 82, "must match firmware"); // 41 * 2
 static_assert(DEVCH_ONTIME == 0, "Device OnTime must stay at offset 0 — see above");
 static_assert(sizeof(TimerConfig) == 32, "must match firmware");
 static_assert(sizeof(ConstantConfig) == 7, "must match firmware");

@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.2.3 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.2.4 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -653,6 +653,14 @@ qt_add_executable(test_firmware_link
     ${FIRMWARE_DIR}/src/script_exec.c
     ${FIRMWARE_DIR}/src/script_cycles.c
     ${FIRMWARE_DIR}/src/script_vm.c
+    # The main loop's load arithmetic (firmware 1.0.13). Hardware hands it a
+    # cycle count; here the test does, which is the only way its sums get run
+    # against numbers whose answer is known.
+    ${FIRMWARE_DIR}/src/loop_meter.c
+    # Which bytes of the host link's circular DMA buffer are new. The handler
+    # that uses it is HAL code; this is the arithmetic it got wrong for years,
+    # pulled out so a simulated buffer can be run against it here.
+    ${FIRMWARE_DIR}/src/serial_rx.c
     test/fw_host_stub.c
 )
 target_include_directories(test_firmware_link PRIVATE ${FIRMWARE_DIR}/include)

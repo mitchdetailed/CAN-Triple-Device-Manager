@@ -29,6 +29,7 @@
 #include "../src/protocol/firmware_update.h"
 #include "fake_device_link.h"
 #include "../src/protocol/cobs.h"
+#include "../src/protocol/crc16.h" // the Manager's own loop, held against the firmware's table
 #include "../src/protocol/device_link.h"
 #include "../src/protocol/device_session.h"
 #include "../src/protocol/framer.h"
@@ -43,6 +44,8 @@ extern "C" {
 #include "fw_host_stub.h"
 #include "fw_image.h"
 #include "fw_update.h"
+#include "loop_meter.h"
+#include "serial_rx.h"
 #include "serial_proto.h"
 #include "sha256.h"
 }
@@ -2790,6 +2793,9 @@ static void testMonitorGapMarking()
     cb.send_bytes = captureBytes;
     cb.uptime_ms = fakeUptime;
     serial_proto_init(&cb);
+    // The streams start when a host first speaks (firmware 1.0.13), so this
+    // fixture says something first — as any Manager does the moment it connects.
+    CHECK(exchange(ct::CMD_GET_STATUS, QByteArray()).size() == 1);
 
     const auto sendOne = [](quint32 id) {
         const uint8_t data[4] = {1, 2, 3, 4};
@@ -5876,6 +5882,1133 @@ static void testDeviceBinding(const SerialProtoCallbacks *restore)
     serial_proto_init(restore);
 }
 
+// The receive-match index (firmware 1.0.13): a bisection of sorted keys where
+// there used to be a walk of the message table from row 0. Everything the walk
+// guaranteed has to survive the change — the first configured row wins, transmit
+// and inactive rows never match, the bus and the frame type are part of a
+// message's identity — and an index built for one table must not be consulted
+// for the next. A FULL table, written in descending identifier order, so the
+// sort has real work to do and the row that matters is the last one.
+static void testReceiveMatchIndex(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+    serial_proto_init(restore);
+    CHECK(engine_clear_config());
+
+    const int kRows = ct::MAX_MESSAGES;
+    const quint32 kId = 0x100, kLastId = 0x1ABCDEF0;
+    QVector<ct::CanMessageConfig> msgs(kRows);
+    const auto rx = [](quint32 id, quint8 bus, quint8 extra) {
+        ct::CanMessageConfig m{};
+        m.can_id = id;
+        m.flags = quint8(ct::MSGFLAG_ACTIVE | extra);
+        m.src_bus = bus;
+        m.dlc = 8;
+        return m;
+    };
+    msgs[0] = rx(kId, 1, ct::MSGFLAG_TRANSMIT);      // a transmit row is never a receive match
+    msgs[1] = rx(kId, 1, 0);
+    msgs[1].flags = 0;                               // inactive
+    msgs[2] = rx(kId, 1, 0);                         // THE match for (bus 1, standard, 0x100)
+    msgs[3] = rx(kId, 1, 0);                         // the same identity again: never fires
+    msgs[4] = rx(kId, 2, 0);                         // same identifier, another bus
+    msgs[5] = rx(kId, 1, ct::MSGFLAG_EXTENDED);      // same identifier, extended
+    for (int i = 6; i < kRows - 1; ++i)
+        msgs[i] = rx(quint32(0x7FF - (i - 6)), 1, 0); // descending: the sort's worst input
+    msgs[kRows - 1] = rx(kLastId, 3, ct::MSGFLAG_EXTENDED);
+
+    const int boundTo[5] = {2, 3, 4, 5, kRows - 1};
+    ct::CanSignalConfig sig[5]{};
+    for (int i = 0; i < 5; ++i) {
+        sig[i].factor = 1.0f;
+        sig[i].min_val = -1.0e9f;
+        sig[i].max_val = 1.0e9f;
+        ct::sigSetHeader(sig[i], quint16(boundTo[i]), 0, 1);
+        ct::sigSetBits(sig[i], 0, 16, ct::SIGNAL_TYPE_UINT16, 0, 0);
+    }
+    CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, quint16(kRows),
+                             reinterpret_cast<const uint8_t *>(msgs.constData())));
+    CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 5, reinterpret_cast<const uint8_t *>(sig)));
+
+    const auto feed = [](quint8 bus, quint32 id, quint8 ext, quint8 value) {
+        const uint8_t f[8] = {value, 0, 0, 0, 0, 0, 0, 0};
+        engine_process_can(bus, id, ext, 0, f, 8);
+    };
+    const auto values = []() {
+        return QVector<float>{engine_signal_value(0), engine_signal_value(1), engine_signal_value(2),
+                              engine_signal_value(3), engine_signal_value(4)};
+    };
+
+    feed(1, kId, 0, 0x11);
+    CHECK(values() == (QVector<float>{0x11, 0, 0, 0, 0})); // row 2, and NOT its duplicate at row 3
+    feed(2, kId, 0, 0x22);
+    CHECK(values() == (QVector<float>{0x11, 0, 0x22, 0, 0})); // the bus is part of the identity
+    feed(1, kId, 1, 0x33);
+    CHECK(values() == (QVector<float>{0x11, 0, 0x22, 0x33, 0})); // so is the frame type
+    feed(3, kLastId, 1, 0x44);
+    CHECK(values() == (QVector<float>{0x11, 0, 0x22, 0x33, 0x44})); // the last row of a full table
+    // Nothing the table does not name moves anything: another identifier, the
+    // right identifier on a bus nobody configured it for, and the last row's
+    // identifier as the frame type it is not.
+    feed(1, 0x101, 0, 0x55);
+    feed(3, kId, 0, 0x55);
+    feed(2, kLastId, 1, 0x55);
+    feed(3, kLastId & 0x7FF, 0, 0x55);
+    CHECK(values() == (QVector<float>{0x11, 0, 0x22, 0x33, 0x44}));
+    // A configured filler row still matches (it has no channels, so the only
+    // visible effect is that it does not disturb anything).
+    feed(1, 0x7FF, 0, 0x66);
+    CHECK(values() == (QVector<float>{0x11, 0, 0x22, 0x33, 0x44}));
+
+    // A new table replaces the index: what the old one matched is gone, and
+    // the identifier now lives at row 0 with a different scaling.
+    CHECK(engine_clear_config());
+    ct::CanMessageConfig only = rx(kId, 1, 0);
+    ct::CanSignalConfig doubled = sig[0];
+    doubled.factor = 2.0f;
+    ct::sigSetHeader(doubled, 0, 0, 1);
+    CHECK(engine_table_write(ENGINE_TABLE_MESSAGES, 0, 1, reinterpret_cast<const uint8_t *>(&only)));
+    CHECK(engine_table_write(ENGINE_TABLE_SIGNALS, 0, 1, reinterpret_cast<const uint8_t *>(&doubled)));
+    feed(1, kId, 0, 0x10);
+    CHECK(engine_signal_value(0) == 32.0f);
+    feed(3, kLastId, 1, 0x44);
+    feed(2, kId, 0, 0x22);
+    CHECK(engine_signal_value(0) == 32.0f);
+
+    CHECK(engine_clear_config());
+    serial_proto_init(restore);
+}
+
+// Firmware 1.0.13: the streams start when a host first speaks, and the frame
+// checksum is table-driven.
+//
+// The first half is a compatibility promise as much as a saving. No released
+// Device Manager has ever sent CMD_STREAM_VALUES — Monitor Channels and the CAN
+// Viewer work because the streams were already on — so "off until asked" would
+// have broken both for every installed Manager. What is pinned here is the rule
+// that replaced it: nothing until a VALID frame arrives, everything from then
+// on, and a host that sets the mask itself is obeyed, 0 included.
+//
+// The second half is only worth having if it agrees with the other end, so the
+// firmware's table is held against the Manager's own bit-by-bit implementation,
+// which shares no code with it.
+static void testStreamsStartWithTheHost(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+
+    // ---- a unit nobody is talking to streams nothing ----
+    serial_proto_init(restore);
+    CHECK(!serial_proto_monitor_enabled());
+    CHECK(!serial_proto_values_enabled());
+    const uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    g_wire.clear();
+    serial_proto_stream_monitor(1, 0, 0x123, 0, 0, 0, 0, payload, 8);
+    serial_proto_stream_values();
+    CHECK(g_wire.isEmpty());
+
+    // ---- noise is not a host: a frame that fails its checksum starts nothing ----
+    {
+        QByteArray bad = ct::buildFrame(ct::CMD_GET_STATUS, QByteArray());
+        bad[bad.size() / 2] = char(bad[bad.size() / 2] ^ 0x5A);
+        serial_proto_feed(reinterpret_cast<const uint8_t *>(bad.constData()), uint16_t(bad.size()));
+        CHECK(!serial_proto_monitor_enabled());
+        CHECK(!serial_proto_values_enabled());
+    }
+
+    // ---- the first valid frame does, whatever it asks — what every Manager
+    // ever released relies on ----
+    CHECK(exchange(ct::CMD_GET_STATUS, QByteArray()).size() == 1);
+    CHECK(serial_proto_monitor_enabled());
+    CHECK(serial_proto_values_enabled());
+
+    // ---- a host that sets the mask owns it: off stays off ----
+    CHECK(expectAck(ct::CMD_STREAM_VALUES, QByteArray(1, char(0))));
+    CHECK(!serial_proto_monitor_enabled() && !serial_proto_values_enabled());
+    CHECK(exchange(ct::CMD_GET_STATUS, QByteArray()).size() == 1);
+    CHECK(!serial_proto_monitor_enabled() && !serial_proto_values_enabled());
+    CHECK(expectAck(ct::CMD_STREAM_VALUES, QByteArray(1, char(ct::STREAM_ENABLE_VALUES))));
+    CHECK(!serial_proto_monitor_enabled() && serial_proto_values_enabled());
+
+    // ---- and a host whose FIRST word is "off" has the last one ----
+    serial_proto_init(restore);
+    CHECK(expectAck(ct::CMD_STREAM_VALUES, QByteArray(1, char(0))));
+    CHECK(!serial_proto_monitor_enabled() && !serial_proto_values_enabled());
+    CHECK(exchange(ct::CMD_GET_STATUS, QByteArray()).size() == 1);
+    CHECK(!serial_proto_monitor_enabled() && !serial_proto_values_enabled());
+
+    // ---- the checksum: the firmware's table against the Manager's loop ----
+    {
+        quint32 s = 12345;
+        int disagreements = 0;
+        for (int n = 0; n < 2000; ++n) {
+            s = s * 1664525u + 1013904223u;
+            QByteArray buf(int((s >> 8) % 600), '\0');
+            for (auto &c : buf) {
+                s = s * 1664525u + 1013904223u;
+                c = char(s >> 16);
+            }
+            const auto *p = reinterpret_cast<const uint8_t *>(buf.constData());
+            if (compute_crc16(p, uint32_t(buf.size())) != ct::crc16(p, size_t(buf.size())))
+                ++disagreements;
+        }
+        CHECK(disagreements == 0);
+        const uint8_t check[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+        CHECK(compute_crc16(check, 9) == 0x29B1); // the published CRC-16/CCITT-FALSE check value
+    }
+
+    serial_proto_init(restore);
+}
+
+// The load device channels (store v20, firmware 1.0.13): frames each bus lost
+// on receive, the processor's load, and the main loop's longest turn. Until
+// these existed a unit that was falling behind had no way to say so — the bench
+// found the receive ring overflowing only by counting frames on the far side.
+//
+// Two halves. The ENGINE half: the three values reach the slots a configuration
+// names, the totals behave like the other since-boot totals (accumulated from
+// deltas, saturating, surviving a configuration clear), the destinations are
+// configuration and do NOT survive one, and the grown payload keeps the
+// short-prefix rule every older host depends on. The METER half: the arithmetic
+// that turns cycle counts into a percentage, run against turns whose answer is
+// known — which is the only place it can be, since on the part the only witness
+// to the loop's timing is the code being tested.
+static void testLoadDeviceChannels(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+    serial_proto_init(restore);
+
+    // ---- the ids are appended: nothing that shipped has moved ----
+    CHECK(DEVCH_RESET_REASON == 35);
+    CHECK(DEVCH_RX_DROPPED_BASE == 36);
+    CHECK(DEVCH_CPU_LOAD == 39);
+    CHECK(DEVCH_LOOP_TIME == 40);
+    CHECK(DEVCH_COUNT == 41);
+    CHECK(ct::DEVCH_RX_DROPPED_BASE == DEVCH_RX_DROPPED_BASE);
+    CHECK(ct::DEVCH_CPU_LOAD == DEVCH_CPU_LOAD);
+    CHECK(ct::DEVCH_LOOP_TIME == DEVCH_LOOP_TIME);
+
+    // ---- the catalogue carries a row for each, typed to hold what it reads ----
+    for (int bus0 = 0; bus0 < 3; ++bus0) {
+        const ct::Channel c = ct::ChannelCatalog::deviceChannelById(DEVCH_RX_DROPPED_BASE + bus0);
+        CHECK(c.name == QStringLiteral("Device CAN%1 Rx Dropped").arg(bus0 + 1));
+        CHECK(c.dataType == QStringLiteral("u32") && c.decimalPlaces == 0);
+    }
+    {
+        const ct::Channel load = ct::ChannelCatalog::deviceChannelById(DEVCH_CPU_LOAD);
+        CHECK(load.name == QStringLiteral("Device CPU Load"));
+        CHECK(load.dataType == QStringLiteral("u16") && load.decimalPlaces == 1);
+        CHECK(load.maxValue == 100.0);
+        const ct::Channel turn = ct::ChannelCatalog::deviceChannelById(DEVCH_LOOP_TIME);
+        CHECK(turn.name == QStringLiteral("Device Loop Time"));
+        CHECK(turn.unit == QStringLiteral("ms") && turn.decimalPlaces == 2);
+        CHECK(turn.maxValue >= 8000.0); // the watchdog's 8 s has to fit
+    }
+
+    // ---- published into the slots the configuration names ----
+    engine_clear_config();
+    const auto writeChannels = [](int count, quint16 firstSlot) {
+        QByteArray p(count * 2, '\0');
+        for (int i = 0; i < count; ++i)
+            qToLittleEndian<quint16>(quint16(firstSlot + i), reinterpret_cast<uchar *>(p.data()) + i * 2);
+        return expectAck(ct::CMD_WRITE_DEVICE_CHANNELS, p);
+    };
+    CHECK(writeChannels(DEVCH_COUNT, 100));
+    CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {}));
+    const auto slot = [](int id) { return engine_signal_value(uint16_t(100 + id)); };
+
+    engine_tick_calc(10); // publish once, so `before` is the total and not an empty slot
+    const float before[3] = {slot(DEVCH_RX_DROPPED_BASE), slot(DEVCH_RX_DROPPED_BASE + 1),
+                             slot(DEVCH_RX_DROPPED_BASE + 2)};
+    engine_note_rx_dropped(1, 7);
+    engine_note_rx_dropped(3, 1000);
+    engine_note_rx_dropped(3, 1);
+    engine_note_rx_dropped(0, 99); // no such bus: ignored, not written past the array
+    engine_note_rx_dropped(4, 99);
+    engine_set_loop_stats(37.5f, 1.25f);
+    engine_tick_calc(10);
+    CHECK(slot(DEVCH_RX_DROPPED_BASE) == before[0] + 7.0f);
+    CHECK(slot(DEVCH_RX_DROPPED_BASE + 1) == before[1]);
+    CHECK(slot(DEVCH_RX_DROPPED_BASE + 2) == before[2] + 1001.0f);
+    CHECK(slot(DEVCH_CPU_LOAD) == 37.5f);
+    CHECK(slot(DEVCH_LOOP_TIME) == 1.25f);
+    std::printf("  CAN1/CAN3 dropped, load, loop time : %g / %g, %g %%, %g ms\n",
+                double(slot(DEVCH_RX_DROPPED_BASE)), double(slot(DEVCH_RX_DROPPED_BASE + 2)),
+                double(slot(DEVCH_CPU_LOAD)), double(slot(DEVCH_LOOP_TIME)));
+
+    // ---- a gauge cannot leave its dial: clamped, and NaN is not a reading ----
+    engine_set_loop_stats(140.0f, -3.0f);
+    engine_tick_calc(10);
+    CHECK(slot(DEVCH_CPU_LOAD) == 100.0f);
+    CHECK(slot(DEVCH_LOOP_TIME) == 0.0f);
+    engine_set_loop_stats(std::numeric_limits<float>::quiet_NaN(),
+                          std::numeric_limits<float>::quiet_NaN());
+    engine_tick_calc(10);
+    CHECK(slot(DEVCH_CPU_LOAD) == 0.0f);
+    CHECK(slot(DEVCH_LOOP_TIME) == 0.0f);
+
+    // ---- the total saturates; it never wraps back to "nothing was lost" ----
+    engine_note_rx_dropped(2, 0xFFFFFFF0u);
+    engine_note_rx_dropped(2, 0x100u);
+    engine_tick_calc(10);
+    CHECK(slot(DEVCH_RX_DROPPED_BASE + 1) == float(0xFFFFFFFFu));
+
+    // ---- the totals are the DEVICE's and survive a clear; the destinations
+    // are the configuration's and do not ----
+    engine_set_loop_stats(12.0f, 0.5f);
+    const float can1 = slot(DEVCH_RX_DROPPED_BASE);
+    CHECK(engine_clear_config());
+    engine_tick_calc(10);
+    // (nothing is published anywhere now — re-point the channels and the
+    // since-boot figure is still there)
+    CHECK(writeChannels(DEVCH_COUNT, 200));
+    CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {}));
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(uint16_t(200 + DEVCH_RX_DROPPED_BASE)) == can1);
+    CHECK(engine_signal_value(uint16_t(200 + DEVCH_CPU_LOAD)) == 12.0f);
+
+    // ---- the payload grew; the rules around it did not ----
+    // A host that predates the load block sends 36 destinations and keeps all
+    // 36, with the five it never heard of left unused rather than aimed at
+    // slot 0.
+    CHECK(engine_clear_config());
+    CHECK(writeChannels(36, 300));
+    CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {}));
+    {
+        const QList<ct::Packet> reply = exchange(ct::CMD_READ_DEVICE_CHANNELS, QByteArray());
+        CHECK(reply.size() == 1 && reply[0].cmd == ct::CMD_READ_DEVICE_CHANNELS);
+        CHECK(reply.size() == 1 && reply[0].payload.size() == DEVCH_COUNT * 2);
+        if (reply.size() == 1 && reply[0].payload.size() == DEVCH_COUNT * 2) {
+            const auto *p = reinterpret_cast<const uchar *>(reply[0].payload.constData());
+            CHECK(qFromLittleEndian<quint16>(p + DEVCH_RESET_REASON * 2) == 300 + DEVCH_RESET_REASON);
+            for (int id = DEVCH_RX_DROPPED_BASE; id < DEVCH_COUNT; ++id)
+                CHECK(qFromLittleEndian<quint16>(p + id * 2) == ct::SIG_MSG_NONE);
+        }
+    }
+    // One destination too many is still refused, and so is half of one.
+    {
+        QList<ct::Packet> reply = exchange(ct::CMD_WRITE_DEVICE_CHANNELS, QByteArray((DEVCH_COUNT + 1) * 2, '\0'));
+        CHECK(reply.size() == 1 && reply[0].cmd == ct::CMD_NACK);
+        reply = exchange(ct::CMD_WRITE_DEVICE_CHANNELS, QByteArray(DEVCH_COUNT * 2 - 1, '\0'));
+        CHECK(reply.size() == 1 && reply[0].cmd == ct::CMD_NACK);
+    }
+
+    // ---- and they come back from flash: saved with the header, read at boot ----
+    CHECK(engine_clear_config());
+    CHECK(writeChannels(DEVCH_COUNT, 400));
+    CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {}));
+    engine_init(&cb);
+    {
+        ControlCanPayload setup[3];
+        CHECK(engine_load_config(setup));
+    }
+    engine_set_loop_stats(55.0f, 2.0f);
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(uint16_t(400 + DEVCH_CPU_LOAD)) == 55.0f);
+    CHECK(engine_signal_value(uint16_t(400 + DEVCH_LOOP_TIME)) == 2.0f);
+
+    // =====================================================================
+    // THE METER. 1,000,000 cycles to the second keeps the sums readable: an
+    // idle turn costs 100 cycles here, i.e. 100 microseconds.
+    // =====================================================================
+    const quint32 kRate = 1000000u;
+    struct Meter {
+        quint32 now = 0;
+        bool closed = false;
+        LoopMeterWindow last{};
+        int windows = 0;
+        void turn(quint32 cycles)
+        {
+            now += cycles; // wraps, as the hardware counter does
+            LoopMeterWindow w{};
+            if (loop_meter_turn(now, &w)) {
+                last = w;
+                closed = true;
+                ++windows;
+            }
+        }
+        // Whole windows of `pattern`, returning the last one closed.
+        LoopMeterWindow run(const QList<quint32> &pattern, int wanted)
+        {
+            const int target = windows + wanted;
+            while (windows < target)
+                for (quint32 c : pattern) {
+                    turn(c);
+                    if (windows >= target)
+                        break;
+                }
+            return last;
+        }
+    };
+
+    // Not started: it reports nothing, however often it is asked.
+    loop_meter_init(0);
+    {
+        LoopMeterWindow w{};
+        bool any = false;
+        for (quint32 t = 0; t < 5000000u; t += 1000u)
+            any = any || loop_meter_turn(t, &w);
+        CHECK(!any);
+    }
+
+    // An idle loop reads zero — not a few percent. Idle turns are not all the
+    // same length (here 100..110), and the slack is what absorbs that.
+    {
+        loop_meter_init(kRate);
+        Meter m;
+        m.turn(0);
+        const LoopMeterWindow w = m.run({100, 104, 100, 110, 101}, 2);
+        CHECK(w.load_pct == 0.0f);
+        CHECK(w.worst_turn_ms > 0.109f && w.worst_turn_ms < 0.111f);
+        std::printf("  idle loop                          : %.2f %%, worst turn %.3f ms\n",
+                    double(w.load_pct), double(w.worst_turn_ms));
+    }
+
+    // Half busy: one idle turn, then one that did 100 cycles of work on top of
+    // the 100 it costs to come round. 300 cycles, 100 of them work... and the
+    // busy turn's own floor is NOT work: 100 / 300.
+    {
+        loop_meter_init(kRate);
+        Meter m;
+        m.turn(0);
+        const LoopMeterWindow w = m.run({100, 200}, 2);
+        CHECK(w.load_pct > 33.2f && w.load_pct < 33.5f);
+        std::printf("  one idle turn, one with 100 of work: %.2f %% (exactly 1/3)\n", double(w.load_pct));
+    }
+
+    // Saturated: every turn is a full batch. The floor was learned while the
+    // unit was idle, which is the order things happen in on a real one.
+    {
+        loop_meter_init(kRate);
+        Meter m;
+        m.turn(0);
+        m.run({100}, 1);
+        const LoopMeterWindow w = m.run({10000}, 2);
+        CHECK(w.load_pct > 98.9f && w.load_pct <= 100.0f);
+        CHECK(w.worst_turn_ms > 9.99f && w.worst_turn_ms < 10.01f);
+        std::printf("  every turn a 10 ms batch           : %.2f %%, worst turn %.2f ms\n",
+                    double(w.load_pct), double(w.worst_turn_ms));
+    }
+
+    // One turn far longer than the window — a flash erase. It closes the window
+    // it lands in, is reported at its true length, and the sums do not overflow.
+    {
+        loop_meter_init(kRate);
+        Meter m;
+        m.turn(0);
+        m.run({100}, 1);
+        m.closed = false;
+        m.turn(3500000u); // 3.5 s in one turn
+        CHECK(m.closed);
+        CHECK(m.last.worst_turn_ms > 3499.0f && m.last.worst_turn_ms < 3501.0f);
+        CHECK(m.last.load_pct > 99.0f && m.last.load_pct <= 100.0f);
+        // and the NEXT window is clean again: a stall is not remembered
+        const LoopMeterWindow w = m.run({100}, 1);
+        CHECK(w.load_pct == 0.0f);
+        CHECK(w.worst_turn_ms < 0.2f);
+    }
+
+    // The counter wraps every 25 s on the part. Start a breath below the wrap.
+    {
+        loop_meter_init(kRate);
+        Meter m;
+        m.now = 0xFFFFFF00u;
+        m.turn(0);
+        const LoopMeterWindow w = m.run({100, 200}, 1);
+        CHECK(w.load_pct > 33.2f && w.load_pct < 33.5f);
+        CHECK(m.now < 0xFFFFFF00u); // it really did wrap
+    }
+
+    // A count that is not running must not teach the meter that a turn is free.
+    {
+        loop_meter_init(kRate);
+        Meter m;
+        m.turn(0);
+        for (int i = 0; i < 50; ++i)
+            m.turn(0);
+        const LoopMeterWindow w = m.run({100, 104}, 1);
+        CHECK(w.load_pct == 0.0f);
+    }
+
+    loop_meter_init(0);
+    engine_init(&cb);
+    serial_proto_init(restore);
+}
+
+// The host link's receive buffer (firmware 1.0.13). The UART receives into a
+// circular DMA buffer and the HAL reports progress as a position; the handler
+// has to turn positions into "these bytes are new". It got one case wrong for
+// as long as it existed: a host frame ending EXACTLY at the end of the buffer
+// makes the HAL report the wrap twice (transfer complete AND line idle, both as
+// position == capacity, in whichever order the two interrupts are taken), and
+// the second report re-delivered the whole buffer - a kilobyte of requests the
+// device had already answered. On the bench that was a 170 ms stall every
+// minute or two, found with the Device Loop Time channel.
+//
+// A simulated DMA buffer is driven with random host frames and produces the
+// events the HAL produces - half full, full, idle, and the doubled wrap. What
+// comes out of the handler must be the byte stream that went in: nothing twice,
+// nothing missing. The OLD rule is run beside the new one and is REQUIRED to
+// fail, which is what shows the simulation reaches the case at all.
+static void testSerialRxWrap()
+{
+    struct Rng {
+        quint32 s;
+        quint32 next() { s = s * 1664525u + 1013904223u; return s >> 8; }
+        int below(int n) { return int(next() % quint32(n)); }
+    };
+
+    // The handler as it was, kept as the control.
+    const auto oldAdvance = [](quint16 last, quint16 now, quint16 capacity, SerialRxSpans *out) {
+        out->count = 0;
+        const quint16 pos = (now >= capacity) ? quint16(0) : now;
+        if (now != last) {
+            if (now > last) {
+                out->start[0] = last;
+                out->length[0] = quint16(now - last);
+                out->count = 1;
+            } else {
+                out->start[0] = last;
+                out->length[0] = quint16(capacity - last);
+                out->count = 1;
+                if (now > 0) {
+                    out->start[1] = 0;
+                    out->length[1] = now;
+                    out->count = 2;
+                }
+            }
+        }
+        return pos;
+    };
+
+    int newWrong = 0, oldWrong = 0, doubledWraps = 0, runs = 0;
+    for (const int capacity : {16, 64, 1024}) {
+        for (quint32 seed = 1; seed <= 40; ++seed) {
+            for (int rule = 0; rule < 2; ++rule) {        // 0 = the new rule, 1 = the old one
+                Rng rng{seed * 2654435761u + quint32(capacity)};
+                QVector<quint8> buffer(capacity, 0);
+                QByteArray sent, delivered;
+                quint16 last = 0;
+                int wpos = 0;                             // 0..capacity-1: where the DMA writes next
+                quint8 value = 0;
+                const auto report = [&](int position) {
+                    SerialRxSpans spans;
+                    last = rule == 0 ? serial_rx_advance(last, quint16(position), quint16(capacity), &spans)
+                                     : oldAdvance(last, quint16(position), quint16(capacity), &spans);
+                    for (int i = 0; i < spans.count; ++i)
+                        for (int k = 0; k < spans.length[i]; ++k)
+                            delivered.append(char(buffer[spans.start[i] + k]));
+                };
+                for (int frame = 0; frame < 400; ++frame) {
+                    // Lengths that land on the boundary often: multiples of a
+                    // small number, as a polled fixed-length request is.
+                    int length = 1 + rng.below(capacity > 64 ? 600 : capacity);
+                    if (rng.below(3) == 0)
+                        length = (capacity / 4) * (1 + rng.below(3));
+                    bool endedOnWrap = false;
+                    for (int i = 0; i < length; ++i) {
+                        buffer[wpos] = ++value;
+                        sent.append(char(value));
+                        ++wpos;
+                        if (wpos == capacity / 2)
+                            report(capacity / 2);         // the half-transfer interrupt
+                        if (wpos == capacity) {
+                            wpos = 0;
+                            if (i == length - 1)
+                                endedOnWrap = true;       // TC and IDLE both pending: below
+                            else
+                                report(capacity);         // the transfer-complete interrupt
+                        }
+                    }
+                    if (endedOnWrap) {
+                        // The frame ended exactly on the wrap. The HAL reports
+                        // capacity for the transfer complete AND for the idle
+                        // line; which is taken first is a matter of priority
+                        // and timing, and the two reports look identical.
+                        if (rule == 0)
+                            ++doubledWraps;
+                        report(capacity);
+                        report(capacity);
+                    } else {
+                        report(wpos);                     // the idle line: the DMA's position
+                    }
+                }
+                ++runs;
+                if (delivered != sent)
+                    ++(rule == 0 ? newWrong : oldWrong);
+            }
+        }
+    }
+    std::printf("  host-link receive buffer          : %d simulated links, %d frames ended exactly on the wrap; new rule wrong in %d, old rule wrong in %d\n",
+                runs / 2, doubledWraps, newWrong, oldWrong);
+    CHECK(doubledWraps > 100); // the case is actually being reached
+    CHECK(newWrong == 0);
+    CHECK(oldWrong > 0);       // ...and the simulation can see the bug it is here for
+
+    // The cases by hand, at the size the device uses.
+    SerialRxSpans s;
+    CHECK(serial_rx_advance(0, 10, 1024, &s) == 10 && s.count == 1 && s.start[0] == 0 && s.length[0] == 10);
+    CHECK(serial_rx_advance(10, 10, 1024, &s) == 10 && s.count == 0);
+    CHECK(serial_rx_advance(1000, 1024, 1024, &s) == 1024 && s.count == 1 && s.start[0] == 1000 && s.length[0] == 24);
+    CHECK(serial_rx_advance(1024, 1024, 1024, &s) == 1024 && s.count == 0);   // the wrap, said twice
+    CHECK(serial_rx_advance(1024, 7, 1024, &s) == 7 && s.count == 1 && s.start[0] == 0 && s.length[0] == 7);
+    CHECK(serial_rx_advance(1000, 7, 1024, &s) == 7 && s.count == 2 && s.start[0] == 1000 && s.length[0] == 24
+          && s.start[1] == 0 && s.length[1] == 7);
+    CHECK(serial_rx_advance(3, 5000, 1024, &s) == 1024 && s.count == 1 && s.length[0] == 1021); // never past the buffer
+}
+
+// The message table's two clocks (firmware 1.0.13). The transmit service and the
+// receive-timeout check each walked EVERY message row — the service four times
+// per 5 ms — to reach the handful that were theirs; they now visit lists of just
+// those rows, built when the table changes. Nothing about what they DO was meant
+// to move: not which messages are due, not the order a bus serves them in, not
+// where a full queue parks the rotation, not which channels fall back to their
+// defaults or when.
+//
+// So the old code is kept HERE, as the reference: the walk-every-row service and
+// the walk-every-row timeout check, line for line, driven by the same clock and
+// the same queue budget as the engine. Every accepted frame of every 5 ms slot
+// and every channel after every step has to match. The table is sparse on
+// purpose — transmit rows scattered among receive rows, inactive rows, rows on
+// a bus that does not exist — and it GROWS halfway through, because a list that
+// is not rebuilt when the table changes is the way this kind of index goes wrong.
+static void testMessageRowLists(const SerialProtoCallbacks *restore)
+{
+    struct Rng {
+        quint32 s;
+        quint32 next() { s = s * 1664525u + 1013904223u; return s >> 8; }
+        int below(int n) { return int(next() % quint32(n)); }
+    };
+    Rng rng{20260919u};
+    constexpr int kSlotMs = 5; // ENGINE_TX_SERVICE_MS
+
+    EngineCallbacks cb{};
+    cb.transmit_can = budgetedTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+    CHECK(engine_clear_config());
+
+    QVector<ct::CanMessageConfig> msgs;
+    QVector<ct::CanSignalConfig> sigs;
+    const auto addRows = [&](int count) {
+        static const quint16 periods[5] = {5, 10, 20, 50, 100};
+        for (int n = 0; n < count; ++n) {
+            const int r = msgs.size();
+            ct::CanMessageConfig m{};
+            m.can_id = quint32(0x300 + r);
+            m.dlc = 8;
+            m.flags = ct::MSGFLAG_ACTIVE;
+            m.src_bus = quint8(1 + (r / 5) % 3);
+            if (r % 5 == 0) {                       // a transmit row
+                m.flags |= ct::MSGFLAG_TRANSMIT;
+                m.period_ms = periods[(r / 5) % 5];
+                if (r % 35 == 0)
+                    m.flags = ct::MSGFLAG_TRANSMIT; // ...switched off
+                if (r % 40 == 5)
+                    m.src_bus = 4;                  // ...or on a bus that does not exist
+            } else {                                // a receive row
+                m.period_ms = quint16(r % 3 == 0 ? 0 : (r % 3 == 1 ? 30 : 80)); // its timeout
+                if (r % 11 == 3)
+                    m.flags = 0;                    // a timeout on a row that is off
+            }
+            msgs.append(m);
+            if (r % 5 != 0 && r % 2 == 0) {         // channels for some of the receive rows
+                for (int k = 0; k < 2; ++k) {
+                    ct::CanSignalConfig s{};
+                    s.factor = 1.0f;
+                    s.min_val = -1.0e9f;
+                    s.max_val = 1.0e9f;
+                    s.default_value = float(5000 + sigs.size());
+                    ct::sigSetHeader(s, quint16(r), 0, quint8(sigs.size() % 9 != 4)); // a few inactive
+                    ct::sigSetBits(s, quint16(k * 16), 16, ct::SIGNAL_TYPE_UINT16, 0, 0);
+                    sigs.append(s);
+                }
+            }
+        }
+    };
+
+    // ---- the reference: the code these two functions had before the lists ----
+    QVector<quint32> refElapsed, refRxElapsed;
+    QVector<float> refValue;
+    quint16 refCursor[3] = {0, 0, 0};
+    const auto isTx = [&](int i) {
+        return (msgs[i].flags & ct::MSGFLAG_ACTIVE) && (msgs[i].flags & ct::MSGFLAG_TRANSMIT)
+               && msgs[i].src_bus >= 1 && msgs[i].src_bus <= 3;
+    };
+    const auto refSeedPhases = [&]() {              // rebuildTransmitPhases, unchanged by this work
+        refElapsed.fill(0, msgs.size());
+        int ntx[3] = {0, 0, 0}, k[3] = {0, 0, 0};
+        for (int i = 0; i < msgs.size(); ++i)
+            if (isTx(i))
+                ++ntx[msgs[i].src_bus - 1];
+        for (int i = 0; i < msgs.size(); ++i) {
+            if (!isTx(i))
+                continue;
+            const int b = msgs[i].src_bus - 1;
+            const quint32 period = qMax<quint32>(msgs[i].period_ms, kSlotMs);
+            const quint32 ticks = period / kSlotMs;
+            quint32 slot = 1u + (quint32(k[b]) * ticks) / quint32(ntx[b] ? ntx[b] : 1);
+            if (slot > ticks)
+                slot = ticks;
+            refElapsed[i] = period - slot * kSlotMs;
+            ++k[b];
+        }
+    };
+    const auto refService = [&](int budget) {       // the old engine_service_transmit
+        QList<quint32> accepted;
+        const int nmsg = msgs.size();
+        QVector<quint8> due(nmsg, 0);
+        for (int i = 0; i < nmsg; ++i) {
+            if (!isTx(i))
+                continue;
+            const quint32 period = qMax<quint32>(msgs[i].period_ms, kSlotMs);
+            refElapsed[i] += kSlotMs;
+            if (refElapsed[i] >= period) {
+                refElapsed[i] -= period;
+                if (refElapsed[i] >= period)
+                    refElapsed[i] = period - 1;
+                due[i] = 1;
+            }
+        }
+        for (int b = 0; b < 3; ++b) {
+            int start = refCursor[b];
+            if (start >= nmsg)
+                start = 0;
+            bool full = false;
+            for (int k = 0; k < nmsg; ++k) {
+                const int i = (start + k) % nmsg;
+                if (!due[i] || msgs[i].src_bus != b + 1)
+                    continue;
+                if (budget > 0) {
+                    --budget;
+                    accepted.append(msgs[i].can_id);
+                } else {
+                    full = true;
+                    refCursor[b] = quint16(i);
+                    break;
+                }
+            }
+            if (!full)
+                refCursor[b] = quint16(start);
+        }
+        return accepted;
+    };
+    const auto refTimeouts = [&](int elapsed) {     // the old applyReceiveTimeouts
+        QVector<quint8> late(msgs.size(), 0);
+        for (int i = 0; i < msgs.size(); ++i) {
+            const auto &m = msgs[i];
+            if (!(m.flags & ct::MSGFLAG_ACTIVE) || (m.flags & ct::MSGFLAG_TRANSMIT) || m.period_ms == 0)
+                continue;
+            refRxElapsed[i] = qMin<quint32>(refRxElapsed[i] + quint32(elapsed), m.period_ms);
+            if (refRxElapsed[i] >= m.period_ms)
+                late[i] = 1;
+        }
+        for (int s = 0; s < sigs.size(); ++s) {
+            const int m = ct::sigMsgIdx(sigs[s]);
+            if (ct::sigIsActive(sigs[s]) && m < msgs.size() && late[m])
+                refValue[s] = sigs[s].default_value;
+        }
+    };
+
+    addRows(240);
+    const auto put = [](EngineTable t, const void *p, int start, int n) {
+        return engine_table_write(t, quint16(start), quint16(n), static_cast<const uint8_t *>(p));
+    };
+    CHECK(put(ENGINE_TABLE_MESSAGES, msgs.constData(), 0, msgs.size()));
+    CHECK(put(ENGINE_TABLE_SIGNALS, sigs.constData(), 0, sigs.size()));
+    refRxElapsed.fill(0, msgs.size());
+    refValue.fill(0.0f, sigs.size());
+    refSeedPhases();
+
+    int txSlots = 0, txFrames = 0, txWrong = 0, valueChecks = 0, valueWrong = 0, defaulted = 0;
+    const auto compareValues = [&]() {
+        for (int s = 0; s < sigs.size(); ++s) {
+            ++valueChecks;
+            if (engine_signal_value(quint16(s)) != refValue[s] && valueWrong++ < 5)
+                std::printf("  channel %d: engine %g, reference %g\n", s,
+                            double(engine_signal_value(quint16(s))), double(refValue[s]));
+        }
+    };
+    for (int step = 0; step < 6000; ++step) {
+        if (step == 3000) {
+            // The table grows under it: ten more rows of each kind, appended, as
+            // a Send's next block would land. Both lists and the phases have to
+            // follow; the cursors do not move, and neither do the reference's.
+            const int was = msgs.size(), sigWas = sigs.size();
+            addRows(60);
+            CHECK(put(ENGINE_TABLE_MESSAGES, msgs.constData() + was, was, msgs.size() - was));
+            CHECK(put(ENGINE_TABLE_SIGNALS, sigs.constData() + sigWas, sigWas, sigs.size() - sigWas));
+            refRxElapsed.resize(msgs.size());
+            refValue.resize(sigs.size());
+            refSeedPhases();
+        }
+        const int what = rng.below(100);
+        if (what < 55) {                            // a 5 ms transmit slot, the queue taking 0..6
+            // Mostly a queue under pressure, which is what moves the cursors;
+            // now and then one that takes everything, which is what rests them.
+            const int budget = (rng.below(4) == 0) ? 1000 : rng.below(7);
+            g_txBudget = budget;
+            g_txAccepted.clear();
+            engine_service_transmit(kSlotMs);
+            const QList<quint32> expect = refService(budget);
+            ++txSlots;
+            txFrames += expect.size();
+            if (g_txAccepted != expect && txWrong++ < 5)
+                std::printf("  slot %d: engine sent %d frames, reference %d\n", step,
+                            int(g_txAccepted.size()), int(expect.size()));
+        } else if (what < 80) {                     // a calculation pass: the timeouts' clock
+            const int elapsed = 10 + 10 * rng.below(3);
+            engine_tick_calc(quint16(elapsed));
+            refTimeouts(elapsed);
+            compareValues();
+        } else {                                    // a frame for one of the receive rows
+            const int r = rng.below(msgs.size());
+            if (msgs[r].flags & ct::MSGFLAG_TRANSMIT)
+                continue;
+            uint8_t data[8];
+            for (auto &b : data)
+                b = uint8_t(rng.below(256));
+            engine_process_can(msgs[r].src_bus, msgs[r].can_id, 0, 0, data, 8);
+            if (msgs[r].flags & ct::MSGFLAG_ACTIVE) {
+                refRxElapsed[r] = 0;
+                for (int s = 0; s < sigs.size(); ++s)
+                    if (ct::sigIsActive(sigs[s]) && ct::sigMsgIdx(sigs[s]) == r) {
+                        const int k = (s % 2 == 0) ? 0 : 1; // two channels a row, in pairs
+                        refValue[s] = float(data[k * 2] | (data[k * 2 + 1] << 8));
+                    }
+            }
+            compareValues();
+        }
+    }
+    for (int s = 0; s < sigs.size(); ++s)
+        if (refValue[s] == sigs[s].default_value)
+            ++defaulted;
+    std::printf("  transmit service vs the full walk  : %d slots, %d frames, %d slots differed\n",
+                txSlots, txFrames, txWrong);
+    std::printf("  receive timeouts vs the full walk  : %d channel checks, %d differed (%d channels ended on their default)\n",
+                valueChecks, valueWrong, defaulted);
+    CHECK(txSlots > 2000 && txFrames > 5000); // the comparison really did see traffic, and queue pressure
+    CHECK(txWrong == 0);
+    CHECK(valueChecks > 100000 && defaulted > 10);
+    CHECK(valueWrong == 0);
+
+    g_txBudget = 0;
+    g_txAccepted.clear();
+    EngineCallbacks plain{};
+    plain.transmit_can = captureTransmit;
+    engine_init(&plain);
+    CHECK(engine_clear_config());
+    serial_proto_init(restore);
+}
+
+// Incremental recalculation (firmware 1.0.13) against the full recalculation it
+// replaced. A received frame used to re-run every calculation row; it now
+// re-runs the rows that read something the frame changed. The engine's claim is
+// not "close enough" but EQUIVALENCE — after every frame and every pass, every
+// channel holds the value the old chain would have left there — and this holds
+// it to that the only way that means anything: the same random configuration
+// and the same random traffic through both, comparing every channel after every
+// single step.
+//
+// The configurations are hostile on purpose. Row inputs are drawn from the WHOLE
+// channel pool, so references point backwards as often as forwards (a counter on
+// a condition's output, a table on a maths row, maths on a counter); several
+// rows share an output slot; some counters and conditions answer to message
+// events rather than channels; conditions carry durations and holds, which only
+// the pass may spend; payloads repeat, so "nothing changed" is a common case
+// rather than an untested one; and a host override comes and goes mid-run.
+static void testIncrementalEqualsFull(const SerialProtoCallbacks *restore)
+{
+    struct Rng {
+        quint32 s;
+        quint32 next() { s = s * 1664525u + 1013904223u; return s >> 8; }
+        int below(int n) { return int(next() % quint32(n)); }
+        bool chance(int percent) { return below(100) < percent; }
+    };
+    constexpr int kMsgs = 6, kSigsPerMsg = 3, kRxSigs = kMsgs * kSigsPerMsg;
+    constexpr int kPool = 64;          // every row's inputs and outputs live in slots 0..63
+    constexpr int kSteps = 400;
+    constexpr quint32 kScenarios = 200;
+
+    int mismatches = 0, comparisons = 0;
+    for (quint32 scenario = 1; scenario <= kScenarios && mismatches == 0; ++scenario) {
+        QVector<QByteArray> reference;
+        // 0 = full recalculation, frame and pass: the reference.
+        // 1 = incremental, frame and pass, WITHOUT the pass's rotating backstop
+        //     - the bookkeeping on its own, which is the claim being tested.
+        // 2 = incremental with the backstop, as the device runs - which shows
+        //     the backstop's extra runs change nothing either.
+        for (int mode = 0; mode < 3; ++mode) {
+            Rng rng{scenario * 2654435761u};
+            EngineCallbacks cb{};
+            cb.transmit_can = captureTransmit;
+            engine_init(&cb);
+            engine_set_access_keys(nullptr);
+            engine_set_incremental(mode != 0);
+            engine_set_pass_refresh(mode == 2);
+            CHECK(engine_clear_config());
+            const auto slot = [&rng]() { return quint16(rng.below(kPool)); };
+            const auto calcSlot = [&rng]() { return quint16(kRxSigs + rng.below(kPool - kRxSigs)); };
+
+            QVector<ct::CanMessageConfig> msgs(kMsgs);
+            QVector<ct::CanSignalConfig> sigs(kRxSigs);
+            for (int m = 0; m < kMsgs; ++m) {
+                msgs[m] = ct::CanMessageConfig{};
+                msgs[m].can_id = quint32(0x200 + m);
+                msgs[m].flags = ct::MSGFLAG_ACTIVE;
+                msgs[m].src_bus = 1;
+                msgs[m].dlc = 8;
+                for (int k = 0; k < kSigsPerMsg; ++k) {
+                    ct::CanSignalConfig &s = sigs[m * kSigsPerMsg + k];
+                    s = ct::CanSignalConfig{};
+                    s.factor = 1.0f;
+                    s.min_val = -1.0e9f;
+                    s.max_val = 1.0e9f;
+                    ct::sigSetHeader(s, quint16(m), 0, 1);
+                    ct::sigSetBits(s, quint16(k * 16), 16, ct::SIGNAL_TYPE_UINT16, 0, 0);
+                }
+            }
+            QVector<ct::ConstantConfig> consts(4);
+            for (auto &c : consts)
+                c = ct::ConstantConfig{calcSlot(), float(rng.below(200)), 1};
+            QVector<ct::Table2x16Def> t16d(2);
+            QVector<ct::Table2x16Out> t16o(2);
+            for (int t = 0; t < 2; ++t) {
+                t16d[t] = ct::Table2x16Def{};
+                t16d[t].x_signal_idx = slot();
+                t16d[t].dest_signal_idx = calcSlot();
+                t16d[t].flags = quint8(ct::TABLEFLAG_ACTIVE | (rng.chance(50) ? ct::TABLEFLAG_X_INTERP : 0));
+                t16d[t].x_count = 16;
+                for (int i = 0; i < 16; ++i) {
+                    t16d[t].x_sites[i] = float(i * 20);
+                    t16o[t].outputs[i] = float(rng.below(500));
+                }
+            }
+            QVector<ct::Table8x8Def> t88d(1);
+            QVector<ct::Table8x8GridRow> t88r(ct::TABLE_8X8_SITES);
+            t88d[0] = ct::Table8x8Def{};
+            t88d[0].x_signal_idx = slot();
+            t88d[0].y_signal_idx = slot();
+            t88d[0].dest_signal_idx = calcSlot();
+            t88d[0].flags = quint8(ct::TABLEFLAG_ACTIVE | ct::TABLEFLAG_X_INTERP | ct::TABLEFLAG_Y_INTERP);
+            t88d[0].x_count = t88d[0].y_count = 8;
+            for (int i = 0; i < 8; ++i) {
+                t88d[0].x_sites[i] = t88d[0].y_sites[i] = float(i * 40);
+                for (int j = 0; j < 8; ++j)
+                    t88r[i].v[j] = float(rng.below(900));
+            }
+            QVector<ct::MathConfig> maths(14);
+            for (auto &m : maths) {
+                m = ct::MathConfig{};
+                m.op = quint8(rng.below(31));
+                m.input_a_type = rng.chance(85) ? 1 : 0;
+                m.input_a_idx = slot();
+                m.input_a_const = float(rng.below(50));
+                m.input_b_type = rng.chance(60) ? 1 : 0;
+                m.input_b_idx = slot();
+                m.input_b_const = float(1 + rng.below(9));
+                m.dest_signal_idx = calcSlot();
+                m.is_active = 1;
+                m.input_c_type = rng.chance(40) ? 1 : 0;
+                const quint16 cIdx = slot();
+                const float cConst = float(rng.below(100));
+                if (m.input_c_type == 1)
+                    std::memcpy(m.input_c_val, &cIdx, 2);
+                else
+                    std::memcpy(m.input_c_val, &cConst, 4);
+            }
+            QVector<ct::CounterConfig> ctrs(5);
+            for (auto &c : ctrs) {
+                c = ct::CounterConfig{};
+                c.up_signal_idx = slot();
+                c.down_signal_idx = rng.chance(50) ? slot() : quint16(ct::SIG_MSG_NONE);
+                c.follow_signal_idx = rng.chance(30) ? slot() : quint16(ct::SIG_MSG_NONE);
+                c.reset_signal_idx = rng.chance(50) ? slot() : quint16(ct::SIG_MSG_NONE);
+                c.enable_signal_idx = rng.chance(30) ? slot() : quint16(ct::SIG_MSG_NONE);
+                c.dest_signal_idx = calcSlot();
+                c.min_value = 0.0f;
+                c.max_value = rng.chance(50) ? 5.0f : 1.0e6f;
+                c.reset_value = 0.0f;
+                c.step = 1.0f;
+                // All three modes. RATE is the one a clock moves: the pass has
+                // to keep running it though none of its inputs ever changes.
+                c.mode = quint8(rng.below(3));
+                c.rate_hz = quint8(1 + rng.below(100));
+                c.flags = quint8(ct::COUNTERFLAG_ACTIVE | (rng.chance(30) ? ct::COUNTERFLAG_RATE_DOWN : 0)
+                                 | (rng.chance(30) ? ct::COUNTERFLAG_ROLL : 0));
+                if (rng.chance(40)) {                        // step on "this message arrived"
+                    c.up_signal_idx = quint16(rng.below(kMsgs));
+                    c.input_kinds = ct::COUNTER_SRC_MSG_RX; // the up input's two bits
+                }
+            }
+            QVector<ct::ConditionConfig> conds(10);
+            for (auto &c : conds) {
+                c = ct::ConditionConfig{};
+                c.set_count = quint8(1 + rng.below(3));
+                c.reset_count = quint8(1 + rng.below(3));
+                for (int side = 0; side < 2; ++side) {
+                    ct::ConditionTerm *terms = side ? c.reset_terms : c.set_terms;
+                    for (int t = 0; t < 3; ++t) {
+                        terms[t].input_a_signal_idx = slot();
+                        terms[t].op = quint8(rng.below(6));
+                        terms[t].input_b_type = rng.chance(40) ? 1 : 0;
+                        if (terms[t].input_b_type == 1)
+                            terms[t].b.input_b_idx = slot();
+                        else
+                            terms[t].b.input_b_const = float(rng.below(300));
+                        if (rng.chance(15)) {                // "was received"
+                            terms[t].op = ct::COND_OP_MSG_RX;
+                            terms[t].input_a_signal_idx = quint16(rng.below(kMsgs));
+                            terms[t].input_b_type = 0;
+                            terms[t].b.input_b_const = 0.0f;
+                        }
+                    }
+                }
+                c.set_joiners = quint8(rng.below(4));
+                c.reset_joiners = quint8(rng.below(4));
+                // "for" durations of 10 ms to 300 ms, on the whole expression
+                // or on named terms: a clock only the pass can finish.
+                c.set_qualify_cs = rng.chance(40) ? quint16(1 + rng.below(30)) : 0;
+                c.reset_qualify_cs = rng.chance(30) ? quint16(1 + rng.below(30)) : 0;
+                c.set_qualify_terms = quint8(rng.chance(50) ? rng.below(8) : 0);
+                c.reset_qualify_terms = quint8(rng.chance(50) ? rng.below(8) : 0);
+                c.dest_signal_idx = calcSlot();
+                c.flags = quint8(ct::CONDFLAG_ACTIVE | (rng.chance(60) ? ct::CONDFLAG_SETRESET : 0));
+                c.latch_hz = quint8(rng.chance(50) ? 1 + rng.below(20) : 0);
+            }
+
+            const auto put = [](EngineTable t, const void *p, int n) {
+                return engine_table_write(t, 0, quint16(n), static_cast<const uint8_t *>(p));
+            };
+            CHECK(put(ENGINE_TABLE_MESSAGES, msgs.constData(), msgs.size()));
+            CHECK(put(ENGINE_TABLE_SIGNALS, sigs.constData(), sigs.size()));
+            CHECK(put(ENGINE_TABLE_CONSTANTS, consts.constData(), consts.size()));
+            CHECK(put(ENGINE_TABLE_TABLES_2X16_OUT, t16o.constData(), t16o.size()));
+            CHECK(put(ENGINE_TABLE_TABLES_2X16_DEF, t16d.constData(), t16d.size()));
+            CHECK(put(ENGINE_TABLE_TABLES_8X8_ROW, t88r.constData(), t88r.size()));
+            CHECK(put(ENGINE_TABLE_TABLES_8X8_DEF, t88d.constData(), t88d.size()));
+            CHECK(put(ENGINE_TABLE_MATH, maths.constData(), maths.size()));
+            CHECK(put(ENGINE_TABLE_COUNTERS, ctrs.constData(), ctrs.size()));
+            CHECK(put(ENGINE_TABLE_CONDITIONS, conds.constData(), conds.size()));
+
+            // Channels moved ON THE CLOCK by writers that are not rows of any
+            // stage: integrators stepping at their own rates and timers that
+            // start and stop on pool channels. Whatever reads them has to be
+            // marked by that write alone, on passes where nothing else moved.
+            // (Not the device channels, tempting as OnTime is: they are
+            // since-boot figures that survive engine_init on purpose, so each
+            // mode would start from a different clock.)
+            QVector<ct::IntegratorConfig> integs(3);
+            for (auto &g : integs) {
+                g = ct::IntegratorConfig{};
+                g.input_signal_idx = slot();
+                g.reset_signal_idx = rng.chance(40) ? slot() : quint16(ct::SIG_MSG_NONE);
+                g.enable_signal_idx = rng.chance(30) ? slot() : quint16(ct::SIG_MSG_NONE);
+                g.dest_signal_idx = calcSlot();
+                g.input_const = float(1 + rng.below(5));
+                g.min_value = 0.0f;
+                g.max_value = rng.chance(50) ? 50.0f : 1.0e6f;
+                g.rate_hz = quint8(1 + rng.below(100));
+                g.flags = quint8(ct::INTEGFLAG_ACTIVE | (rng.chance(60) ? ct::INTEGFLAG_CONST_INPUT : 0)
+                                 | (rng.chance(40) ? ct::INTEGFLAG_ROLL : 0));
+            }
+            QVector<ct::TimerConfig> timers(2);
+            for (auto &t : timers) {
+                t = ct::TimerConfig{};
+                for (ct::ConditionTerm *term : {&t.start_term, &t.stop_term}) {
+                    term->input_a_signal_idx = slot();
+                    term->op = quint8(rng.below(6));
+                    term->input_b_type = 0;
+                    term->b.input_b_const = float(rng.below(300));
+                }
+                t.limit_value = float(1 + rng.below(4));
+                t.dest_signal_idx = calcSlot();
+                t.flags = quint8(ct::TIMERFLAG_ACTIVE | (rng.chance(50) ? ct::TIMERFLAG_ROLLOVER : 0)
+                                 | (rng.chance(30) ? ct::TIMERFLAG_COUNTDOWN : 0));
+            }
+            CHECK(put(ENGINE_TABLE_INTEGRATORS, integs.constData(), integs.size()));
+            CHECK(put(ENGINE_TABLE_TIMERS, timers.constData(), timers.size()));
+
+            uint8_t last[kMsgs][8] = {};
+            int quiet = 0;                                     // passes still to run back to back
+            for (int step = 0; step < kSteps; ++step) {
+                // A run of passes with nothing else between them is where an
+                // incremental pass can go wrong and a frame cannot rescue it: a
+                // hold has to run out, a duration has to complete and a rate
+                // counter has to step on the clock alone.
+                int what = rng.below(100);
+                if (quiet > 0) {
+                    --quiet;
+                    what = 80;
+                } else if (what >= 94 && what < 96) {
+                    quiet = 5 + rng.below(40);
+                }
+                if (what < 60) {                              // a configured frame
+                    const int m = rng.below(kMsgs);
+                    if (!rng.chance(35))                      // 35 %: the same payload again
+                        for (int b = 0; b < 6; ++b)
+                            last[m][b] = uint8_t(rng.chance(50) ? rng.below(256) : rng.below(3));
+                    engine_process_can(1, quint32(0x200 + m), 0, 0, last[m], 8);
+                } else if (what < 66) {                       // a frame nothing is configured for
+                    const uint8_t junk[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+                    engine_process_can(quint8(1 + rng.below(3)), 0x555, 0, 0, junk, 8);
+                } else if (what < 96) {                       // a pass, of whatever time really passed
+                    const int lump = rng.below(100);
+                    engine_tick(quint16(lump < 70 ? 10 : lump < 97 ? 5 + rng.below(30) : 200 + rng.below(3000)));
+                } else if (what < 98) {                       // the host pins a channel...
+                    engine_set_override(slot(), 1, float(rng.below(400)));
+                } else {                                      // ...and lets go of all of them
+                    engine_clear_overrides();
+                }
+                QByteArray snap(int(ct::MAX_SIGNALS * sizeof(float)), '\0');
+                for (int i = 0; i < ct::MAX_SIGNALS; ++i) {
+                    const float v = engine_signal_value(quint16(i));
+                    std::memcpy(snap.data() + i * int(sizeof(float)), &v, sizeof(float));
+                }
+                if (mode == 0) {
+                    reference.append(snap);
+                } else {
+                    ++comparisons;
+                    if (snap != reference[step] && mismatches < 5) {
+                        ++mismatches;
+                        for (int i = 0; i < ct::MAX_SIGNALS; ++i) {
+                            float a, b;
+                            std::memcpy(&a, reference[step].constData() + i * 4, 4);
+                            std::memcpy(&b, snap.constData() + i * 4, 4);
+                            if (std::memcmp(&a, &b, 4) != 0) {
+                                std::printf("  scenario %u step %d channel %d: full %g, incremental %g (%s)\n",
+                                            scenario, step, i, double(a), double(b),
+                                            mode == 1 ? "no backstop" : "with backstop");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::printf("  incremental vs full recalculation : %d steps compared (frame and pass, with and without the backstop), %d differed\n",
+                comparisons, mismatches);
+    CHECK(comparisons == 2 * kScenarios * kSteps);
+    CHECK(mismatches == 0);
+
+    engine_set_incremental(true);
+    engine_set_pass_refresh(true);
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    CHECK(engine_clear_config());
+    serial_proto_init(restore);
+}
+
 // v19 layout identity: a header says which LAYOUT wrote it, so a variant of the
 // same store version laying the tables out differently (firmware 1.0.11,
 // include/variant.h) is refused before a record is read. One binary holds one
@@ -7626,7 +8759,13 @@ int main(int argc, char *argv[])
         // refused by the store rather than misread. The field moved the
         // header's CRC span -- the v16 rule -- hence the bump. The WIRE
         // version stays put: not one record changed shape.
-        CHECK(FLASH_STORE_VERSION == 19u);
+        // v20: the load device channels (firmware 1.0.13). DEVCH_COUNT 36 -> 41
+        // grows DeviceChannelsConfig ten bytes IN THE HEADER. No table moves now
+        // — they start at HEADER_AREA — and the layout identity is unchanged,
+        // but the fields behind the struct shift and the CRC span with them:
+        // the v16 rule again. The WIRE stays put, and the 72-byte payload an
+        // older host sends remains a valid PREFIX of the new 82.
+        CHECK(FLASH_STORE_VERSION == 20u);
         // The configurator carries its own copy so a Send can check the device
         // before writing to it. This file is the only place that sees both, so
         // it is the only place the two can be held equal.
@@ -8258,6 +9397,43 @@ int main(int argc, char *argv[])
     CHECK(std::memcmp(readRelays.constData() + 4, mapped.tables.relays.constData(),
                       size_t(readRelays.size() - 4)) == 0);
 
+    // ---- A Send is DORMANT until its SAVE (firmware 1.0.13) ----
+    // Everything above was written and read back over the wire, and none of it
+    // is running: CMD_CLEAR_CONFIG opened a hold, the writes advanced only what
+    // the store holds, and the commit is what publishes them — all at once. A
+    // unit must never run the half-written prefix of a configuration on a live
+    // bus, which is what it used to do for the seconds a Send takes (and how a
+    // Send of a full configuration wedged a bench unit on a 1,556 frame/s bus).
+    {
+        CHECK(engine_config_held());
+        // Stored, so a read and the next contiguous write both see it...
+        CHECK(engine_table_used(ENGINE_TABLE_RELAYS) == mapped.tables.relays.size());
+        CHECK(engine_table_used(ENGINE_TABLE_MESSAGES) == mapped.tables.messages.size());
+        // ...and not running: the relay rule that forwards 0x7AA below forwards
+        // nothing yet, the receive message decodes nothing, and a pass transmits
+        // nothing.
+        const uint8_t payload[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04};
+        g_txFrames.clear();
+        engine_process_can(1, 0x7AA, 0, 0, payload, 8);
+        engine_tick(1000);
+        CHECK(g_txFrames.isEmpty());
+        const uint8_t rpmProbe[8] = {0x27, 0x10, 0, 0, 0, 0, 0, 0};
+        engine_process_can(1, 0x640, 0, 0, rpmProbe, 8);
+        for (int s = 0; s < mapped.tables.signalConfigs.size(); ++s)
+            CHECK(engine_signal_value(quint16(s)) == 0.0f);
+
+        // The commit. The header is write-once per erase, so the name the
+        // persistence block further down sets has to be in THIS commit; that
+        // block's own SAVE then writes an identical header, which the store
+        // accepts as the retransmit it is indistinguishable from.
+        QByteArray name(ct::CONFIG_NAME_LEN, '\0');
+        std::memcpy(name.data(), "EngineMap_A", 11);
+        CHECK(expectAck(ct::CMD_WRITE_CONFIG_NAME, name));
+        CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {}));
+        CHECK(!engine_config_held());
+        CHECK(engine_table_used(ENGINE_TABLE_RELAYS) == mapped.tables.relays.size());
+    }
+
     // ---- v11 message relay: a matching frame on the source bus forwards to the
     // target buses; non-matching ID, wrong source bus and wrong frame type do
     // not forward. ----
@@ -8656,6 +9832,7 @@ int main(int argc, char *argv[])
         CHECK(expectAck(ct::CMD_CLEAR_CONFIG, {}));
         CHECK(sendTable(ct::CMD_WRITE_MSG_CFG, cm.tables.messages, ct::WRITE_CHUNK_MESSAGES));
         CHECK(sendTable(ct::CMD_WRITE_SIG_CFG, cm.tables.signalConfigs, ct::WRITE_CHUNK_SIGNALS));
+        CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {})); // a Send runs only once it is committed
 
         const int aIdx = cm.channelToSignal.value(QStringLiteral("a value"), -1);
         const int bIdx = cm.channelToSignal.value(QStringLiteral("b value"), -1);
@@ -8770,6 +9947,7 @@ int main(int argc, char *argv[])
                         ct::WRITE_CHUNK_TABLES_2X16_OUT));
         CHECK(sendTable(ct::CMD_WRITE_TABLE2X16_DEF, tm.tables.tables2x16Def,
                         ct::WRITE_CHUNK_TABLES_2X16_DEF));
+        CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {})); // a Send runs only once it is committed
 
         // Byte-exact readback of every table.
         const QByteArray rDef =
@@ -8854,7 +10032,16 @@ int main(int argc, char *argv[])
 
         const ct::MappingResult pm = ct::mapToDevice(pcfg);
         CHECK(pm.ok());
-        CHECK(expectAck(ct::CMD_CLEAR_CONFIG, {}));
+        // engine_clear_config(), NOT the wire's CLEAR, and on purpose. Since
+        // firmware 1.0.13 a host's Send is dormant until its SAVE, so a torn
+        // upload over the wire never runs at all — the hazard this block was
+        // written against cannot arise that way any more. The guard it checks
+        // still has to hold, because a host CAN commit a definition without its
+        // outputs, and a committed image with that shape must skip the table
+        // rather than read outputs that are not there. Clearing through the
+        // engine opens no hold, so the writes below go live one by one, which
+        // is the only way left to put the engine in front of that shape.
+        CHECK(engine_clear_config());
         CHECK(sendTable(ct::CMD_WRITE_MSG_CFG, pm.tables.messages, ct::WRITE_CHUNK_MESSAGES));
         CHECK(sendTable(ct::CMD_WRITE_SIG_CFG, pm.tables.signalConfigs, ct::WRITE_CHUNK_SIGNALS));
         // Deliberately write ONLY the definition â€” the interrupted-upload case.
@@ -9148,6 +10335,7 @@ int main(int argc, char *argv[])
         // rather than merely sufficient.
         CHECK(sendTable(ct::CMD_WRITE_TABLE8X8_ROW, rows, ct::WRITE_CHUNK_TABLES_8X8_ROW));
         CHECK(sendTable(ct::CMD_WRITE_TABLE8X8_DEF, defs, ct::WRITE_CHUNK_TABLES_8X8_DEF));
+        CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {})); // a Send runs only once it is committed
 
         const QByteArray rDef = readRange(ct::CMD_READ_TABLE8X8_DEF, 0, quint16(defs.size()));
         CHECK(rDef.size() == 4 + defs.size() * int(sizeof(ct::Table8x8Def)));
@@ -9274,6 +10462,7 @@ int main(int argc, char *argv[])
         CHECK(sendTable(ct::CMD_WRITE_SIG_CFG, mm.tables.signalConfigs, ct::WRITE_CHUNK_SIGNALS));
         CHECK(sendTable(ct::CMD_WRITE_COND_CFG, mm.tables.conditions,
                         ct::WRITE_CHUNK_CONDITIONS));
+        CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {})); // a Send runs only once it is committed
         // Byte-exact readback of the widened record.
         const QByteArray rc =
             readRange(ct::CMD_READ_COND_CFG, 0, quint16(mm.tables.conditions.size()));
@@ -9422,6 +10611,7 @@ int main(int argc, char *argv[])
             CHECK(sendTable(ct::CMD_WRITE_MSG_CFG, mr.tables.messages, ct::WRITE_CHUNK_MESSAGES));
             CHECK(sendTable(ct::CMD_WRITE_SIG_CFG, mr.tables.signalConfigs, ct::WRITE_CHUNK_SIGNALS));
             CHECK(sendTable(ct::CMD_WRITE_CONST_CFG, mr.tables.constants, ct::WRITE_CHUNK_CONSTANTS));
+            CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {})); // a Send runs only once it is committed
         };
 
         // ---- Batch: one period emits BOTH variant frames ----
@@ -10070,6 +11260,12 @@ int main(int argc, char *argv[])
     testAccessKeyDurability(&protoCb);
     testDeviceBinding(&protoCb);
     testLayoutIdentity(&protoCb);
+    testReceiveMatchIndex(&protoCb);
+    testIncrementalEqualsFull(&protoCb);
+    testStreamsStartWithTheHost(&protoCb);
+    testLoadDeviceChannels(&protoCb);
+    testMessageRowLists(&protoCb);
+    testSerialRxWrap();
     testRetransmitSafety();
     testFirmwareUpdate();
     testFirmwareImageCapacityBlock();

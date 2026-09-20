@@ -2,7 +2,7 @@
 
 Everything the device computes runs from one loop, on two clocks: an **evaluation pass** every 10 ms (100 Hz), and **frame arrival**, which triggers extra work the moment a configured message is received. This page discloses the exact order of both, and how often everything else on the unit runs — so when one channel reads another you can say precisely how old the value is, and when a message transmits you can say precisely when.
 
-Nothing here is configurable; it is how the firmware is built. The numbers apply to the whole configuration regardless of size — the pass runs the full table of every calculation type, active rows in row order, on every pass.
+Nothing here is configurable; it is how the firmware is built. The order and the timing apply to the whole configuration regardless of size. From firmware 1.0.13 the device does not literally re-run a row whose result cannot have changed — see [what the device skips](#skips) — but every value is exactly what running every row, in the order below, would have produced.
 
 ## The evaluation pass — every 10 ms
 
@@ -11,8 +11,8 @@ Each pass executes these stages, always in this order:
 <table>
 <tr><th>#</th><th>Stage</th><th>What happens</th></tr>
 <tr><td>1</td><td>Device channels</td><td>Device OnTime, the per-bus
-<a href="channels.md">CAN diagnostics</a>, Bus Load and the MCU health block
-are written first, so everything downstream reads this pass's
+<a href="channels.md">CAN diagnostics</a>, Bus Load, the MCU health block and
+the load block are written first, so everything downstream reads this pass's
 values.</td></tr>
 <tr><td>2</td><td>Receive timeouts</td><td>Any receive message past its timeout
 has its channels set to their default values (where the section asks for
@@ -59,10 +59,12 @@ Received frames are not held for the next pass — each one is processed on arri
 1. **[Message relays](relays.md)** — every relay rule is checked against every received frame, matched or not, and forwards immediately.
 2. **Message match** — the first active receive message on that bus with that CAN ID (and matching standard/extended type) wins; the message's timeout window restarts.
 3. **Channel decode** — the matched section's channels are extracted and scaled into their values.
-4. **Recalculation** — constants, lookup tables, math and User Conditions re-run (the same stages 3–5 and 9 above, in the same order), so anything derived from the received channels updates immediately rather than up to 10 ms later. A **was received** comparison naming this message is true on exactly this evaluation, which is why no received frame can be missed however fast they arrive.
+4. **Recalculation** — constants, lookup tables, math, counters' edge detection and User Conditions re-run (the same stages 3–6 and 9 above, in the same order), so anything derived from the received channels updates immediately rather than up to 10 ms later. A **was received** comparison naming this message is true on exactly this evaluation, which is why no received frame can be missed however fast they arrive.
 5. **Routing** — if the section routes to other buses, the frame is forwarded last, after the recalculation.
 
-Counters, timers and integrators do *not* run here — they advance on the 10 ms clock only, because they measure time. A Momentary condition's hold measures time in the same way and is likewise spent on the pass alone: the recalculation above is told that no time has passed, so a burst of frames cannot cut a pulse short. The device script's `on_tick` does not run here either: it is a per-pass hook with a per-pass budget, not a per-frame one. Both pick up the received values on the next pass, at most 10 ms later.
+> **Note:** **What the device skips (firmware 1.0.13).** A constant, a table, a math row, a counter or a User Condition is re-run when something it reads — a received channel, or the output of another row — actually took a new value; when it reads a message event; or when time itself moves it: a Rate counter always, and a User Condition for as long as it has a Momentary hold to spend or a "for" duration still running. A row that is none of those is left alone, by a received frame and by the 10 ms pass alike, because running it would change nothing. Timers, integrators and the device script are not skipped: they run on every pass. The results are identical to re-running every row every time, which is what earlier firmware did. That is tested rather than assumed: the same random configurations and traffic are run both ways and every channel compared after every frame and every pass. As a backstop the pass also re-runs a rotating slice of rows, so every row is re-run at least twice a second whatever happens. The difference is only in how much a large configuration costs: a frame whose payload repeats the last one, and a pass in which nothing moved, cost almost nothing.
+
+A counter's *edge detection* runs here, told that no time has passed: a frame can step a counter on an edge, and cannot advance a rate-based one. Timers and integrators do *not* run here at all — they advance on the 10 ms clock only, because they measure time. A Momentary condition's hold measures time in the same way and is likewise spent on the pass alone: the recalculation above is told that no time has passed, so a burst of frames cannot cut a pulse short. The device script's `on_tick` does not run here either: it is a per-pass hook with a per-pass budget, not a per-frame one. Both pick up the received values on the next pass, at most 10 ms later.
 
 ## Reading across the order: the one-pass lag
 
@@ -104,8 +106,13 @@ Each transmit message runs on its own period — the section's Transmit Rate, 1 
 <tr><td>Evaluation pass (stages above)</td><td>Every 10 ms
 (100 Hz)</td></tr>
 <tr><td>Constants, tables, math, User Conditions</td><td>Every pass,
-<em>plus</em> immediately on every matched received frame</td></tr>
-<tr><td>Counters, timers, integrators</td><td>Every pass only</td></tr>
+<em>plus</em> immediately on every matched received frame — from firmware
+1.0.13, in both cases only the rows with something to do (see
+<a href="#skips">what the device skips</a>)</td></tr>
+<tr><td>Counters</td><td>Every pass; edge detection also on every matched
+received frame — likewise only the rows with something to do; a Rate counter
+runs on every pass</td></tr>
+<tr><td>Timers, integrators</td><td>Every pass only</td></tr>
 <tr><td>A Momentary condition's hold</td><td>Spent every pass only — a received
 frame does not advance it</td></tr>
 <tr><td>Message events for a condition's <b>was received</b> /
@@ -121,8 +128,10 @@ frame</td></tr>
 its message, during composition — channels packed first, checksum stamped
 last</td></tr>
 <tr><td>Receive timeout check</td><td>Every pass</td></tr>
-<tr><td>Device channels (OnTime, diagnostics, MCU health)</td><td>Republished
+<tr><td>Device channels (OnTime, diagnostics, MCU health, load)</td><td>Republished
 every pass</td></tr>
+<tr><td>CPU Load, Loop Time</td><td>Measured over a 1 s window; each pass
+republishes the last window</td></tr>
 <tr><td>CAN error-state sampling</td><td>Every pass, just before it</td></tr>
 <tr><td>Bus Load</td><td>Recomputed over a 1 s window</td></tr>
 <tr><td>MCU health sampling (temperature, VDDA)</td><td>Sampled at
@@ -140,6 +149,14 @@ changed (see <a href="integrators.md">Integrators</a>)</td></tr>
 </table>
 
 > **Note:** The pass is driven by real elapsed time, not by counting visits. If something stalls the loop — a flash erase during Save to Flash is the realistic case — the next pass is told how much time actually passed: timers and integrators advance by the true amount, and transmit periods stretch rather than burst-transmitting a backlog afterwards.
+
+## When there is more traffic than the device can process
+
+Received frames wait in a buffer per bus — about 315 classic frames, which is 50 ms of a saturated 1 Mbit/s bus — until the loop takes them. From firmware 1.0.13 the loop takes at most **16 frames per turn**, one bus after another in rotation, and then services everything else — transmit, the host link, the evaluation pass — before taking more. It also stops early the moment a transmit slot or a pass comes due. So overload has one consequence and only one: **frames are dropped**, from the bus that is sending more than its share, and everything the device does on a clock keeps its timing. Earlier firmware kept taking frames for as long as they kept arriving, and a bus busy enough could starve the rest of the loop entirely.
+- **Dropped frames are counted.** [Device CAN*n* Rx Dropped](channels.md) says how many, and **Device CPU Load** and **Device Loop Time** say how close the unit is to dropping any.
+- **A configuration being sent does not run until it is saved.** Sending clears the device and writes the new tables one block at a time; from firmware 1.0.13 the engine stays idle from the clear until **Save to Flash** commits the whole configuration, and only then starts. Nothing half-written ever processes a frame — which matters when the buses are live while you send.
+- **A watchdog restarts a unit that stops.** If the loop ever fails to come round for 8 seconds the hardware resets the processor, the stored configuration loads, and [Device Last Reset Reason](channels.md) reads *Independent Watchdog*. Nothing in normal operation takes anywhere near that long; it exists so that a fault nobody predicted costs eight seconds rather than a visit to the vehicle.
+- **The monitor streams start when this application connects.** A unit with nothing listening on USB spends no time producing Monitor Channels or CAN Viewer data; both start at the first command from a host.
 
 ## See also
 
