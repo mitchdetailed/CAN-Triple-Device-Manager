@@ -27,9 +27,41 @@ every channel within 70&nbsp;ms even at the device's channel limit — see
 <a href="engine.html">Order &amp; Timing of Operations</a> for the exact
 rates.</p>
 
+<p class="note">Monitor Channels needs a configuration to name the channels. If
+none is open — you have just started the program and connected — it offers to
+read the configuration from the device first, and opens over it once the read
+has finished. It asks to connect first if no link is open.</p>
+
 <p class="note">A value that has not updated for about 2 seconds turns gray —
 the channel's message has stopped arriving, or the device is not sending the
 stream. It returns to normal color with the next update.</p>
+
+<p id="channel-select"><b>Select Channels…</b> above the grid narrows it to the
+channels you are watching, and puts them in the order you want. The picker
+lists every mapped channel on the left and the chosen ones on the right:
+highlight channels on the left — <b>Ctrl</b>-click to pick several,
+<b>Shift</b>-click for a block — and press <b>&gt;&gt;</b> (or double-click) to
+add them; <b>&lt;&lt;</b>, a double-click or <b>Delete</b> takes them back. The
+<b>Find</b> box above the left list narrows it by name while you look. Drag
+rows up and down the right-hand list to set their order; the grid follows it,
+top to bottom. An empty right-hand list means every channel. <b>Show All</b>
+beside the button clears the selection, and the label says how many channels
+are showing. The selection is remembered the next time the window opens. It
+hides and reorders rows only: every channel is still mapped and still updated,
+so Show All shows current values. A channel you have pinned with
+<a href="#override">Override</a> always stays in the list, so a selection
+cannot hide a value that is driving the device.</p>
+
+<p id="channel-lists"><b>Save List…</b> in the picker writes the selected
+channels, in their order, as a <b>channel list</b> file (<code>*.ct3l</code>)
+in the program's <code>Channel Lists</code> folder (see
+<a href="communications.html#folders">Where the files are kept</a>), so a set of
+channels outlives the configuration it was picked from — a "cooling" list, a
+"boost" list. <b>Load List…</b> replaces the selection with a saved list. A
+channel the list names that this configuration does not have is reported by
+name as <b>not found</b> and left out; the rest load in the list's order. The
+file is plain, readable JSON of channel names and nothing else, so a list can
+be fixed in Notepad.</p>
 
 <p>The label above the grid states what is being shown: the channel mapping of
 the <em>current document</em>, not necessarily what the device is running. If
@@ -101,6 +133,9 @@ Overwrite Mode, where the rows hold still.</td></tr>
 three are ticked by default — see below.</td></tr>
 <tr><td>Show: Tx Msgs</td><td>Whether the frames the device itself transmitted
 appear in the list. Ticked by default — see below.</td></tr>
+<tr><td>ID filter</td><td>Which arbitration IDs appear in the list — hex IDs,
+ranges and <code>!</code> exclusions; blank shows every ID. See
+<a href="#filtering">Filtering the list</a>.</td></tr>
 <tr><td>Overwrite Mode</td><td>One row per message carrying its most recent
 data, instead of a scrolling trace — see below.</td></tr>
 <tr><td>Save to File…</td><td>Writes every buffered frame to a file, in the
@@ -148,8 +183,20 @@ Frame</b>. It is ticked by default. Untick it to leave only what the buses
 carried in, which is the quickest way to tell an incoming message apart from
 one of the device's own on a bus where both share an ID.</p>
 
-<p>The two filters compose: a Tx frame on a hidden bus stays hidden when
-<b>Tx Msgs</b> is re-ticked, because its bus is still unticked.</p>
+<p>The <b>ID filter</b> field, beside Overwrite Mode, picks messages by
+arbitration ID. Type the IDs to keep, in hex with or without <code>0x</code>,
+separated by spaces or commas: <code>7E8, 100</code>. A range is written with a
+dash, <code>100-1FF</code>. A leading <code>!</code> hides an ID or range
+instead of keeping it, so <code>!3C0</code> on its own shows everything but the
+one message that floods the bus, and <code>100-1FF !150</code> keeps a block
+minus one. An entry that is not a hex ID is named in red beside the field, and
+the rest of the entry still applies while you fix it. Standard and extended IDs
+match by their number.</p>
+
+<p>The three filters compose — a frame has to pass all of them: a Tx frame on a
+hidden bus stays hidden when <b>Tx Msgs</b> is re-ticked, because its bus is
+still unticked, and an ID the filter keeps shows only on the buses that are
+ticked.</p>
 
 <p>All of these filter the <b>display only</b>. Every frame is captured
 regardless, so:</p>
@@ -197,8 +244,8 @@ receives is not the same traffic, so Rx and Tx keep separate rows. The
 <b>Dir</b> column says which is which.</li>
 </ul>
 
-<p>Everything else keeps working as it does in the scrolling view. The bus and
-<b>Tx Msgs</b> filters still apply; <b>Pause</b> still stops capture; and
+<p>Everything else keeps working as it does in the scrolling view. The bus,
+<b>Tx Msgs</b> and <b>ID</b> filters still apply; <b>Pause</b> still stops capture; and
 capture itself is untouched, so <b>Save to File…</b> writes the complete trace
 frame by frame no matter which mode you were watching in. Switching the mode
 off gives the full history back — it was recorded the whole time.</p>

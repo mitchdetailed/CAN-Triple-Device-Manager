@@ -41,7 +41,7 @@ The three text fields are byte budgets rather than character counts: one non-ASC
 
 **Neither secret is ever read back.** Not the passphrase, not the derivation, not a hash. Both fields show blank with a placeholder saying so, and blank means *keep* — which is what makes fixing a typo in a model name bearable. Removing the FW Updater Password is a separate tick box, offered only while the field is empty, because "set it to this" and "take it away" are contradictory instructions.
 
-Apply connects if you are not connected: composing a licence is desk work, and the dialog opens without hardware. Setting the first password asks for confirmation, because there is no recovery — a lost FW Updater Password means the licence on that unit can no longer be changed by anyone except a holder of the Firmware Key.
+Opening the Firmware License Manager connects to the device first (Connection Settings appears if no link is open), and the dialog opens showing the unit's current licence. Should the link drop while it is open, Apply reconnects before writing. Setting the first password asks for confirmation, because there is no recovery — a lost FW Updater Password means the licence on that unit can no longer be changed by anyone except a holder of the Firmware Key.
 
 ## Set Access Passwords…
 

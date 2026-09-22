@@ -5,11 +5,13 @@
 #include <QClipboard>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QCommandLinkButton>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QDir>
 #include <QFileInfo>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QInputDialog>
 #include <QFormLayout>
 #include <QLabel>
@@ -21,10 +23,12 @@
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QSettings>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QVBoxLayout>
 
 #include <cstring>
+#include <utility>
 
 #include "../model/access_keys.h"
 #include "../model/device_mapper.h"
@@ -65,6 +69,8 @@ namespace ct {
 
 namespace {
 constexpr int kMaxRecentFiles = 8;
+// The start page's column of command links and recent files (buildCentral).
+constexpr int kStartColumnWidth = 460;
 const char *kRecentFilesKey = "recentFiles";
 // Open and Save As offer both formats, because the magic decides which reader
 // runs and a user who typed ".ct3s" into Save As should still find their file
@@ -167,7 +173,7 @@ MainWindow::MainWindow(QWidget *parent)
         statusBar()->showMessage(tr("Device: %1").arg(text.trimmed()), 4000);
     });
 
-    updateWindowTitle();
+    updateDocumentState(); // start page up, document commands off, title set
     updateConnectionStatus();
 }
 
@@ -175,10 +181,23 @@ void MainWindow::buildMenus()
 {
     // File
     QMenu *fileMenu = menuBar()->addMenu(tr("&File"));
+    // A menu shows an action's tooltip only when asked to. Asked here, and on
+    // every menu below that carries a gated item, so the reason an item is grey
+    // — no document yet, or a target firmware without that table — is readable
+    // where the grey is. Without this the capacity tooltips were set and never
+    // shown.
+    fileMenu->setToolTipsVisible(true);
     fileMenu->addAction(tr("&New"), QKeySequence::New, this, &MainWindow::onNew);
     fileMenu->addAction(tr("&Open…"), QKeySequence::Open, this, &MainWindow::onOpen);
-    fileMenu->addAction(tr("&Save"), QKeySequence::Save, this, &MainWindow::onSave);
-    fileMenu->addAction(tr("Save &As…"), QKeySequence::SaveAs, this, &MainWindow::onSaveAs);
+    // From here on, every item that reads or edits the DOCUMENT goes on
+    // m_documentActions, which updateDocumentState() keeps disabled until there
+    // is one — see the start page in buildCentral(). New and Open are what
+    // produce a document, so they stay live; so does the Secure Configuration
+    // Builder, which reads its source from a file rather than from the editor.
+    m_documentActions << fileMenu->addAction(tr("&Save"), QKeySequence::Save, this,
+                                             &MainWindow::onSave);
+    m_documentActions << fileMenu->addAction(tr("Save &As…"), QKeySequence::SaveAs, this,
+                                             &MainWindow::onSaveAs);
     // Replaces Save Secure Config. That command saved the open document in a
     // second format; this one takes a configuration as an input, attaches an
     // install policy to it, and produces a deployable package — which is what
@@ -186,12 +205,15 @@ void MainWindow::buildMenus()
     fileMenu->addAction(tr("Secure Configuration &Builder…"), this,
                         &MainWindow::onSecureBuilder);
     fileMenu->addSeparator();
-    fileMenu->addAction(tr("Check &Channels"), this, &MainWindow::onCheckChannels);
-    fileMenu->addAction(tr("Config S&ummary…"), this, &MainWindow::onConfigSummary);
+    m_documentActions << fileMenu->addAction(tr("Check &Channels"), this,
+                                             &MainWindow::onCheckChannels);
+    m_documentActions << fileMenu->addAction(tr("Config S&ummary…"), this,
+                                             &MainWindow::onConfigSummary);
     // Beside the two document reports because it is a fact about the DOCUMENT
     // — which firmware it is sized against — and the reports are where that
     // fact shows up as "n of m".
-    fileMenu->addAction(tr("Target &Firmware…"), this, &MainWindow::onTargetFirmware);
+    m_documentActions << fileMenu->addAction(tr("Target &Firmware…"), this,
+                                             &MainWindow::onTargetFirmware);
     fileMenu->addSeparator();
     m_revealAction = fileMenu->addAction(tr("&Reveal Protected Comms…"), this,
                                          &MainWindow::onRevealProtectedComms);
@@ -209,10 +231,13 @@ void MainWindow::buildMenus()
 
     // Connections
     QMenu *connectionsMenu = menuBar()->addMenu(tr("&Connections"));
-    connectionsMenu->addAction(tr("&Communications…"), this, &MainWindow::onCommunications);
+    connectionsMenu->setToolTipsVisible(true);
+    m_documentActions << connectionsMenu->addAction(tr("&Communications…"), this,
+                                                    &MainWindow::onCommunications);
 
     // Calculations
     QMenu *calcMenu = menuBar()->addMenu(tr("C&alculations"));
+    calcMenu->setToolTipsVisible(true);
     // Each is kept so updateCapacityGates() can switch it off when the target
     // firmware has no such table — a variant without integrators offers no
     // Integrators dialog rather than one that refuses every row.
@@ -238,6 +263,7 @@ void MainWindow::buildMenus()
 
     // Online
     QMenu *onlineMenu = menuBar()->addMenu(tr("&Online"));
+    onlineMenu->setToolTipsVisible(true);
     // The link's own verbs head the menu: everything below them talks to the
     // device, so the first question — are we talking at all? — is answered
     // first. Connect retries this session's last successful port before it
@@ -252,8 +278,9 @@ void MainWindow::buildMenus()
     m_connectAction->setEnabled(!m_link.isOpen());
     m_disconnectAction->setEnabled(m_link.isOpen());
     onlineMenu->addSeparator();
-    onlineMenu->addAction(tr("&Send Configuration"), QKeySequence(Qt::Key_F5), this,
-                          &MainWindow::onSendConfiguration);
+    m_documentActions << onlineMenu->addAction(tr("&Send Configuration"),
+                                               QKeySequence(Qt::Key_F5), this,
+                                               &MainWindow::onSendConfiguration);
     // Directly under Send, because it is the same verb with a different subject:
     // that one sends what is open, this one sends a sealed file without opening
     // it. Keeping them adjacent is what makes the distinction findable.
@@ -261,6 +288,10 @@ void MainWindow::buildMenus()
                           &MainWindow::onSendSecureConfiguration);
     onlineMenu->addAction(tr("&Get Configuration"), this, &MainWindow::onGetConfiguration);
     onlineMenu->addSeparator();
+    // NOT on m_documentActions, although it lists the document's channels: it
+    // was, briefly, and read as "Monitor is broken" to someone who had just
+    // connected a unit and pressed F3. It stays live and, with no document,
+    // offers to read the unit's configuration first — see onMonitorChannels.
     onlineMenu->addAction(tr("&Monitor Channels…"), QKeySequence(Qt::Key_F3), this,
                           &MainWindow::onMonitorChannels);
     // Mnemonic on the "w" rather than "V", which is free again now that Verify
@@ -300,9 +331,9 @@ void MainWindow::buildMenus()
     onlineMenu->addSeparator();
     // Set Access Passwords writes into the DEVICE, which is why it is here
     // rather than under File. The Firmware License Manager beside it is the
-    // same kind of thing — it edits the unit, not the document — and opens
-    // without a connection only because composing a licence is desk work; Apply
-    // is the step that needs hardware.
+    // same kind of thing — it edits the unit, not the document — and, like
+    // every other command on this menu that talks to a unit, connects before
+    // it opens (onFirmwareLicense says what that changed).
     //
     // The dealer-facing installer is Send Secure Configuration, at the top of
     // this menu with the other send commands: it is the one item here that will
@@ -313,11 +344,14 @@ void MainWindow::buildMenus()
 
     // Tools
     QMenu *toolsMenu = menuBar()->addMenu(tr("&Tools"));
-    toolsMenu->addAction(tr("Channel &Editor…"), this, &MainWindow::onChannelEditor);
+    toolsMenu->setToolTipsVisible(true);
+    m_documentActions << toolsMenu->addAction(tr("Channel &Editor…"), this,
+                                              &MainWindow::onChannelEditor);
     // Beside the Channel Editor because they answer the same need at different
     // scales: the editor changes channels one at a time, the console changes
     // four hundred of them in a loop.
-    toolsMenu->addAction(tr("&Lua Console…"), this, &MainWindow::onLuaConsole);
+    m_documentActions << toolsMenu->addAction(tr("&Lua Console…"), this,
+                                              &MainWindow::onLuaConsole);
     toolsMenu->addSeparator();
     // Serial port settings belong to the app, not the document.
     toolsMenu->addAction(tr("Connection &Settings…"), this, &MainWindow::onConnectionSettings);
@@ -339,13 +373,17 @@ void MainWindow::updateCapacityGates()
     const auto gate = [this, &cap](QAction *action, int holds, const QString &what) {
         if (!action)
             return;
-        action->setEnabled(holds > 0);
+        // Two gates, and the document one comes first: a table the target
+        // firmware lacks is a fact about a document, so it is not worth
+        // stating until there is one.
+        action->setEnabled(m_hasDocument && holds > 0);
         // A disabled item with no explanation reads as a bug. The tooltip is
-        // shown by the menu when the pointer rests on it.
-        action->setToolTip(holds > 0 ? QString()
-                                     : tr("The target firmware has no %1 — see File > Target "
-                                          "Firmware.")
-                                           .arg(what));
+        // shown by the menu when the pointer rests on it (setToolTipsVisible).
+        action->setToolTip(!m_hasDocument ? tr("Open, create or read a configuration first.")
+                           : holds > 0    ? QString()
+                                          : tr("The target firmware has no %1 — see File > "
+                                               "Target Firmware.")
+                                                .arg(what));
     };
     gate(m_mathAction, cap.capacityOf(DeviceTable::Math), tr("math channels"));
     gate(m_conditionsAction, cap.capacityOf(DeviceTable::Conditions), tr("User Conditions"));
@@ -450,24 +488,127 @@ void MainWindow::updateProtectionState()
     }
 }
 
+// The central area has two faces on a stack: the START PAGE, shown from launch
+// until there is a document, and the DOCUMENT PAGE behind it.
+//
+// The window used to open straight onto an untitled, editable document, which
+// read as "the program starts with some default template": every menu was
+// live, Communications opened on a blank bus, and nothing said that the thing
+// on screen was nobody's configuration. Now nothing is open until the user
+// says what to open. The four choices are the four ways a document comes to
+// exist or a device comes to be talked to — New, Open, Connect, Get — and the
+// recent files under them are the same list File > Recent Files shows, because
+// "the one I had yesterday" is the commonest answer of all.
+//
+// It is a page, not a dialog, on purpose. A dealer whose whole job is Online >
+// Send Secure Configuration never needs a document and must not have to
+// dismiss a "choose one" box to reach the menu: the menus stay in front of
+// them with only the document commands greyed out (updateDocumentState).
 void MainWindow::buildCentral()
 {
-    auto *central = new QWidget;
-    auto *layout = new QVBoxLayout(central);
-    layout->addStretch();
-    auto *title = new QLabel(QStringLiteral("<div align='center'>"
-                                            "<h1>CAN Triple</h1>"
-                                            "<h2>DEVICE MANAGER</h2></div>"));
-    title->setAlignment(Qt::AlignCenter);
-    layout->addWidget(title);
-    auto *hint = new QLabel(tr("Connections → Communications to define messages and channels.\n"
-                               "Online → Send Configuration (F5) to program the device.\n"
-                               "Online → Monitor Channels (F3) for live values."));
-    hint->setAlignment(Qt::AlignCenter);
-    hint->setStyleSheet(QStringLiteral("color: gray;"));
-    layout->addWidget(hint);
-    layout->addStretch();
-    setCentralWidget(central);
+    // Both pages carry the same banner.
+    const auto banner = [] {
+        auto *title = new QLabel(QStringLiteral("<div align='center'>"
+                                                "<h1>CAN Triple</h1>"
+                                                "<h2>DEVICE MANAGER</h2></div>"));
+        title->setAlignment(Qt::AlignCenter);
+        return title;
+    };
+
+    m_startPage = new QWidget;
+    {
+        auto *layout = new QVBoxLayout(m_startPage);
+        layout->addStretch();
+        layout->addWidget(banner());
+
+        // A column of command links, centred and no wider than reads well. Each
+        // drives the same slot as its menu item, so New, Open, Connect and Get
+        // each have exactly one implementation.
+        auto *column = new QWidget;
+        column->setFixedWidth(kStartColumnWidth);
+        auto *links = new QVBoxLayout(column);
+        links->setContentsMargins(0, 12, 0, 0);
+        const auto add = [this, links](const QString &text, const QString &detail,
+                                       void (MainWindow::*slot)()) {
+            auto *button = new QCommandLinkButton(text, detail);
+            connect(button, &QCommandLinkButton::clicked, this, slot);
+            links->addWidget(button);
+            return button;
+        };
+        add(tr("New Configuration"),
+            tr("Start an empty document and define its messages, channels and calculations."),
+            &MainWindow::onNew);
+        add(tr("Open Configuration…"), tr("Open a .ct3, .ct3s or .json file from disk."),
+            &MainWindow::onOpen);
+        // Follows Online > Connect's enabled state, so a link that is already
+        // open is not offered to be opened again.
+        QCommandLinkButton *connectButton =
+            add(tr("Connect to Device…"),
+                tr("Open the serial link — for Device Status, the CAN Viewer, firmware "
+                   "updates and licensing. No document is needed."),
+                &MainWindow::onConnect);
+        connectButton->setEnabled(m_connectAction->isEnabled());
+        connect(m_connectAction, &QAction::changed, connectButton, [this, connectButton]() {
+            connectButton->setEnabled(m_connectAction->isEnabled());
+        });
+        add(tr("Get Configuration from Device"),
+            tr("Connect, then read the configuration the unit is running into a new "
+               "document."),
+            &MainWindow::onGetConfiguration);
+
+        // Recent files, as links. Filled by updateRecentMenu(), which also keeps
+        // the File menu's copy of the list current; hidden as a block when there
+        // are none, so a first run does not show an empty heading.
+        m_recentHeading = new QLabel(tr("<b>Recent</b>"));
+        m_recentHeading->setContentsMargins(0, 16, 0, 0);
+        links->addWidget(m_recentHeading);
+        m_recentLinks = new QLabel;
+        m_recentLinks->setTextFormat(Qt::RichText);
+        m_recentLinks->setTextInteractionFlags(Qt::LinksAccessibleByMouse
+                                               | Qt::LinksAccessibleByKeyboard);
+        connect(m_recentLinks, &QLabel::linkActivated, this, &MainWindow::openRecentPath);
+        links->addWidget(m_recentLinks);
+
+        auto *row = new QHBoxLayout;
+        row->addStretch();
+        row->addWidget(column);
+        row->addStretch();
+        layout->addLayout(row);
+        layout->addStretch();
+    }
+
+    m_documentPage = new QWidget;
+    {
+        auto *layout = new QVBoxLayout(m_documentPage);
+        layout->addStretch();
+        layout->addWidget(banner());
+        auto *hint = new QLabel(tr("Connections → Communications to define messages and channels.\n"
+                                   "Online → Send Configuration (F5) to program the device.\n"
+                                   "Online → Monitor Channels (F3) for live values."));
+        hint->setAlignment(Qt::AlignCenter);
+        hint->setStyleSheet(QStringLiteral("color: gray;"));
+        layout->addWidget(hint);
+        layout->addStretch();
+    }
+
+    m_central = new QStackedWidget;
+    m_central->addWidget(m_startPage);
+    m_central->addWidget(m_documentPage);
+    setCentralWidget(m_central);
+    updateRecentMenu(); // the start page's copy of the list exists only now
+}
+
+void MainWindow::updateDocumentState()
+{
+    for (QAction *action : std::as_const(m_documentActions)) {
+        action->setEnabled(m_hasDocument);
+        action->setToolTip(m_hasDocument ? QString()
+                                         : tr("Open, create or read a configuration first."));
+    }
+    updateCapacityGates(); // the Calculations items answer to this too
+    if (m_central)
+        m_central->setCurrentWidget(m_hasDocument ? m_documentPage : m_startPage);
+    updateWindowTitle();
 }
 
 void MainWindow::updateWindowTitle()
@@ -487,6 +628,14 @@ void MainWindow::updateWindowTitle()
     const QString product = version.isEmpty()
                                 ? tr("CAN Triple Device Manager")
                                 : tr("CAN Triple Device Manager %1").arg(version);
+    // No document yet: the product name stands alone, and the status bar says
+    // so rather than calling nothing "Unsaved configuration".
+    if (!m_hasDocument) {
+        setWindowTitle(product);
+        if (m_documentLabel)
+            m_documentLabel->setText(tr("No configuration open"));
+        return;
+    }
     setWindowTitle(tr("%1 - %2%3%4")
                        .arg(product, m_config.displayName(),
                             m_config.isDirty() ? QStringLiteral(" *") : QString(),
@@ -643,7 +792,8 @@ void MainWindow::onNew()
     if (!maybeSave())
         return;
     m_config.clear();
-    updateWindowTitle();
+    m_hasDocument = true;
+    updateDocumentState();
 }
 
 void MainWindow::onOpen()
@@ -721,8 +871,9 @@ bool MainWindow::openPath(const QString &path)
         return false;
     }
 
+    m_hasDocument = true;
     addRecentFile(path);
-    updateWindowTitle();
+    updateDocumentState();
     updateProtectionState();
     return true;
 }
@@ -888,6 +1039,29 @@ void MainWindow::updateRecentMenu()
         action->setToolTip(path);
         connect(action, &QAction::triggered, this, &MainWindow::openRecent);
     }
+    // The start page's copy of the same list: the file name as the link, its
+    // folder in grey beside it so two files of one name can be told apart.
+    // Absent on the first call, which buildMenus() makes before the page exists.
+    if (m_recentLinks) {
+        // The folder is elided from the LEFT to what fits beside the name: the
+        // end of a path is the part that tells two folders apart, and a full
+        // path would run past the column and be clipped (it did).
+        const QFontMetrics metrics = m_recentLinks->fontMetrics();
+        QStringList rows;
+        for (const QString &path : recent) {
+            const QFileInfo info(path);
+            const QString name = info.fileName();
+            const QString folder =
+                metrics.elidedText(QDir::toNativeSeparators(info.absolutePath()), Qt::ElideLeft,
+                                   kStartColumnWidth - metrics.horizontalAdvance(name) - 24);
+            rows << QStringLiteral("<a href=\"%1\">%2</a>&nbsp; "
+                                   "<span style=\"color: gray;\">%3</span>")
+                        .arg(path.toHtmlEscaped(), name.toHtmlEscaped(), folder.toHtmlEscaped());
+        }
+        m_recentLinks->setText(rows.join(QStringLiteral("<br>")));
+        m_recentHeading->setVisible(!recent.isEmpty());
+        m_recentLinks->setVisible(!recent.isEmpty());
+    }
 }
 
 void MainWindow::openRecent()
@@ -895,7 +1069,11 @@ void MainWindow::openRecent()
     auto *action = qobject_cast<QAction *>(sender());
     if (!action)
         return;
-    const QString path = action->data().toString();
+    openRecentPath(action->data().toString());
+}
+
+void MainWindow::openRecentPath(const QString &path)
+{
     if (!maybeSave())
         return;
     openPath(path); // same password handling as Open…
@@ -2113,6 +2291,7 @@ void MainWindow::runGetTransfer(bool allowUnlockRetry)
     progress->setWindowModality(Qt::WindowModal);
     progress->setMinimumDuration(0);
     auto *transfer = ConfigTransfer::get(&m_link, this, capacity);
+    m_getInProgress = true;
     connect(transfer, &ConfigTransfer::progress, progress,
             [progress](int done, int total, const QString &stage) {
                 progress->setMaximum(total);
@@ -2136,9 +2315,12 @@ void MainWindow::runGetTransfer(bool allowUnlockRetry)
         if (deviceEmpty) {
             QMessageBox::information(
                 this, tr("Get Configuration"),
-                tr("This device has no configuration stored, so there is nothing to read "
-                   "back. The open document has been left as it is.\n\n"
-                   "A device reads as empty when it has never been sent a configuration, "
+                (m_hasDocument
+                     ? tr("This device has no configuration stored, so there is nothing to "
+                          "read back. The open document has been left as it is.\n\n")
+                     : tr("This device has no configuration stored, so there is nothing to "
+                          "read back.\n\n"))
+                    + tr("A device reads as empty when it has never been sent a configuration, "
                    "or after a firmware update that changed the stored-image format — in "
                    "that case the configuration is not recoverable from the device and "
                    "must be sent again."));
@@ -2146,7 +2328,8 @@ void MainWindow::runGetTransfer(bool allowUnlockRetry)
         }
         QStringList notes;
         mapFromDevice(tables, m_config, &notes, transfer->deviceBusSetup());
-        updateWindowTitle();
+        m_hasDocument = true; // a Get is the third way a document comes to exist
+        updateDocumentState();
         updateProtectionState();
         if (m_monitorDialog)
             m_monitorDialog->rebuild();
@@ -2188,10 +2371,20 @@ void MainWindow::runGetTransfer(bool allowUnlockRetry)
     });
     connect(transfer, &ConfigTransfer::finished, this,
             [this, progress, transfer, allowUnlockRetry](bool ok, const QString &error) {
+        m_getInProgress = false;
         progress->close();
         progress->deleteLater();
-        if (ok)
+        if (ok) {
+            // The Get that Monitor Channels asked for (onMonitorChannels): open
+            // the grid now that there is a document to map. A device that read
+            // as empty left no document, and then there is nothing to open.
+            if (m_monitorAfterGet) {
+                m_monitorAfterGet = false;
+                if (m_hasDocument)
+                    onMonitorChannels();
+            }
             return;
+        }
 
         // A Get can clear its own password gate and still be refused, and the
         // bare device error ("the device configuration is password protected")
@@ -2209,12 +2402,43 @@ void MainWindow::runGetTransfer(bool allowUnlockRetry)
             runGetTransfer(/*allowUnlockRetry=*/false);
             return;
         }
+        m_monitorAfterGet = false; // a failed Get opens no monitor
         QMessageBox::warning(this, tr("Get Configuration"), error);
     });
 }
 
 void MainWindow::onMonitorChannels()
 {
+    // Connect first, like every other Online command that needs a unit. This
+    // and the CAN Viewer used to open without asking and sit empty until a
+    // link happened along, which read as a window that did not work.
+    if (!ensureConnected())
+        return;
+    // The grid maps the OPEN document's channels onto the device's signals, so
+    // with no document there is nothing to list. Greying the item out was the
+    // first answer and it was wrong — it read as broken to someone who had just
+    // connected. Offer what they almost certainly want instead: the
+    // configuration the unit is running, read into a document, and the grid
+    // over it. The monitor opens when the Get finishes (its finished handler
+    // in runGetTransfer); a refused, cancelled or empty Get opens nothing.
+    if (!m_hasDocument) {
+        const auto answer = QMessageBox::question(
+            this, tr("Monitor Channels"),
+            tr("Monitor Channels lists the channels of the open configuration, and none is "
+               "open.\n\nRead the configuration from the connected device now, then monitor "
+               "it?"),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Yes);
+        if (answer != QMessageBox::Yes)
+            return;
+        m_monitorAfterGet = true;
+        onGetConfiguration();
+        // onGetConfiguration returns before the transfer has run (it is
+        // asynchronous) but after every reason it might refuse to start; only a
+        // transfer that actually started may open the monitor when it ends.
+        if (!m_getInProgress)
+            m_monitorAfterGet = false;
+        return;
+    }
     if (!m_monitorDialog) {
         m_monitorDialog = new MonitorChannelsDialog(&m_link, &m_config, this);
         m_monitorDialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -2226,6 +2450,8 @@ void MainWindow::onMonitorChannels()
 
 void MainWindow::onCanViewer()
 {
+    if (!ensureConnected()) // see onMonitorChannels
+        return;
     if (!m_viewerDialog) {
         m_viewerDialog = new CanViewerDialog(&m_link, this);
         m_viewerDialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -2599,27 +2825,28 @@ void MainWindow::onSetAccessPasswords()
     updateProtectionState();
 }
 
-// Deliberately does NOT insist on a connection, which is a change from the
-// screen this replaced. That one could WRITE an identity into a device, so a
-// device was the whole point of opening it. This one cannot: a unit's identity
-// is compiled into its firmware, the device panel is read-only, and all a
-// connected unit adds is the ability to copy its vendor and model into the
-// document instead of retyping them. Building the package a customer's car will
-// be given six months from now is desk work, and demanding hardware for it would
-// be demanding hardware to type two strings.
 // Online > Firmware License Manager. Needs a connection, unlike the Fleet
-// Identity dialog it replaces: that one edited the DOCUMENT and a device was
+// Identity dialog it replaced: that one edited the DOCUMENT and a device was
 // optional, this one edits the DEVICE and there is nothing to show without one.
+// (For a while it opened offline regardless — the note inside says why that
+// went back.)
 //
 // No updateWindowTitle() afterwards either, and its absence is the point. The
 // licence is not part of the document, so writing one does not dirty anything
 // and there is nothing to save.
 void MainWindow::onFirmwareLicense()
 {
-    // No ensureConnected() here, deliberately. Composing a licence is desk work
-    // and the dialog opens without hardware; Apply is the step that needs a
-    // unit, so the connect routine is handed to the dialog to call at that
-    // point rather than run as a toll on opening it.
+    // Connects before opening. The dialog was deliberately usable offline —
+    // "composing a licence is desk work; Apply is what needs a unit" — but in
+    // practice the licence being composed is for the unit on the bench, and a
+    // dialog that opened blank and said "Not connected" was a detour every
+    // time. Opening connected also means it loads the unit's current record
+    // straight away instead of showing empty fields.
+    //
+    // The connect routine is still handed in: Apply falls back to it if the
+    // link drops while the dialog is open, so what was typed is not lost.
+    if (!ensureConnected())
+        return;
     FirmwareLicenseDialog dialog(&m_link, [this]() { return ensureConnected(); }, this);
     dialog.exec();
 }

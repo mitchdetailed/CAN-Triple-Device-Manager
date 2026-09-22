@@ -571,6 +571,151 @@ void testTheInjectButtonFollowsTheRate()
     CHECK(count(QStringLiteral("Start")) == 0);
 }
 
+// ---------------------------------------------------------------------------
+// The ID filter.
+
+QLineEdit *idFilter(QWidget *w)
+{
+    auto *e = w->findChild<QLineEdit *>(QStringLiteral("idFilter"));
+    Q_ASSERT(e);
+    return e;
+}
+
+// The syntax, on the parser alone: hex with or without 0x, ranges, "!" to
+// exclude, and the ways a token can be wrong. A bad token is named and does not
+// take the good ones down with it.
+void testIdFilterSyntax()
+{
+    using Dialog = ct::CanViewerDialog;
+    Dialog::IdFilter f;
+    QString error;
+
+    CHECK(Dialog::parseIdFilter(QString(), &f, &error));
+    CHECK(f.isEmpty());
+    CHECK(f.matches(0x123));
+
+    CHECK(Dialog::parseIdFilter(QStringLiteral("7E8"), &f, &error));
+    CHECK(f.include.size() == 1 && f.exclude.isEmpty());
+    CHECK(f.matches(0x7E8));
+    CHECK(!f.matches(0x7E9));
+
+    CHECK(Dialog::parseIdFilter(QStringLiteral("0x7e8, 100-0x1FF; 300"), &f, &error));
+    CHECK(f.include.size() == 3);
+    CHECK(f.matches(0x7E8) && f.matches(0x100) && f.matches(0x1FF) && f.matches(0x300));
+    CHECK(!f.matches(0x200) && !f.matches(0x0FF));
+
+    CHECK(Dialog::parseIdFilter(QStringLiteral("!3C0"), &f, &error));
+    CHECK(f.include.isEmpty() && f.exclude.size() == 1);
+    CHECK(f.matches(0x100) && !f.matches(0x3C0));
+
+    // Exclude wins where both cover an ID: the block, minus the one.
+    CHECK(Dialog::parseIdFilter(QStringLiteral("100-1FF !150"), &f, &error));
+    CHECK(f.matches(0x100) && f.matches(0x1FF) && !f.matches(0x150) && !f.matches(0x200));
+
+    // A bad token is refused by name; the good ones still parse.
+    CHECK(!Dialog::parseIdFilter(QStringLiteral("200, ZZ"), &f, &error));
+    CHECK(error.contains(QStringLiteral("ZZ")));
+    CHECK(f.include.size() == 1 && f.matches(0x200) && !f.matches(0x100));
+
+    // Past the 29-bit ceiling, a reversed range, a dangling dash, a bare 0x.
+    CHECK(!Dialog::parseIdFilter(QStringLiteral("20000000"), &f, &error));
+    CHECK(!Dialog::parseIdFilter(QStringLiteral("1FF-100"), &f, &error));
+    CHECK(!Dialog::parseIdFilter(QStringLiteral("100-"), &f, &error));
+    CHECK(!Dialog::parseIdFilter(QStringLiteral("0x"), &f, &error));
+    CHECK(f.isEmpty());
+}
+
+// Typing an ID hides every other row and loses nothing: frames that arrived
+// while the filter was on come back when it is cleared, because the list is
+// rebuilt from the capture buffer like the other filters.
+void testIdFilterHidesAndRestores()
+{
+    ct::DeviceLink link;
+    ct::CanViewerDialog d(&link);
+    QTableWidget *t = table(&d);
+
+    emit link.monitorFrame(frame(1, 0, 0x100, {0x11}));
+    emit link.monitorFrame(frame(1, 0, 0x200, {0x22}));
+    emit link.monitorFrame(frame(2, 0, 0x300, {0x33}));
+    CHECK(t->rowCount() == 3);
+
+    idFilter(&d)->setText(QStringLiteral("200"));
+    CHECK(t->rowCount() == 1);
+    CHECK(cell(t, 0, ColId) == QStringLiteral("0x200"));
+
+    emit link.monitorFrame(frame(1, 0, 0x100, {0x12})); // hidden, still captured
+    emit link.monitorFrame(frame(1, 0, 0x200, {0x23}));
+    CHECK(t->rowCount() == 2);
+
+    idFilter(&d)->clear();
+    CHECK(t->rowCount() == 5);
+    CHECK(view(t).contains(QStringLiteral("0x100 [12]")));
+}
+
+// The filter composes with the bus boxes and Tx Msgs — a frame must pass all
+// three — and a bad token is named beside the field while the rest of the entry
+// keeps working.
+void testIdFilterComposesAndNamesBadTokens()
+{
+    ct::DeviceLink link;
+    ct::CanViewerDialog d(&link);
+    QTableWidget *t = table(&d);
+    auto *note = d.findChild<QLabel *>(QStringLiteral("idFilterNote"));
+    CHECK(note != nullptr);
+    if (!note)
+        return;
+
+    emit link.monitorFrame(frame(1, 0, 0x100, {0x11}));
+    emit link.monitorFrame(frame(2, 0, 0x100, {0x22}));
+    emit link.monitorFrame(frame(1, 1, 0x100, {0x33}));
+    emit link.monitorFrame(frame(1, 0, 0x200, {0x44}));
+
+    idFilter(&d)->setText(QStringLiteral("100"));
+    CHECK(t->rowCount() == 3);
+    box(&d, QStringLiteral("busCheck2"))->setChecked(false);
+    CHECK(t->rowCount() == 2);
+    box(&d, QStringLiteral("txCheck"))->setChecked(false);
+    CHECK(t->rowCount() == 1);
+    CHECK(view(t) == QStringLiteral("CAN 1 Rx 0x100 [11]"));
+
+    idFilter(&d)->setText(QStringLiteral("100, ZZ"));
+    CHECK(note->text().contains(QStringLiteral("ZZ")));
+    CHECK(t->rowCount() == 1); // the good token still applies
+    idFilter(&d)->setText(QStringLiteral("100"));
+    CHECK(note->text().isEmpty());
+}
+
+// Overwrite Mode: a filtered-out identifier keeps being tracked — its latest
+// frame and its count — so clearing the filter shows the value it has NOW, and a
+// new identifier the filter hides adds no row.
+void testIdFilterInOverwriteMode()
+{
+    ct::DeviceLink link;
+    ct::CanViewerDialog d(&link);
+    QTableWidget *t = table(&d);
+    box(&d, QStringLiteral("overwriteCheck"))->setChecked(true);
+
+    emit link.monitorFrame(frame(1, 0, 0x100, {0x01}));
+    emit link.monitorFrame(frame(1, 0, 0x200, {0x02}));
+    CHECK(t->rowCount() == 2);
+
+    idFilter(&d)->setText(QStringLiteral("!100"));
+    CHECK(t->rowCount() == 1);
+    CHECK(cell(t, 0, ColId) == QStringLiteral("0x200"));
+
+    emit link.monitorFrame(frame(1, 0, 0x100, {0x0A})); // hidden, still tracked
+    emit link.monitorFrame(frame(1, 0, 0x100, {0x0B}));
+    emit link.monitorFrame(frame(1, 0, 0x300, {0x03})); // new and shown
+    CHECK(t->rowCount() == 2);
+    CHECK(view(t) == QStringLiteral("CAN 1 Rx 0x200 [02] | CAN 1 Rx 0x300 [03]"));
+
+    idFilter(&d)->clear();
+    CHECK(t->rowCount() == 3);
+    CHECK(cell(t, 0, ColId) == QStringLiteral("0x100"));
+    CHECK(cell(t, 0, ColData) == QStringLiteral("0B"));
+    CHECK(cell(t, 0, ColFrameCount) == QStringLiteral("3"));
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -590,6 +735,11 @@ int main(int argc, char **argv)
     testClearResetsOverwriteRows();
     testAutoScrollIsDisabledInOverwriteMode();
     testDroppedFramesAreReportedInBothModes();
+
+    testIdFilterSyntax();
+    testIdFilterHidesAndRestores();
+    testIdFilterComposesAndNamesBadTokens();
+    testIdFilterInOverwriteMode();
 
     testInjectPanelHasEightSlotsWithARateDropdown();
     testTheRateDropdownSitsRightOfData();

@@ -13,6 +13,7 @@
 #include "ui/conditions_dialog.h"
 #include "ui/edit_channel_dialog.h"
 #include "ui/main_window.h"
+#include "ui/monitor_channel_select_dialog.h"
 #include "ui/wheel_guard.h"
 #include "ui/section_editor_dialog.h"
 #include "ui/select_channel_dialog.h"
@@ -137,6 +138,12 @@ void saveScreenshots(const QString &dir)
                                config.catalog().findByName(QStringLiteral("Engine Temperature")),
                                false);
     grab(&edit, QStringLiteral("edit_custom_channel"));
+
+    // The Monitor Channels picker, with the sample catalogue split across its
+    // two lists.
+    ct::MonitorChannelSelectDialog select(QList<ct::Channel>{rpmCh, tempCh, orphanCh},
+                                          QStringList{QStringLiteral("Engine Temperature")});
+    grab(&select, QStringLiteral("select_monitor_channels"));
 }
 
 } // namespace

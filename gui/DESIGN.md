@@ -211,13 +211,31 @@ mismatch between the two numbers is the point rather than an oversight.
 ## 2. UI inventory (mirrors Dash Manager; field lists verified on-screen)
 
 - **Main window** — menu bar `File · Connections · Calculations · Online ·
-  Tools · Help`, six menus and no toolbar; a central placeholder of two labels
-  (a "CAN Triple / DEVICE MANAGER" title over a grey hint naming Communications,
-  Send Configuration (F5) and Monitor Channels (F3)); status bar with the
-  document name, a protected-messages lock indicator (hidden unless the document
-  carries a comms password) and the link state.
-  Editing menus disabled until a configuration document is open (offline-first
-  document model; explicit Send/Get to move it to/from the device).
+  Tools · Help`, six menus and no toolbar; a central area with two faces on a
+  stack: a **start page**, shown from launch until there is a document — the
+  "CAN Triple / DEVICE MANAGER" title over four command links (New
+  Configuration, Open Configuration…, Connect to Device…, Get Configuration
+  from Device) and the recent-files list — and, once there is one, the same
+  title over a grey hint naming Communications, Send Configuration (F5) and
+  Monitor Channels (F3); status bar with the document name ("No configuration
+  open" until then), a protected-messages lock indicator (hidden unless the
+  document carries a comms password) and the link state.
+  Nothing is open at launch — the program no longer starts on an untitled,
+  editable document. Every command that reads or edits the document (Save, Save
+  As, Check Channels, Config Summary, Target Firmware, Communications, all of
+  Calculations, Send Configuration, Channel Editor, Lua Console) is disabled
+  until the first New, Open or Get succeeds
+  (`MainWindow::updateDocumentState`), with a menu tooltip saying so. Monitor
+  Channels stays live although it lists the document's channels — greyed, it
+  read as broken to someone who had just connected — and with no document it
+  offers to Get the unit's configuration, opening once that Get finishes
+  (`m_monitorAfterGet`, resolved in runGetTransfer's finished handler). The
+  device-only commands (Connect, Send Secure Configuration, CAN Viewer, Device
+  Status, Get Device Info, Update Firmware, passwords, licensing) and the Secure
+  Configuration Builder, which reads its source from a file, stay live, so a
+  dealer installing packages never needs a document — which is also why the
+  start page is a page and not a dialog (offline-first document model; explicit
+  Send/Get to move it to/from the device).
 ## Set Access Passwords
 
 **Online → Set Access Passwords…** (`src/model/access_keys.*`,
@@ -1487,7 +1505,19 @@ to be sent, and the help says so.
   showing any of it — see that section; it sits immediately under Send because
   the two are the same verb with different subjects, and adjacency is what makes
   the distinction findable), Get Configuration, Verify
-  Configuration, Monitor Channels **F3** (live grid from value stream; on
+  Configuration, Monitor Channels **F3** (live grid from value stream, with a
+  Select Channels… picker — `MonitorChannelSelectDialog`, Available/Selected
+  lists with >> / <<, Ctrl/Shift extended selection, a Find box, the Selected
+  list drag-reordered — whose result is the rows shown AND their order: the
+  grid is rebuilt with the chosen rows first in that order (`rebuildRows`) and
+  the rest hidden, pinned overrides carried across the rebuild by signal index
+  without a word to the device (a document change still releases them, as
+  before); a pinned row is exempt from hiding; the selection is remembered in
+  QSettings, and Save List… / Load List… in the picker keep it as a `.ct3l`
+  channel list — `src/model/channel_list.*`, plain JSON of names, in
+  `{app}\Channel Lists` beside the other two libraries with the same installer
+  grant — a loaded name the document does not map reported as not found and
+  left out; on
   firmware 1.0.12 an Override tick and a per-type editor per channel pin the
   signal on the device — `CMD_SET_OVERRIDE`/`OVERRIDE_LEASE`/`CLEAR_OVERRIDES`,
   `device_session::setChannelOverride` et al.; the engine puts the pinned
@@ -1495,18 +1525,26 @@ to be sent, and the help says so.
   skips them, device channels are refused, and the device releases everything
   after `OVERRIDE_LEASE_MS` of silence, the dialog refreshing the lease each
   second and clearing on close),
-  CAN Viewer (raw frame monitor + inject-frame form; buffers up to 10M frames
+  CAN Viewer (raw frame monitor + inject-frame form; display filters per bus,
+  for Tx frames and by arbitration ID — hex IDs, ranges and `!` exclusions
+  typed into the ID filter field, `CanViewerDialog::parseIdFilter`, composed
+  in `frameVisible()` — which hide rows and never touch capture; buffers up to 10M frames
   and exports them via "Save to File…" as a Vector ASCII `.asc` log — classic
   frames as standard lines, CAN FD frames as Vector `CANFD` lines carrying
   real BRS and ESI — or, chosen by file type, a SocketCAN candump `.log` or a
   PEAK trace 3.0 `.trc`; `src/protocol/can_log_export.*` holds the two newer
   writers and the format choice, beside `asc_log.*`), Load Device Config from Flash, Clear Device Config, Device
   Status, **Get Device Info…**, **Set Access Passwords…** and **Firmware
-  License Manager…**. The first two need a connection: the OTP record is read
-  out of the unit in front of them, and the access keys live in the device rather
-  than in the document. The Firmware License Manager opens without one and says
-  so — composing a licence is desk work, and connecting is Apply's first step
-  rather than a toll on opening the dialog.
+  License Manager…**. All three of those connect before they open: the OTP
+  record is read out of the unit in front of them, the access keys live in the
+  device rather than in the document, and the licence being composed is for the
+  unit on the bench. (The License Manager used to open offline — "composing a
+  licence is desk work" — and its dialog still copes with a link that drops,
+  Apply reconnecting as its first step; but a dialog that opened blank and said
+  "Not connected" was a detour every time, so the Manager now connects first and
+  the dialog opens showing the unit's current record.) Monitor Channels and the
+  CAN Viewer connect before opening too, for the same reason: a window that
+  opened empty and waited for a link read as a window that did not work.
   Send and Get each prove the matching access password first via
   `MainWindow::ensureDeviceAccess()`, which for Edit Protected Comms tries the
   key the session already holds — typed earlier, or carried inside a `.ct3s` —

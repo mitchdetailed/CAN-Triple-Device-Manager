@@ -15,9 +15,10 @@
 //
 //       Configurations              .ct3 / .ct3s
 //       Communications Templates    .ct3t
+//       Channel Lists               .ct3l
 //       Firmware                    the paired .ctf, staged by the installer
 //
-//     The first two are the product's own file structure, sited with the
+//     The first three are the product's own file structure, sited with the
 //     program so a machine has ONE library that every account on it shares,
 //     wherever the program was installed. That is a deliberate choice with a
 //     real cost, and the cost is spelled out below rather than discovered
@@ -54,13 +55,14 @@
 // fallback only ever applied to 32-bit binaries — so a refused write does not
 // quietly land somewhere else that works. It simply fails.
 //
-// So the INSTALLER grants it, on these two subdirectories and nothing else:
+// So the INSTALLER grants it, on these three subdirectories and nothing else:
 //
 //     [Dirs] Name: "{app}\Configurations";           Permissions: users-modify
 //     [Dirs] Name: "{app}\Communications Templates"; Permissions: users-modify
+//     [Dirs] Name: "{app}\Channel Lists";            Permissions: users-modify
 //
 // That is what makes the layout above work at all, and it is the reason those
-// two entries must not be dropped from the .iss. Three consequences follow, and
+// three entries must not be dropped from the .iss. Three consequences follow, and
 // a caller should know them:
 //
 //   1. A build that no installer ever ran — a development build, a copy of
@@ -96,6 +98,10 @@ QString configurationsDirectory();
 
 // Communications templates (.ct3t) — Save… / Load… in Communications Setup.
 QString commsTemplatesDirectory();
+
+// Channel lists (.ct3l) — Save List… / Load List… in the Monitor Channels
+// picker. Plain JSON of channel names; see model/channel_list.h.
+QString channelListsDirectory();
 
 // The firmware image the installer staged — {app}\Firmware, holding
 // can-triple-<version>.ctf. Where Update Firmware's Select Firmware Image

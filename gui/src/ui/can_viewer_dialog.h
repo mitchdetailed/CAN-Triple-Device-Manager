@@ -37,6 +37,33 @@ class CanViewerDialog : public QDialog
 public:
     explicit CanViewerDialog(DeviceLink *link, QWidget *parent = nullptr);
 
+    // THE ID FILTER: which arbitration IDs the list shows, typed into the "ID
+    // filter" field. A display filter like the bus boxes — capture and Save to
+    // File are untouched — and the third input to frameVisible().
+    //
+    // Syntax: tokens separated by spaces, commas or semicolons. A token is a
+    // hex ID ("7E8" or "0x7E8"), a range ("100-1FF", either end with or without
+    // 0x), or either of those with a leading "!" to EXCLUDE it. An ID is shown
+    // when it falls inside some include token (or there are none) and inside no
+    // exclude token. Hex only, like every ID this viewer prints and the inject
+    // fields take. Standard and extended IDs match by their number.
+    struct IdFilter
+    {
+        struct Range
+        {
+            quint32 lo = 0;
+            quint32 hi = 0;
+        };
+        QList<Range> include; // an ID must fall in one of these, when any
+        QList<Range> exclude; // ...and in none of these
+        bool isEmpty() const { return include.isEmpty() && exclude.isEmpty(); }
+        bool matches(quint32 canId) const;
+    };
+    // Parses `text` into *out. False when some token does not parse, with the
+    // first offender named in *error; the tokens that did parse are still in
+    // *out, so a half-typed entry filters by what is complete so far.
+    static bool parseIdFilter(const QString &text, IdFilter *out, QString *error);
+
 private:
     void onMonitorFrame(const ct::MonitorStreamPayload &frame);
     // The slot's button, or Enter in one of its fields. Starts a run, stops a
@@ -66,12 +93,13 @@ private:
     // device drops from the one monitor stream, so the loss is not scoped to
     // the bus of the frame that happened to carry the flag.
     void appendGapRow(const ct::MonitorStreamPayload &frame);
-    // DISPLAY filters: per-bus, plus "Tx Msgs" for the device's own frames.
-    // Capture and file export are never filtered, so a hidden frame is still
-    // recorded and re-showing its category restores the history.
+    // DISPLAY filters: per-bus, "Tx Msgs" for the device's own frames, and the
+    // ID filter. Capture and file export are never filtered, so a hidden frame
+    // is still recorded and re-showing its category restores the history.
     bool busVisible(quint8 busIdx) const;
     bool frameVisible(const ct::MonitorStreamPayload &frame) const;
     void rebuildTable(); // replay the buffer through the current filters
+    void onIdFilterEdited(const QString &text);
     void updateCountLabel();
 
     // --- Overwrite Mode ------------------------------------------------------
@@ -138,6 +166,9 @@ private:
     QCheckBox *m_txCheck;        // show the device's own transmitted frames
     QCheckBox *m_overwriteCheck;
     QLabel *m_countLabel;
+    QLineEdit *m_idFilterEdit;
+    QLabel *m_idFilterNote; // names a token that did not parse; blank otherwise
+    IdFilter m_idFilter;
 
     // Inject panel — eight slots, all alike.
     static constexpr int kInjectSlots = 8;

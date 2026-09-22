@@ -52,6 +52,18 @@ protected:
 private:
     void onSignalValues(const QList<ct::SignalValueEntry> &values);
     void onStaleTick(); // grays out rows not updated within ~2 s
+    // The channel selection: Select Channels… opens the picker; the grid is
+    // then REBUILT with the chosen rows first, in the chosen order
+    // (rebuildRows), and applyChannelSelection() hides the rest. The latter
+    // also runs whenever an override is ticked or released, because a pinned
+    // row is exempt from hiding.
+    void onSelectChannels();
+    void applyChannelSelection();
+    // The body of rebuild(). keepOverrides carries the pinned channels across
+    // by signal index — right only while the MAPPING is unchanged, i.e. the
+    // rows are being rebuilt for a new selection and not for a new document.
+    void rebuildRows(bool keepOverrides);
+    void setEditorValue(int row, double value);
 
     // Overrides. The probe sends one lease command: older firmware answers
     // "unknown command", and the columns stay hidden.
@@ -68,6 +80,11 @@ private:
     Configuration *m_config;
     QTableWidget *m_table;
     QLabel *m_infoLabel;
+    QPushButton *m_selectButton = nullptr;
+    QPushButton *m_showAllButton = nullptr;
+    QLabel *m_selectionLabel = nullptr;  // "Showing 13 of 240 channels"
+    QStringList m_selection;             // chosen names in display order; empty = all
+    QList<Channel> m_channels;           // every channel the grid maps, for the picker
     QTimer *m_staleTimer;
     QPushButton *m_clearOverridesButton = nullptr;
     QTimer *m_leaseTimer = nullptr;

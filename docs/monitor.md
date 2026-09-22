@@ -6,7 +6,13 @@ Two windows show what a connected device is doing: **Monitor Channels** (F3) sho
 
 Choose **Online → Monitor Channels…** or press **F3**. The window lists every mapped channel in a live grid with columns **Channel**, **Value** and **Units**, sorted by channel name. Values are fed by the device's always-on value stream and are formatted with the channel's decimal places; a value that has never arrived shows as "—". An enumerated channel — **Device Last Reset Reason** is the one (see [Channels](channels.md)) — shows its label with the number, "Power On (1)"; a value its enumeration does not name shows as the bare number. The stream refreshes every channel within 70 ms even at the device's channel limit — see [Order &amp; Timing of Operations](engine.md) for the exact rates.
 
+> **Note:** Monitor Channels needs a configuration to name the channels. If none is open — you have just started the program and connected — it offers to read the configuration from the device first, and opens over it once the read has finished. It asks to connect first if no link is open.
+
 > **Note:** A value that has not updated for about 2 seconds turns gray — the channel's message has stopped arriving, or the device is not sending the stream. It returns to normal color with the next update.
+
+**Select Channels…** above the grid narrows it to the channels you are watching, and puts them in the order you want. The picker lists every mapped channel on the left and the chosen ones on the right: highlight channels on the left — **Ctrl**-click to pick several, **Shift**-click for a block — and press **&gt;&gt;** (or double-click) to add them; **&lt;&lt;**, a double-click or **Delete** takes them back. The **Find** box above the left list narrows it by name while you look. Drag rows up and down the right-hand list to set their order; the grid follows it, top to bottom. An empty right-hand list means every channel. **Show All** beside the button clears the selection, and the label says how many channels are showing. The selection is remembered the next time the window opens. It hides and reorders rows only: every channel is still mapped and still updated, so Show All shows current values. A channel you have pinned with [Override](#override) always stays in the list, so a selection cannot hide a value that is driving the device.
+
+**Save List…** in the picker writes the selected channels, in their order, as a **channel list** file (`*.ct3l`) in the program's `Channel Lists` folder (see [Where the files are kept](communications.md#folders)), so a set of channels outlives the configuration it was picked from — a "cooling" list, a "boost" list. **Load List…** replaces the selection with a saved list. A channel the list names that this configuration does not have is reported by name as **not found** and left out; the rest load in the list's order. The file is plain, readable JSON of channel names and nothing else, so a list can be fixed in Notepad.
 
 The label above the grid states what is being shown: the channel mapping of the *current document*, not necessarily what the device is running. If you have edited the configuration since the last Send, the rows and the device's stream can disagree — [send the configuration](online.md) to bring the device in line with the document. The grid re-maps itself automatically when the document changes.
 
@@ -37,6 +43,9 @@ Overwrite Mode, where the rows hold still.</td></tr>
 three are ticked by default — see below.</td></tr>
 <tr><td>Show: Tx Msgs</td><td>Whether the frames the device itself transmitted
 appear in the list. Ticked by default — see below.</td></tr>
+<tr><td>ID filter</td><td>Which arbitration IDs appear in the list — hex IDs,
+ranges and <code>!</code> exclusions; blank shows every ID. See
+<a href="#filtering">Filtering the list</a>.</td></tr>
 <tr><td>Overwrite Mode</td><td>One row per message carrying its most recent
 data, instead of a scrolling trace — see below.</td></tr>
 <tr><td>Save to File…</td><td>Writes every buffered frame to a file, in the
@@ -64,7 +73,9 @@ The **Show:** checkboxes — **CAN 1**, **CAN 2**, **CAN 3** — pick which buse
 
 **Tx Msgs** is the same idea applied to direction rather than to a bus: it picks whether the frames the *device* sent — the **Tx** rows — appear. That covers every transmit message the engine sends on its own schedule, every frame a relay forwards, and the echo of anything you send from **Inject Frame**. It is ticked by default. Untick it to leave only what the buses carried in, which is the quickest way to tell an incoming message apart from one of the device's own on a bus where both share an ID.
 
-The two filters compose: a Tx frame on a hidden bus stays hidden when **Tx Msgs** is re-ticked, because its bus is still unticked.
+The **ID filter** field, beside Overwrite Mode, picks messages by arbitration ID. Type the IDs to keep, in hex with or without `0x`, separated by spaces or commas: `7E8, 100`. A range is written with a dash, `100-1FF`. A leading `!` hides an ID or range instead of keeping it, so `!3C0` on its own shows everything but the one message that floods the bus, and `100-1FF !150` keeps a block minus one. An entry that is not a hex ID is named in red beside the field, and the rest of the entry still applies while you fix it. Standard and extended IDs match by their number.
+
+The three filters compose — a frame has to pass all of them: a Tx frame on a hidden bus stays hidden when **Tx Msgs** is re-ticked, because its bus is still unticked, and an ID the filter keeps shows only on the buses that are ticked.
 
 All of these filter the **display only**. Every frame is captured regardless, so:
 - **Save to File…** always writes the whole trace, including buses and transmitted frames that were hidden while it was recording.
@@ -89,7 +100,7 @@ A row is one *identifier*, which means all four of:
 - whether that ID is **standard or extended** — 0x100 and 0x00000100 are different frames on the wire and get separate rows;
 - the **direction** — a message the device transmits with an ID it also receives is not the same traffic, so Rx and Tx keep separate rows. The **Dir** column says which is which.
 
-Everything else keeps working as it does in the scrolling view. The bus and **Tx Msgs** filters still apply; **Pause** still stops capture; and capture itself is untouched, so **Save to File…** writes the complete trace frame by frame no matter which mode you were watching in. Switching the mode off gives the full history back — it was recorded the whole time.
+Everything else keeps working as it does in the scrolling view. The bus, **Tx Msgs** and **ID** filters still apply; **Pause** still stops capture; and capture itself is untouched, so **Save to File…** writes the complete trace frame by frame no matter which mode you were watching in. Switching the mode off gives the full history back — it was recorded the whole time.
 
 <a id="export"></a>
 

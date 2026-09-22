@@ -78,6 +78,24 @@ QString formatCanId(quint32 canId, bool extended)
            + QStringLiteral("%1").arg(canId, extended ? 8 : 3, 16, QLatin1Char('0')).toUpper();
 }
 
+// One hex ID, with or without 0x. False for anything else, including an ID past
+// the 29-bit ceiling — a filter for 0x20000000 can never match a frame, and
+// whoever typed it has almost certainly mis-keyed.
+bool parseHexId(const QString &token, quint32 *out)
+{
+    QString t = token;
+    if (t.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+        t = t.mid(2);
+    if (t.isEmpty() || t.size() > 8)
+        return false;
+    bool ok = false;
+    const quint32 value = t.toUInt(&ok, 16);
+    if (!ok || value > 0x1FFFFFFFu)
+        return false;
+    *out = value;
+    return true;
+}
+
 QString formatData(const ct::MonitorStreamPayload &frame)
 {
     const int len = qMin<int>(frame.data_len, 64);
@@ -167,6 +185,34 @@ CanViewerDialog::CanViewerDialog(DeviceLink *link, QWidget *parent)
                                     "whole trace, frame by frame."));
     connect(m_overwriteCheck, &QCheckBox::toggled, this, &CanViewerDialog::onOverwriteToggled);
     modeRow->addWidget(m_overwriteCheck);
+
+    // The ID filter, on this row because the top one is full and because it
+    // pairs naturally with Overwrite Mode: "one row per message" and "only these
+    // messages" are the two ways of making a busy bus readable. It hides rows
+    // and nothing else, exactly like the bus boxes — parseIdFilter has the
+    // syntax, frameVisible is where it takes effect.
+    modeRow->addSpacing(12);
+    modeRow->addWidget(new QLabel(tr("ID filter:"), this));
+    m_idFilterEdit = new QLineEdit(this);
+    m_idFilterEdit->setObjectName(QStringLiteral("idFilter"));
+    m_idFilterEdit->setPlaceholderText(tr("e.g. 7E8, 100-1FF, !3C0 — blank shows every ID"));
+    m_idFilterEdit->setClearButtonEnabled(true);
+    m_idFilterEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    m_idFilterEdit->setMinimumWidth(300);
+    m_idFilterEdit->setToolTip(tr("Show only these arbitration IDs. Separate entries with spaces "
+                                  "or commas; write IDs in hex, with or without 0x; a range as "
+                                  "100-1FF; a leading ! hides an ID or range instead of keeping "
+                                  "it. Like the bus boxes this affects this list alone — every "
+                                  "frame is still captured and still saved."));
+    connect(m_idFilterEdit, &QLineEdit::textChanged, this, &CanViewerDialog::onIdFilterEdited);
+    modeRow->addWidget(m_idFilterEdit);
+    // A token that did not parse is named here, beside the field, rather than
+    // in a box: the entry is live, and a message box per keystroke of a range
+    // would be intolerable.
+    m_idFilterNote = new QLabel(this);
+    m_idFilterNote->setObjectName(QStringLiteral("idFilterNote"));
+    m_idFilterNote->setStyleSheet(QStringLiteral("color: #d03030;"));
+    modeRow->addWidget(m_idFilterNote);
     modeRow->addStretch(1);
     mainLayout->addLayout(modeRow);
 
@@ -300,7 +346,71 @@ bool CanViewerDialog::frameVisible(const ct::MonitorStreamPayload &frame) const
 {
     if (frame.direction && !m_txCheck->isChecked())
         return false;
+    if (!m_idFilter.matches(frame.can_id))
+        return false;
     return busVisible(frame.bus_idx);
+}
+
+bool CanViewerDialog::IdFilter::matches(quint32 canId) const
+{
+    // Exclusion first, so "100-1FF !150" reads the way it is written: the
+    // block, minus the one.
+    for (const Range &r : exclude)
+        if (canId >= r.lo && canId <= r.hi)
+            return false;
+    if (include.isEmpty())
+        return true;
+    for (const Range &r : include)
+        if (canId >= r.lo && canId <= r.hi)
+            return true;
+    return false;
+}
+
+bool CanViewerDialog::parseIdFilter(const QString &text, IdFilter *out, QString *error)
+{
+    *out = IdFilter();
+    if (error)
+        error->clear();
+    bool allOk = true;
+    // Commas and semicolons are separators like spaces, so a list pasted from
+    // a DBC or a spreadsheet goes in as it is.
+    QString flat = text;
+    flat.replace(QLatin1Char(','), QLatin1Char(' ')).replace(QLatin1Char(';'), QLatin1Char(' '));
+    const QStringList tokens = flat.simplified().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    for (const QString &raw : tokens) {
+        QString token = raw;
+        const bool negate = token.startsWith(QLatin1Char('!'));
+        if (negate)
+            token = token.mid(1);
+        IdFilter::Range range;
+        bool ok = false;
+        const int dash = token.indexOf(QLatin1Char('-'));
+        if (dash >= 0) {
+            ok = parseHexId(token.left(dash), &range.lo)
+                 && parseHexId(token.mid(dash + 1), &range.hi) && range.lo <= range.hi;
+        } else if (parseHexId(token, &range.lo)) {
+            range.hi = range.lo;
+            ok = true;
+        }
+        if (!ok) {
+            // The first bad token is the one named; the rest still parse, so
+            // an entry being typed keeps filtering by what is complete.
+            if (allOk && error)
+                *error = tr("\"%1\" is not a hex ID or range").arg(raw);
+            allOk = false;
+            continue;
+        }
+        (negate ? out->exclude : out->include).append(range);
+    }
+    return allOk;
+}
+
+void CanViewerDialog::onIdFilterEdited(const QString &text)
+{
+    QString error;
+    parseIdFilter(text, &m_idFilter, &error);
+    m_idFilterNote->setText(error);
+    rebuildTable();
 }
 
 CanViewerDialog::OverwriteKey CanViewerDialog::keyFor(const ct::MonitorStreamPayload &frame)

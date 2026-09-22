@@ -1,6 +1,6 @@
 # Online: Send, Get &amp; Flash
 
-The Online menu moves configurations between the editor and a connected CAN Triple. The document model is offline-first: nothing you edit reaches the device until you send it, and nothing on the device changes the document until you get it. If no serial connection is open, commands that talk to the device first open Connection Settings so you can connect. Monitor Channels and the CAN Viewer open without prompting — they simply show nothing until a device is connected — and the Firmware License Manager is deliberately usable offline, because composing a licence is desk work.
+The Online menu moves configurations between the editor and a connected CAN Triple. The document model is offline-first: nothing you edit reaches the device until you send it, and nothing on the device changes the document until you get it. If no serial connection is open, commands that talk to the device first open Connection Settings so you can connect. That includes Monitor Channels, the CAN Viewer and the Firmware License Manager, which open only once a device is connected; the License Manager then opens showing the unit's current licence.
 
 <table>
 <tr><th>Command</th><th>Shortcut</th><th>What it does</th></tr>

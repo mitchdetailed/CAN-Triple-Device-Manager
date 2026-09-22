@@ -87,9 +87,10 @@ FirmwareLicenseDialog::FirmwareLicenseDialog(DeviceLink *link,
         connect(edit, &QLineEdit::textChanged, this, &FirmwareLicenseDialog::refreshEnabled);
     connect(m_clearUpdater, &QCheckBox::toggled, this, &FirmwareLicenseDialog::refreshEnabled);
 
-    // Only if a unit already happens to be on the cable. Opening this dialog
-    // must not drag up a connection prompt — see the header: composing a licence
-    // is desk work, and Apply is the step that needs hardware.
+    // The Manager connects before opening this dialog, so the reload is the
+    // normal path now; the else branch remains for a link that is closed
+    // anyway — the dialog never raises a connection prompt of its own (see
+    // the header).
     if (m_link && m_link->isOpen())
         reload();
     else
@@ -209,8 +210,9 @@ bool FirmwareLicenseDialog::ensureProved()
 
 void FirmwareLicenseDialog::apply()
 {
-    // Step one is hardware. The dialog is usable offline so a licence can be
-    // composed at a desk; Apply is where a unit has to be present.
+    // Step one is hardware. The Manager connected before opening this dialog,
+    // so reaching here means the link has dropped since; reconnect and carry
+    // on rather than lose what was typed.
     if (!m_link || !m_link->isOpen()) {
         if (!m_ensureConnected || !m_ensureConnected())
             return;

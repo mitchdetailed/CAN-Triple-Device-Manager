@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.2.4 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.2.5 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -321,6 +321,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/model/channel.h
     src/model/channel_catalog.cpp
     src/model/channel_catalog.h
+    src/model/channel_list.cpp
+    src/model/channel_list.h
     src/model/comms_template.cpp
     src/model/comms_template.h
     src/model/comms_types.h
@@ -399,6 +401,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/ui/main_window.h
     src/ui/math_dialog.cpp
     src/ui/math_dialog.h
+    src/ui/monitor_channel_select_dialog.cpp
+    src/ui/monitor_channel_select_dialog.h
     src/ui/monitor_channels_dialog.cpp
     src/ui/monitor_channels_dialog.h
     src/ui/section_editor_dialog.cpp
@@ -1107,6 +1111,54 @@ qt_add_executable(test_hex_input
     test/test_hex_input.cpp
 )
 target_link_libraries(test_hex_input PRIVATE Qt6::Widgets Qt6::Core)
+
+# The Monitor Channels picker, driven offscreen: which rows >> and << move and
+# in what order, what selection() returns, the Find box, and that an empty
+# right-hand list means every channel. Depends on channel.h alone, so nothing
+# but Qt links.
+qt_add_executable(test_monitor_select
+    test/test_monitor_select.cpp
+    src/ui/monitor_channel_select_dialog.cpp
+    src/model/channel_list.cpp
+    src/model/user_paths.cpp
+)
+target_link_libraries(test_monitor_select PRIVATE Qt6::Widgets Qt6::Core)
+
+# Monitor Channels' channel selection, driven offscreen against a document
+# mapped through the real mapper and a DeviceLink that is never opened: the
+# chosen channels shown first in the chosen order and the rest hidden, the
+# reorder made through the vertical header so a value arriving by signal index
+# still lands on its channel's row, Show All putting name order back, and the
+# selection surviving a rebuild. The model list is test_protection's;
+# device_session -> device_link brings SerialPort in, as in test_firmware_link.
+qt_add_executable(test_monitor_channels
+    test/test_monitor_channels.cpp
+    src/ui/monitor_channels_dialog.cpp
+    src/ui/monitor_channel_select_dialog.cpp
+    src/model/channel_list.cpp
+    src/protocol/access_state.cpp
+    src/protocol/capacity.cpp
+    src/protocol/cobs.cpp
+    src/protocol/framer.cpp
+    src/protocol/device_link.cpp
+    src/protocol/device_session.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_monitor_channels PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_monitor_channels PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
+    Qt6::SerialPort ct_device_core) # device_mapper.cpp — see test_roundtrip
 
 # The two licensing dialogs, driven offscreen with no device: which inputs
 # enable Build/Apply, which refuse them and why, and the clear-password box's

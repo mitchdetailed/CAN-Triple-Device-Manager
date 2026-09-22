@@ -11,17 +11,22 @@
 #include <QPushButton>
 #include <QHeaderView>
 #include <QLabel>
+#include <QSet>
+#include <QSettings>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
+#include <utility>
 
 #include "../model/channel.h"
 #include "../model/device_mapper.h"
 #include "../protocol/device_session.h"
+#include "monitor_channel_select_dialog.h"
 
 namespace ct {
 
@@ -39,6 +44,11 @@ constexpr int kLeaseTickMs = 1000;
 
 constexpr int kStaleTickMs = 500;
 constexpr qint64 kStaleAfterMs = 2000;
+
+// QSettings key for the channel selection, so the set being watched outlives
+// any one opening of this window. Names, not indices: a name still means the
+// same channel after a rebuild, an index does not.
+const char *kSelectionKey = "monitorChannelSelection";
 
 // Role on the Value item that remembers whether it is currently grayed, so
 // the stale tick only touches items whose state actually changes.
@@ -185,6 +195,44 @@ MonitorChannelsDialog::MonitorChannelsDialog(DeviceLink *link, Configuration *co
     layout->setContentsMargins(8, 8, 8, 8);
     layout->setSpacing(6);
     layout->addWidget(m_infoLabel);
+
+    // THE SELECTION. A document maps a few hundred channels and a person
+    // watches a dozen; Select Channels… opens a picker
+    // (MonitorChannelSelectDialog) whose right-hand list is what the grid
+    // shows, top to bottom — so the channels being compared can sit side by
+    // side whatever their names. A name filter was the first answer and was
+    // replaced by this at Mitch's request: picking from a list, with Ctrl and
+    // Shift, and dragging the picks into order.
+    //
+    // Applying a selection rebuilds the rows in that order (rebuildRows) and
+    // hides the rest: every channel stays mapped and updated, and the pinned
+    // channels are carried across, so Show All shows current values with the
+    // pins still standing. A pinned row is exempt from hiding — a selection
+    // must not be able to hide a value that is driving the device. Remembered
+    // across openings of this window (QSettings), because the set being
+    // watched outlives any one look at it.
+    auto *selectRow = new QHBoxLayout;
+    m_selectButton = new QPushButton(tr("Select Channels…"), this);
+    m_selectButton->setObjectName(QStringLiteral("selectChannels"));
+    m_selectButton->setToolTip(tr("Choose which channels the grid shows, and in what order."));
+    connect(m_selectButton, &QPushButton::clicked, this,
+            &MonitorChannelsDialog::onSelectChannels);
+    selectRow->addWidget(m_selectButton);
+    m_showAllButton = new QPushButton(tr("Show All"), this);
+    m_showAllButton->setObjectName(QStringLiteral("showAllChannels"));
+    connect(m_showAllButton, &QPushButton::clicked, this, [this]() {
+        m_selection.clear();
+        QSettings().setValue(QLatin1String(kSelectionKey), m_selection);
+        rebuildRows(/*keepOverrides=*/true); // back to name order
+    });
+    selectRow->addWidget(m_showAllButton);
+    m_selectionLabel = new QLabel(this);
+    m_selectionLabel->setObjectName(QStringLiteral("selectionLabel"));
+    selectRow->addWidget(m_selectionLabel);
+    selectRow->addStretch(1);
+    layout->addLayout(selectRow);
+    m_selection = QSettings().value(QLatin1String(kSelectionKey)).toStringList();
+
     layout->addWidget(m_table, 1);
 
     auto *buttons = new QHBoxLayout;
@@ -221,7 +269,36 @@ MonitorChannelsDialog::MonitorChannelsDialog(DeviceLink *link, Configuration *co
 
 void MonitorChannelsDialog::rebuild()
 {
-    clearAllOverrides(true); // the rows they belonged to are about to go
+    rebuildRows(/*keepOverrides=*/false);
+}
+
+// The rows, from the document's mapping: the chosen channels first in their
+// chosen order, then the rest in name order, which applyChannelSelection()
+// then hides. Building the rows in display order is what makes the order plain
+// QTableWidget behaviour. An earlier version kept name order and moved the
+// vertical header's sections instead; with hundreds of hidden sections and a
+// cell widget on every row the view painted the moved rows blank on a real
+// unit, while a small offscreen grid painted them fine — a mechanism that
+// cannot disagree with itself was the better answer than a diagnosis.
+//
+// keepOverrides: the pinned channels are carried across by SIGNAL INDEX, the
+// one identity that survives the rows being rebuilt while the mapping stands
+// still, and the device is told nothing — it holds the pins and the lease
+// keeps them. A document change passes false and releases them, as it always
+// has: the mapping behind those indices may have changed.
+void MonitorChannelsDialog::rebuildRows(bool keepOverrides)
+{
+    QHash<int, double> pinned; // signal idx -> editor value
+    if (keepOverrides) {
+        for (const int row : std::as_const(m_overriddenRows)) {
+            const int idx = m_rowToSignal.value(row, -1);
+            if (idx >= 0)
+                pinned.insert(idx, editorValue(row));
+        }
+        m_overriddenRows.clear();
+    } else {
+        clearAllOverrides(true); // the rows they belonged to are about to go
+    }
     m_updatingChecks = true;
     m_signalToRow.clear();
     m_rowToSignal.clear();
@@ -229,6 +306,7 @@ void MonitorChannelsDialog::rebuild()
     m_signalUnits.clear();
     m_signalDecimals.clear();
     m_signalEnumLabels.clear();
+    m_channels.clear();
     m_table->setRowCount(0);
 
     if (!m_config) {
@@ -253,6 +331,16 @@ void MonitorChannelsDialog::rebuild()
                       return cmp < 0;
                   return a.second < b.second;
               });
+    // The chosen channels to the front, in the order chosen; stable, so the
+    // rest keep their name order behind them.
+    QHash<QString, int> rank;
+    for (int i = 0; i < m_selection.size(); ++i)
+        if (!rank.contains(m_selection.at(i)))
+            rank.insert(m_selection.at(i), i);
+    std::stable_sort(entries.begin(), entries.end(),
+                     [&rank](const QPair<QString, int> &a, const QPair<QString, int> &b) {
+                         return rank.value(a.first, INT_MAX) < rank.value(b.first, INT_MAX);
+                     });
 
     m_table->setRowCount(entries.size());
     const ChannelCatalog &catalog = m_config->catalog();
@@ -270,6 +358,15 @@ void MonitorChannelsDialog::rebuild()
         m_signalDecimals.insert(signalIdx, decimals);
         if (ch.isValid() && !ch.enumLabels.isEmpty())
             m_signalEnumLabels.insert(signalIdx, ch.enumLabels);
+        // For the picker: the catalogue's channel, or a bare name for one the
+        // mapping knows and the catalogue no longer does.
+        if (ch.isValid()) {
+            m_channels.append(ch);
+        } else {
+            Channel bare;
+            bare.name = name;
+            m_channels.append(bare);
+        }
 
         // Bare name, not channelLabel(). The unit is not missing from this row:
         // it is the Units column two cells along, filled from this same
@@ -308,8 +405,23 @@ void MonitorChannelsDialog::rebuild()
         }
         m_table->setItem(row, kColOverride, overrideItem);
     }
+    // Re-pin what was pinned (keepOverrides). The editor is set BEFORE the box
+    // is ticked, so its valueChanged finds the box clear and sends nothing; the
+    // tick itself lands under m_updatingChecks, so onOverrideToggled sends
+    // nothing either. The device already holds these.
+    for (auto it = pinned.constBegin(); it != pinned.constEnd(); ++it) {
+        const int row = m_signalToRow.value(it.key(), -1);
+        if (row < 0)
+            continue;
+        setEditorValue(row, it.value());
+        if (QTableWidgetItem *tick = m_table->item(row, kColOverride))
+            if (tick->flags() & Qt::ItemIsUserCheckable)
+                tick->setCheckState(Qt::Checked);
+        m_overriddenRows.insert(row);
+    }
     m_updatingChecks = false;
     updateOverrideSummary();
+    applyChannelSelection(); // the rows are new
 
     probeOverrideSupport();
     if (!mapping.errors.isEmpty())
@@ -365,6 +477,55 @@ void MonitorChannelsDialog::onSignalValues(const QList<ct::SignalValueEntry> &va
         }
         m_lastUpdateMs.insert(signalIdx, now);
     }
+}
+
+void MonitorChannelsDialog::onSelectChannels()
+{
+    MonitorChannelSelectDialog dialog(m_channels, m_selection, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    m_selection = dialog.selection();
+    QSettings().setValue(QLatin1String(kSelectionKey), m_selection);
+    rebuildRows(/*keepOverrides=*/true); // the order is decided as the rows are built
+}
+
+// Hides the rows outside the selection; the order was settled when the rows
+// were built (rebuildRows). "Chosen" is judged by name against the rows that
+// exist, so a selection made of names the document does not map shows every
+// channel rather than none — the names are kept in the selection regardless,
+// because it is the user's and the channels may well be back after the next
+// Get.
+void MonitorChannelsDialog::applyChannelSelection()
+{
+    if (!m_table)
+        return;
+    const int rowCount = m_table->rowCount();
+    QSet<QString> chosen;
+    for (const QString &name : std::as_const(m_selection))
+        chosen.insert(name);
+    const auto nameAt = [this](int row) {
+        const QTableWidgetItem *item = m_table->item(row, kColChannel);
+        return item ? item->text() : QString();
+    };
+    bool anyChosenRow = false;
+    for (int row = 0; row < rowCount && !anyChosenRow; ++row)
+        anyChosenRow = chosen.contains(nameAt(row));
+    const bool all = !anyChosenRow;
+
+    int shown = 0;
+    for (int row = 0; row < rowCount; ++row) {
+        const bool visible = all || chosen.contains(nameAt(row)) || m_overriddenRows.contains(row);
+        m_table->setRowHidden(row, !visible);
+        if (visible)
+            ++shown;
+    }
+
+    if (m_selectionLabel) {
+        m_selectionLabel->setText(all ? tr("Showing all %1 channels").arg(rowCount)
+                                      : tr("Showing %1 of %2 channels").arg(shown).arg(rowCount));
+    }
+    if (m_showAllButton)
+        m_showAllButton->setEnabled(!m_selection.isEmpty());
 }
 
 void MonitorChannelsDialog::onStaleTick()
@@ -457,6 +618,18 @@ QWidget *MonitorChannelsDialog::makeOverrideEditor(const Channel &ch, int row)
     spin->setValue(qBound(span.lo, 0.0, span.hi));
     connect(spin, &QDoubleSpinBox::valueChanged, this, resend);
     return spin;
+}
+
+void MonitorChannelsDialog::setEditorValue(int row, double value)
+{
+    QWidget *w = m_table->cellWidget(row, kColOverrideValue);
+    if (auto *spin = qobject_cast<QDoubleSpinBox *>(w)) {
+        spin->setValue(value);
+    } else if (auto *combo = qobject_cast<QComboBox *>(w)) {
+        const int i = combo->findData(value);
+        if (i >= 0)
+            combo->setCurrentIndex(i);
+    }
 }
 
 double MonitorChannelsDialog::editorValue(int row) const
@@ -564,6 +737,7 @@ void MonitorChannelsDialog::updateOverrideSummary()
         else if (n == 0 && m_leaseTimer->isActive())
             m_leaseTimer->stop();
     }
+    applyChannelSelection(); // a pinned row is exempt, so the set may have changed
 }
 
 void MonitorChannelsDialog::closeEvent(QCloseEvent *event)

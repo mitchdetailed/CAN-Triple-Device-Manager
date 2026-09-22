@@ -16,6 +16,7 @@ namespace {
 const QLatin1String kProduct("CAN Triple Device Manager");
 const QLatin1String kConfigurations("Configurations");
 const QLatin1String kCommsTemplates("Communications Templates");
+const QLatin1String kChannelLists("Channel Lists");
 const QLatin1String kFirmwareImages("Firmware");
 const QLatin1String kFirmwareBackups("Firmware Update Backups");
 const QLatin1String kDeviceScripts("Scripts");
@@ -35,6 +36,11 @@ QString configurationsDirectory()
 QString commsTemplatesDirectory()
 {
     return programRoot() + QLatin1Char('/') + kCommsTemplates;
+}
+
+QString channelListsDirectory()
+{
+    return programRoot() + QLatin1Char('/') + kChannelLists;
 }
 
 QString firmwareImagesDirectory()

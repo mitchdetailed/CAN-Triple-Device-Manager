@@ -28,10 +28,15 @@
 // round trip, which is exactly what the device demands before it will write.
 //
 // ---------------------------------------------------------------------------
-// The dialog opens WITHOUT a connection. Composing a licence is desk work, and
-// requiring a unit on the cable before you can even see the fields would make
-// it impossible to prepare one. Apply is what needs hardware: it connects,
-// prompts for the password if the unit wants one, and only then writes.
+// The dialog itself does not require a connection: it opens on whatever the
+// link is doing, reads the unit's record when there is one, and Apply connects
+// (through the routine handed in) when there is not, prompts for the password
+// if the unit wants one, and only then writes. That was the whole design at
+// first — composing a licence is desk work — but the Manager now connects
+// BEFORE opening it (MainWindow::onFirmwareLicense), because the licence being
+// composed is nearly always for the unit on the bench, and a dialog that
+// opened blank was a detour. The offline path stays as the fallback for a link
+// that drops while the dialog is up.
 #pragma once
 
 #include <QByteArray>

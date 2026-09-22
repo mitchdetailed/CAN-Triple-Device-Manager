@@ -10,6 +10,7 @@
 #include "../protocol/device_link.h"
 
 class QLabel;
+class QStackedWidget;
 
 namespace ct {
 
@@ -48,6 +49,10 @@ private:
     void updateRecentMenu();
     void addRecentFile(const QString &path);
     bool maybeSave(); // returns false when the user cancels
+    // Opens one of the recent files. The File > Recent Files actions and the
+    // start page's links both land here, so a locked file is handled the same
+    // way from either.
+    void openRecentPath(const QString &path);
 
     // Connections / Calculations
     void onCommunications();
@@ -134,6 +139,12 @@ private:
     // target. Runs on document reset and whenever the target changes.
     void updateCapacityGates();
 
+    // Reflects whether there is a document at all. From launch until the first
+    // New, Open or Get there is none: the window shows the start page and every
+    // command that reads or edits the document is disabled, with a tooltip
+    // saying why. Runs at construction and after each of those three succeeds.
+    void updateDocumentState();
+
     // "May this session lower a Protect Communication marking?" — which by spec
     // means a CONNECTED DEVICE confirming the Protected Comms password.
     // Handed to Communications Setup as a ProtectedCommsProver so the dialogs
@@ -160,6 +171,19 @@ private:
     QPointer<HelpWindow> m_helpWindow;
     QPointer<LuaConsoleDialog> m_luaConsole;
     QMenu *m_recentMenu = nullptr;
+    // False until the first New, Open or Get — see updateDocumentState().
+    bool m_hasDocument = false;
+    // The central area's two faces (buildCentral): the start page, and the
+    // document page behind it.
+    QStackedWidget *m_central = nullptr;
+    QWidget *m_startPage = nullptr;
+    QWidget *m_documentPage = nullptr;
+    QLabel *m_recentHeading = nullptr; // the start page's recent-files block
+    QLabel *m_recentLinks = nullptr;
+    // Every menu item that reads or edits the document; updateDocumentState()
+    // switches the lot. The Calculations items are not on it — they answer to
+    // the target firmware as well, so updateCapacityGates() gates them.
+    QList<QAction *> m_documentActions;
     QLabel *m_connectionLabel = nullptr;
     QLabel *m_documentLabel = nullptr;
     QLabel *m_lockLabel = nullptr;
@@ -182,6 +206,12 @@ private:
     // almost always the answer.
     QString m_lastPort;
     qint32 m_lastBaud = 0;
+    // Monitor Channels asked for with no document open: the user agreed to
+    // read the device's configuration first, and the monitor opens when that
+    // Get finishes (onMonitorChannels; runGetTransfer's finished handler).
+    // Meaningful only while m_getInProgress.
+    bool m_monitorAfterGet = false;
+    bool m_getInProgress = false; // a ConfigTransfer::get is running
 };
 
 } // namespace ct

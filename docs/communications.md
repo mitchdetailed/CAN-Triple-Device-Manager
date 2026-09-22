@@ -116,12 +116,15 @@ A .ct3t is binary and encrypted. Nothing in it can be read with a text editor, f
 
 ### Where the files are kept
 
-The program keeps two folders of its own, beside the program itself:
+The program keeps three folders of its own, beside the program itself:
 
 <table>
 <tr><th>Folder</th><th>Holds</th></tr>
 <tr><td><code>Communications Templates</code></td><td>Templates (*.ct3t). Both
 <b>Save…</b> and <b>Load…</b> start here.</td></tr>
+<tr><td><code>Channel Lists</code></td><td>Channel lists (*.ct3l) saved from
+the Monitor Channels picker — see
+<a href="monitor.md#channel-lists">Monitoring Live Values</a>.</td></tr>
 <tr><td><code>Configurations</code></td><td>Configurations (*.ct3, *.ct3s).
 <b>File → Open</b>, <b>Save As</b> and the <b>Secure Configuration Builder</b>
 start here when the document has no file of its own yet.</td></tr>
@@ -131,7 +134,7 @@ On a standard install that means:
 
 `C:\Program Files\Minton Performance\CAN Triple Device Manager\Communications Templates`
 
-Both are ordinary folders — put files in them, take them out, keep sub-folders of your own — and both are only a *starting point*. Every one of those dialogs lets you browse anywhere, and once a configuration has been saved somewhere, its own folder is where it opens and saves from next.
+All three are ordinary folders — put files in them, take them out, keep sub-folders of your own — and all are only a *starting point*. Every one of those dialogs lets you browse anywhere, and once a configuration has been saved somewhere, its own folder is where it opens and saves from next.
 
 Because they sit with the program rather than in one person's Documents, the whole machine shares them: every Windows account on that PC sees the same templates and the same configurations. On a workshop bench with several technicians that is usually what you want. It also means anyone using that PC can overwrite or delete what is in them, so they are shared storage, not private storage.
 
