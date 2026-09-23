@@ -25,6 +25,10 @@
 #include "../src/protocol/config_transfer.h"
 #include "../src/protocol/sealed_install.h"
 #include "../src/model/sealed_stream.h"
+#include "../src/model/package_builder.h"
+#include "../src/scripting/script_compiler.h" // mapWithScript — the Builder's and a Send's mapping
+#include <QTemporaryDir>
+#include <type_traits>
 #include "../src/protocol/firmware_image.h"
 #include "../src/protocol/firmware_update.h"
 #include "fake_device_link.h"
@@ -79,6 +83,10 @@ constexpr unsigned kAccessFnCount = ACCESS_FN_COUNT;
 constexpr unsigned kAccessMaskSend = ACCESS_MASK_SEND;
 constexpr unsigned kAccessMaskGet = ACCESS_MASK_GET;
 constexpr unsigned kAccessMaskEditComms = ACCESS_MASK_EDIT_COMMS;
+constexpr unsigned kAccessFnCanViewer = ACCESS_FN_CAN_VIEWER;
+constexpr unsigned kAccessFnRecordKeys = ACCESS_FN_RECORD_KEYS;
+constexpr unsigned kAccessMaskCanViewer = ACCESS_MASK_CAN_VIEWER;
+constexpr unsigned kAccessFnKnownMask = ACCESS_FN_KNOWN_MASK;
 constexpr unsigned kCmdReadAccessKeys = CMD_READ_ACCESS_KEYS;
 constexpr unsigned kCmdWriteAccessKeys = CMD_WRITE_ACCESS_KEYS;
 constexpr unsigned kCmdAccessChallenge = CMD_ACCESS_CHALLENGE;
@@ -334,6 +342,10 @@ constexpr unsigned kLicenseKeyClear = LICENSE_KEY_CLEAR;
 #undef ACCESS_MASK_SEND
 #undef ACCESS_MASK_GET
 #undef ACCESS_MASK_EDIT_COMMS
+#undef ACCESS_FN_CAN_VIEWER
+#undef ACCESS_FN_RECORD_KEYS
+#undef ACCESS_MASK_CAN_VIEWER
+#undef ACCESS_FN_KNOWN_MASK
 #undef CMD_GET_DEVICE_ID
 #undef CMD_WRITE_CONFIG_BINDING
 #undef CMD_GET_DEVICE_INFO
@@ -1021,14 +1033,14 @@ static void testDeviceAccess(const SerialProtoCallbacks *restore)
     {
         ct::AccessKeyRecord g{};
         g.set_mask = ct::ACCESS_MASK_SEND | ct::ACCESS_MASK_EDIT_COMMS;
-        for (int fn = 0; fn < ct::ACCESS_FN_COUNT; ++fn)
+        for (int fn = 0; fn < ct::ACCESS_FN_RECORD_KEYS; ++fn)
             for (int b = 0; b < ct::ACCESS_KEY_LEN; ++b)
                 g.keys[fn][b] = uint8_t(0x10 * (fn + 1) + b);
         ::AccessKeyRecord f;
         std::memcpy(&f, &g, sizeof(f));
         CHECK(f.set_mask == (fw::kAccessMaskSend | fw::kAccessMaskEditComms));
         bool keysMatch = true;
-        for (unsigned fn = 0; fn < fw::kAccessFnCount; ++fn)
+        for (unsigned fn = 0; fn < fw::kAccessFnRecordKeys; ++fn)
             for (int b = 0; b < fw::kAccessKeyLen; ++b)
                 keysMatch = keysMatch && f.keys[fn][b] == uint8_t(0x10 * (fn + 1) + b);
         CHECK(keysMatch);
@@ -1054,6 +1066,10 @@ static void testDeviceAccess(const SerialProtoCallbacks *restore)
     CHECK(ct::ACCESS_MASK_SEND == fw::kAccessMaskSend);
     CHECK(ct::ACCESS_MASK_GET == fw::kAccessMaskGet);
     CHECK(ct::ACCESS_MASK_EDIT_COMMS == fw::kAccessMaskEditComms);
+    CHECK(ct::ACCESS_FN_CAN_VIEWER == fw::kAccessFnCanViewer);
+    CHECK(unsigned(ct::ACCESS_FN_RECORD_KEYS) == fw::kAccessFnRecordKeys);
+    CHECK(ct::ACCESS_MASK_CAN_VIEWER == fw::kAccessMaskCanViewer);
+    CHECK(ct::ACCESS_FN_KNOWN_MASK == fw::kAccessFnKnownMask);
     CHECK(ct::CMD_READ_ACCESS_KEYS == fw::kCmdReadAccessKeys);
     CHECK(ct::CMD_WRITE_ACCESS_KEYS == fw::kCmdWriteAccessKeys);
     CHECK(ct::CMD_ACCESS_CHALLENGE == fw::kCmdAccessChallenge);
@@ -1154,11 +1170,16 @@ static void testDeviceAccess(const SerialProtoCallbacks *restore)
         const auto packets = exchange(ct::CMD_READ_ACCESS_KEYS, QByteArray());
         CHECK(packets.size() == 1);
         if (packets.size() == 1) {
-            // WHICH keys are set is answerable; what they ARE is not. Two bytes
-            // as of v17 - the mask, then the Protected Comms slot mask - and no
-            // command returns the keys themselves.
-            CHECK(packets[0].payload.size() == 2);
+            // WHICH keys are set is answerable; what they ARE is not. Four
+            // bytes as of firmware 1.0.14 - the mask, the Protected Comms slot
+            // mask (v17), the functions the firmware has and the functions open
+            // to this session - and no command returns the keys themselves.
+            // Bytes 0 and 1 keep their old meaning, which is what lets a host
+            // that predates the others read them and see what it always saw.
+            CHECK(packets[0].payload.size() == 4);
             CHECK(quint8(packets[0].payload[0]) == ct::ACCESS_MASK_SEND);
+            CHECK(packets[0].payload.size() == 4
+                  && quint8(packets[0].payload[2]) == ct::ACCESS_FN_KNOWN_MASK);
 
             // The GUI's own parser against the bytes the firmware just
             // produced. Asserting the layout by hand only proves the firmware
@@ -1166,6 +1187,18 @@ static void testDeviceAccess(const SerialProtoCallbacks *restore)
             ct::device_session::AccessState parsed;
             CHECK(ct::device_session::parseAccessState(packets[0].payload, &parsed));
             CHECK(parsed.supported && parsed.any());
+            CHECK(parsed.knows(ct::AccessFunction::CanViewer));
+            CHECK(parsed.openKnown);
+            // The session that just installed the Send key holds it.
+            CHECK(parsed.isOpen(ct::AccessFunction::SendConfiguration));
+            // ...and the parser of a PRE-1.0.14 answer (the first two bytes
+            // alone) reads a unit that has no CAN Viewer password to offer, and
+            // does not claim to know what is open.
+            ct::device_session::AccessState old;
+            CHECK(ct::device_session::parseAccessState(packets[0].payload.left(2), &old));
+            CHECK(old.supported && old.isSet(ct::AccessFunction::SendConfiguration));
+            CHECK(!old.knows(ct::AccessFunction::CanViewer));
+            CHECK(!old.openKnown && !old.isOpen(ct::AccessFunction::SendConfiguration));
             CHECK(parsed.isSet(ct::AccessFunction::SendConfiguration));
             CHECK(!parsed.isSet(ct::AccessFunction::GetConfiguration));
             CHECK(!parsed.isSet(ct::AccessFunction::EditProtectedComms));
@@ -2103,7 +2136,7 @@ static void testConfigVersion(const SerialProtoCallbacks *restore)
     CHECK(engine_config_version() == 1337);
     {
         uint16_t stored = 0xFFFF;
-        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, &stored, nullptr, nullptr, nullptr));
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, &stored, nullptr, nullptr, nullptr, nullptr));
         CHECK(stored == 1337);
         CHECK(flash_store_config_status() == ct::CONFIG_STATUS_OK);
     }
@@ -2134,7 +2167,7 @@ static void testConfigVersion(const SerialProtoCallbacks *restore)
     CHECK(engine_config_version() == 1337);
     {
         uint16_t stored = 0xFFFF;
-        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, &stored, nullptr, nullptr, nullptr));
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, &stored, nullptr, nullptr, nullptr, nullptr));
         CHECK(stored == 1337);
     }
 
@@ -2148,7 +2181,7 @@ static void testConfigVersion(const SerialProtoCallbacks *restore)
     CHECK(engine_config_version() == 1337);
     // A refused commit must not have written a header either: the point of the
     // NACK is that nothing happened, not that something half did.
-    CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+    CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
 
     // ---- CLEAR_CONFIG drops the version and keeps the keys ----
     // The two deliberately differ, and the difference is easy to get backwards,
@@ -5147,7 +5180,8 @@ static void testProtectedCommsSlots(const SerialProtoCallbacks *restore)
     };
     const auto slotMask = [&]() -> int {
         const auto packets = exchange(ct::CMD_READ_ACCESS_KEYS, QByteArray());
-        if (packets.size() != 1 || packets[0].payload.size() != 2)
+        // Four bytes since firmware 1.0.14; the slot mask is still byte 1.
+        if (packets.size() != 1 || packets[0].payload.size() != 4)
             return -1;
         return quint8(packets[0].payload[1]);
     };
@@ -5184,7 +5218,7 @@ static void testProtectedCommsSlots(const SerialProtoCallbacks *restore)
     CHECK(prove(0x33333333u));
     {
         const auto packets = exchange(ct::CMD_READ_ACCESS_KEYS, QByteArray());
-        CHECK(packets.size() == 1 && packets[0].payload.size() == 2
+        CHECK(packets.size() == 1 && packets[0].payload.size() == 4
               && (quint8(packets[0].payload[0]) & ct::ACCESS_MASK_EDIT_COMMS) != 0);
     }
 
@@ -5194,7 +5228,7 @@ static void testProtectedCommsSlots(const SerialProtoCallbacks *restore)
     CHECK(slotMask() == 0x0);
     {
         const auto packets = exchange(ct::CMD_READ_ACCESS_KEYS, QByteArray());
-        CHECK(packets.size() == 1 && packets[0].payload.size() == 2
+        CHECK(packets.size() == 1 && packets[0].payload.size() == 4
               && (quint8(packets[0].payload[0]) & ct::ACCESS_MASK_EDIT_COMMS) == 0);
     }
 
@@ -5674,7 +5708,7 @@ static void testAccessKeyDurability(const SerialProtoCallbacks *restore)
     // A virgin header for the write to commit into. This is exactly the state a
     // device is in before its first password is ever set.
     engine_clear_config();
-    CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+    CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
 
     const ct::AccessKey sendKey = ct::deriveAccessKey(QStringLiteral("stick-around"));
     const QByteArray sendKeyBytes = ct::accessKeyBytes(sendKey);
@@ -5702,14 +5736,14 @@ static void testAccessKeyDurability(const SerialProtoCallbacks *restore)
     // page of their own (the right fix, an append-log like preserve_store.c),
     // delete it and assert durability directly. Until then it is load-bearing:
     // it stops the "obvious" one-line commit being reintroduced.
-    CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+    CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
 
     // A commit is what makes it durable. This is the sequence CAN Triple
     // Device Manager performs, and the only one that persists a password.
     CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, QByteArray()));
     {
         ::AccessKeyRecord stored{};
-        CHECK(flash_store_validate(nullptr, nullptr, nullptr, &stored, nullptr, nullptr, nullptr, nullptr));
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, &stored, nullptr, nullptr, nullptr, nullptr, nullptr));
         CHECK(stored.set_mask == ct::ACCESS_MASK_SEND);
         CHECK(std::memcmp(stored.keys[ct::ACCESS_FN_SEND], sendKeyBytes.constData(),
                           ct::ACCESS_KEY_LEN)
@@ -5728,6 +5762,235 @@ static void testAccessKeyDurability(const SerialProtoCallbacks *restore)
     // Put the fixture back by hand rather than over the wire: clearing the
     // password would want a second commit, and the header is already programmed.
     engine_set_access_keys(nullptr);
+    engine_set_config_version(0);
+    flashErase();
+    serial_proto_init(restore);
+}
+
+// The CAN Viewer password (firmware 1.0.14). What it gates and what it does
+// not, proving it, the rule that changing it needs the old one, and — the part
+// the design turns on — where it is kept: the flash header's TAIL, outside the
+// CRC, so an image 1.0.13 wrote still validates (configuration and passwords
+// intact) and reads as holding no CAN Viewer password. Its "set" bit is derived
+// from the key and never stored, and a stray bit 3 in the record must not lock
+// anything.
+static void testCanViewerAccess(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks ecb{};
+    ecb.transmit_can = captureTransmit;
+    engine_init(&ecb);
+    engine_set_access_keys(nullptr);
+    engine_set_viewer_key(nullptr);
+    serial_proto_init(restore);
+
+    const ct::AccessKey viewerKey = ct::deriveAccessKey(QStringLiteral("watch-the-bus"));
+    const ct::AccessKey sendKey = ct::deriveAccessKey(QStringLiteral("send-it"));
+    const ct::AccessKey wrongKey = ct::deriveAccessKey(QStringLiteral("not-it"));
+    const QByteArray viewerBytes = ct::accessKeyBytes(viewerKey);
+    const QByteArray sendBytes = ct::accessKeyBytes(sendKey);
+
+    const auto writeKey = [](quint8 function, ct::AccessKey key, bool clear) {
+        ct::AccessKeyWritePayload p{};
+        p.function = function;
+        p.clear = clear ? 1 : 0;
+        const QByteArray bytes = ct::accessKeyBytes(key);
+        if (bytes.size() == ct::ACCESS_KEY_LEN)
+            std::memcpy(p.key, bytes.constData(), ct::ACCESS_KEY_LEN);
+        return QByteArray(reinterpret_cast<const char *>(&p), sizeof(p));
+    };
+    const auto prove = [](quint8 function, ct::AccessKey key) {
+        const auto packets = exchange(ct::CMD_ACCESS_CHALLENGE, QByteArray());
+        if (packets.size() != 1 || packets[0].cmd != ct::CMD_ACCESS_CHALLENGE)
+            return false;
+        return expectAck(ct::CMD_ACCESS_RESPONSE,
+                         QByteArray(1, char(function))
+                             + ct::accessResponse(key, packets[0].payload));
+    };
+    const auto readAccess = []() {
+        const auto packets = exchange(ct::CMD_READ_ACCESS_KEYS, QByteArray());
+        return (packets.size() == 1 && packets[0].cmd == ct::CMD_READ_ACCESS_KEYS)
+                   ? packets[0].payload
+                   : QByteArray();
+    };
+    // One raw frame from the bus, as the engine hands it over; true when a
+    // monitor frame reached the wire.
+    const auto frameReachesHost = []() {
+        g_wire.clear();
+        const uint8_t data[2] = {0xAB, 0xCD};
+        serial_proto_stream_monitor(1, 0, 0x123, 0, 0, 0, 0, data, sizeof(data));
+        return monitorFlags(g_wire) >= 0;
+    };
+    ct::InjectCanPayload inj{};
+    inj.bus_idx = 1;
+    inj.can_id = 0x321;
+    inj.data_len = 1;
+    const QByteArray injectPayload(reinterpret_cast<const char *>(&inj), sizeof(inj));
+    // An accepted injection answers ACK AND echoes the frame onto the monitor
+    // stream as the device's own Tx — so while the viewer is open both come
+    // back. A locked one answers a lone NACK: the echo is withheld with it.
+    const auto injectAccepted = [&injectPayload]() {
+        const auto packets = exchange(ct::CMD_INJECT_CAN_FRAME, injectPayload);
+        bool ack = false;
+        bool echo = false;
+        for (const auto &packet : packets) {
+            if (packet.cmd == ct::CMD_ACK && !packet.payload.isEmpty()
+                && packet.payload[0] == char(0))
+                ack = true;
+            if (packet.cmd == ct::CMD_MONITOR_STREAM)
+                echo = true;
+        }
+        return ack && echo;
+    };
+    // A fresh session: every proof gone, the streams started by the first word
+    // a host says — exactly what a Manager connecting to the unit does.
+    const auto newSession = [restore]() {
+        serial_proto_init(restore);
+        CHECK(exchange(ct::CMD_GET_STATUS, QByteArray()).size() == 1);
+    };
+
+    // ---- no password: the viewer is open, and the unit says it CAN hold one --
+    newSession();
+    {
+        const QByteArray a = readAccess();
+        CHECK(a.size() == 4);
+        CHECK(a.size() == 4 && quint8(a[0]) == 0);
+        CHECK(a.size() == 4 && quint8(a[2]) == ct::ACCESS_FN_KNOWN_MASK);
+        CHECK(a.size() == 4 && quint8(a[3]) == ct::ACCESS_FN_KNOWN_MASK); // nothing set: all open
+    }
+    CHECK(frameReachesHost());
+    CHECK(injectAccepted());
+
+    // ---- set it: the setter holds it for this session ----------------------
+    CHECK(expectAck(ct::CMD_WRITE_ACCESS_KEYS, writeKey(ct::ACCESS_FN_CAN_VIEWER, viewerKey, false)));
+    {
+        const QByteArray a = readAccess();
+        CHECK(a.size() == 4 && quint8(a[0]) == ct::ACCESS_MASK_CAN_VIEWER);
+    }
+    CHECK(frameReachesHost());
+    // Its bit is derived, never stored: the record the other three live in is
+    // untouched.
+    CHECK(engine_access_keys()->set_mask == 0);
+    CHECK(std::memcmp(engine_viewer_key(), viewerBytes.constData(), ct::ACCESS_KEY_LEN) == 0);
+
+    // ---- the next session is locked out of raw CAN, and only raw CAN --------
+    newSession();
+    {
+        // The fourth byte says so before anything is tried: everything open
+        // except the viewer.
+        const QByteArray a = readAccess();
+        CHECK(a.size() == 4
+              && quint8(a[3]) == (ct::ACCESS_FN_KNOWN_MASK & ~ct::ACCESS_MASK_CAN_VIEWER));
+    }
+    CHECK(!frameReachesHost());
+    CHECK(expectNack(ct::CMD_INJECT_CAN_FRAME, injectPayload, ct::ERR_LOCKED));
+    // Configuration functions answer to their own (unset) passwords.
+    CHECK(expectAck(ct::CMD_WRITE_CONFIG_NAME, QByteArray(ct::CONFIG_NAME_LEN, 'n')));
+    // A wrong password opens nothing...
+    CHECK(!prove(ct::ACCESS_FN_CAN_VIEWER, wrongKey));
+    CHECK(!frameReachesHost());
+    // ...the right one opens both halves.
+    CHECK(prove(ct::ACCESS_FN_CAN_VIEWER, viewerKey));
+    CHECK(frameReachesHost());
+    CHECK(injectAccepted());
+    {
+        const QByteArray a = readAccess();
+        CHECK(a.size() == 4 && (quint8(a[3]) & ct::ACCESS_MASK_CAN_VIEWER) != 0);
+    }
+    // Proving it proves nothing else, and proving something else does not
+    // prove it.
+    engine_set_access_keys(nullptr);
+    {
+        ::AccessKeyRecord rec{};
+        rec.set_mask = uint8_t(ct::ACCESS_MASK_SEND);
+        std::memcpy(rec.keys[ct::ACCESS_FN_SEND], sendBytes.constData(), ct::ACCESS_KEY_LEN);
+        engine_set_access_keys(&rec);
+    }
+    newSession();
+    CHECK(prove(ct::ACCESS_FN_SEND, sendKey));
+    CHECK(!frameReachesHost());
+    CHECK(expectNack(ct::CMD_INJECT_CAN_FRAME, injectPayload, ct::ERR_LOCKED));
+    engine_set_access_keys(nullptr);
+
+    // ---- changing or clearing it needs the old one ------------------------
+    newSession();
+    CHECK(expectNack(ct::CMD_WRITE_ACCESS_KEYS, writeKey(ct::ACCESS_FN_CAN_VIEWER, wrongKey, false),
+                     ct::ERR_LOCKED));
+    CHECK(expectNack(ct::CMD_WRITE_ACCESS_KEYS, writeKey(ct::ACCESS_FN_CAN_VIEWER, ct::kNoAccessKey, true),
+                     ct::ERR_LOCKED));
+    CHECK(prove(ct::ACCESS_FN_CAN_VIEWER, viewerKey));
+    CHECK(expectAck(ct::CMD_WRITE_ACCESS_KEYS, writeKey(ct::ACCESS_FN_CAN_VIEWER, ct::kNoAccessKey, true)));
+    newSession();
+    CHECK(frameReachesHost()); // cleared: open again without proving anything
+    {
+        const QByteArray a = readAccess();
+        CHECK(a.size() == 4 && quint8(a[0]) == 0);
+    }
+
+    // ---- a stray bit 3 in the stored record locks nothing ------------------
+    {
+        ::AccessKeyRecord rec{};
+        rec.set_mask = uint8_t(ct::ACCESS_MASK_CAN_VIEWER);
+        engine_set_access_keys(&rec);
+    }
+    newSession();
+    CHECK(frameReachesHost());
+    {
+        const QByteArray a = readAccess();
+        CHECK(a.size() == 4 && quint8(a[0]) == 0);
+    }
+    engine_set_access_keys(nullptr);
+
+    // ---- durability: the key reaches the header tail with the commit -------
+    engine_clear_config(); // a virgin header, as after the erase a Send begins with
+    newSession();
+    CHECK(expectAck(ct::CMD_WRITE_ACCESS_KEYS, writeKey(ct::ACCESS_FN_CAN_VIEWER, viewerKey, false)));
+    CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, QByteArray()));
+    {
+        uint8_t stored[4] = {0};
+        ::AccessKeyRecord rec{};
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, &rec, nullptr, nullptr, nullptr,
+                                   nullptr, stored));
+        CHECK(std::memcmp(stored, viewerBytes.constData(), ct::ACCESS_KEY_LEN) == 0);
+        CHECK(rec.set_mask == 0); // still never stored as a bit
+    }
+    // ...and back from the image after a power cycle.
+    engine_set_viewer_key(nullptr);
+    CHECK(engine_load_config(nullptr));
+    CHECK(std::memcmp(engine_viewer_key(), viewerBytes.constData(), ct::ACCESS_KEY_LEN) == 0);
+    newSession();
+    CHECK(!frameReachesHost());
+
+    // ---- an image 1.0.13 wrote: tail erased ---------------------------------
+    // The same header with the tail blanked is byte for byte what the older
+    // firmware commits. It must still VALIDATE — its configuration and its
+    // other passwords are the whole reason the key went into the tail — and it
+    // must read as holding no CAN Viewer password.
+    std::memset(g_flash + FLASH_HEADER_TAIL_OFFSET, 0xFF, FLASH_HEADER_TAIL_SIZE);
+    {
+        uint8_t stored[4] = {1, 2, 3, 4};
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                   nullptr, stored));
+        CHECK(stored[0] == 0 && stored[1] == 0 && stored[2] == 0 && stored[3] == 0);
+    }
+    engine_set_viewer_key(nullptr);
+    CHECK(engine_load_config(nullptr));
+    newSession();
+    CHECK(frameReachesHost());
+    // A damaged tail reads the same way, and never fails the image.
+    std::memset(g_flash + FLASH_HEADER_TAIL_OFFSET, 0x00, FLASH_HEADER_TAIL_SIZE);
+    g_flash[FLASH_HEADER_TAIL_OFFSET] = 0x43;
+    g_flash[FLASH_HEADER_TAIL_OFFSET + 1] = 0x56; // the marker, with a wrong CRC
+    g_flash[FLASH_HEADER_TAIL_OFFSET + 2] = 0x99;
+    {
+        uint8_t stored[4] = {1, 2, 3, 4};
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                   nullptr, stored));
+        CHECK(stored[0] == 0 && stored[1] == 0 && stored[2] == 0 && stored[3] == 0);
+    }
+
+    // Put the fixture back.
+    engine_set_access_keys(nullptr);
+    engine_set_viewer_key(nullptr);
     engine_set_config_version(0);
     flashErase();
     serial_proto_init(restore);
@@ -5761,11 +6024,11 @@ static void testDeviceBinding(const SerialProtoCallbacks *restore)
     {
         flash_store_set_device_uid(uidA);
         flashErase();
-        CHECK(flash_store_commit(counts, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr));
-        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+        CHECK(flash_store_commit(counts, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr));
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
         CHECK(flash_store_config_status() == ct::CONFIG_STATUS_OK);
         flash_store_set_device_uid(uidB); // same image, different chip
-        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
         CHECK(flash_store_config_status() == ct::CONFIG_STATUS_OK);
     }
 
@@ -5773,9 +6036,9 @@ static void testDeviceBinding(const SerialProtoCallbacks *restore)
     {
         flash_store_set_device_uid(uidA);
         flashErase();
-        CHECK(flash_store_commit(counts, nullptr, nullptr, nullptr, 0, uidA, nullptr, nullptr));
+        CHECK(flash_store_commit(counts, nullptr, nullptr, nullptr, 0, uidA, nullptr, nullptr, nullptr));
         uint8_t readBack[ct::CONFIG_UID_LEN] = {0};
-        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, readBack, nullptr, nullptr));
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, readBack, nullptr, nullptr, nullptr));
         CHECK(flash_store_config_status() == ct::CONFIG_STATUS_OK);
         CHECK(std::memcmp(readBack, uidA, ct::CONFIG_UID_LEN) == 0);
     }
@@ -5786,7 +6049,7 @@ static void testDeviceBinding(const SerialProtoCallbacks *restore)
     // another, which is the case the binding exists for.
     {
         flash_store_set_device_uid(uidB);
-        CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+        CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
         CHECK(flash_store_config_status() == ct::CONFIG_STATUS_WRONG_DEVICE);
         CHECK(!flash_store_present());
         // The engine must come up empty rather than running someone else's
@@ -5797,7 +6060,7 @@ static void testDeviceBinding(const SerialProtoCallbacks *restore)
     // ---- a device with no identity refuses a bound image (fails closed) --
     {
         flash_store_set_device_uid(nullptr);
-        CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+        CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
         CHECK(flash_store_config_status() == ct::CONFIG_STATUS_WRONG_DEVICE);
     }
 
@@ -5805,12 +6068,12 @@ static void testDeviceBinding(const SerialProtoCallbacks *restore)
     // device, so the two diagnoses never get confused --------------------
     {
         flash_store_set_device_uid(uidA);
-        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
         g_flash[8] ^= 0xFF; // inside the counts, so the CRC fails
-        CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+        CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
         CHECK(flash_store_config_status() == ct::CONFIG_STATUS_NONE);
         g_flash[8] ^= 0xFF;
-        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
     }
 
     // ---- over the wire: GET_DEVICE_ID reports identity + why ------------
@@ -5823,7 +6086,7 @@ static void testDeviceBinding(const SerialProtoCallbacks *restore)
         serial_proto_init(&cb);
 
         flash_store_set_device_uid(uidA);
-        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
         auto packets = exchange(ct::CMD_GET_DEVICE_ID, QByteArray());
         CHECK(packets.size() == 1);
         CHECK(packets[0].payload.size() == ct::CONFIG_UID_LEN + 1);
@@ -5845,7 +6108,7 @@ static void testDeviceBinding(const SerialProtoCallbacks *restore)
         // Present the same image to a different chip: the host is told the
         // configuration belongs elsewhere, not that there isn't one.
         flash_store_set_device_uid(uidB);
-        (void)flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+        (void)flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
         packets = exchange(ct::CMD_GET_DEVICE_ID, QByteArray());
         CHECK(packets.size() == 1);
         CHECK(quint8(packets[0].payload[ct::CONFIG_UID_LEN]) == ct::CONFIG_STATUS_WRONG_DEVICE);
@@ -5871,8 +6134,8 @@ static void testDeviceBinding(const SerialProtoCallbacks *restore)
         flashErase();
         uint16_t zeroCounts[FLASH_NUM_TABLES] = {0};
         CHECK(flash_store_commit(zeroCounts, nullptr, nullptr, nullptr, 0,
-                                 engine_config_binding(), nullptr, nullptr));
-        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+                                 engine_config_binding(), nullptr, nullptr, nullptr));
+        CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
         CHECK(flash_store_config_status() == ct::CONFIG_STATUS_OK);
     }
 
@@ -7035,8 +7298,8 @@ static void testLayoutIdentity(const SerialProtoCallbacks *restore)
 
     uint16_t counts[FLASH_NUM_TABLES] = {0};
     flashErase();
-    CHECK(flash_store_commit(counts, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr));
-    CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+    CHECK(flash_store_commit(counts, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr));
+    CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
     CHECK(flash_store_config_status() == ct::CONFIG_STATUS_OK);
     const uint16_t crc = flash_store_config_crc();
     CHECK(crc != 0);
@@ -7057,13 +7320,13 @@ static void testLayoutIdentity(const SerialProtoCallbacks *restore)
     // host is offered, because the fix is the same as for a version change.
     g_flash[6] ^= 0x5A;
     CHECK(flash_store_config_crc() == 0);
-    CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+    CHECK(!flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
     CHECK(flash_store_config_status() == ct::CONFIG_STATUS_NONE);
     CHECK(!flash_store_present());
     CHECK(!engine_load_config(nullptr));
     g_flash[6] ^= 0x5A;
     CHECK(flash_store_config_crc() == crc);
-    CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+    CHECK(flash_store_validate(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
 
     // The commit a host actually performs carries it too: SAVE_TO_FLASH is
     // the only path by which a configuration reaches the header.
@@ -7973,6 +8236,335 @@ static void testSealedInstallAgainstTheDevice(const SerialProtoCallbacks *restor
     engine_set_access_keys(nullptr); // leave the gates as this test found them
 }
 
+// THE SECURE CONFIGURATION BUILDER, END TO END, against the real firmware.
+//
+// testSealedInstallAgainstTheDevice proves the device side of a sealed install
+// frame by frame, but builds its stream by hand. This goes through the
+// Builder's OWN entry point instead — buildSecurePackage, reading a .ct3 from
+// disk exactly as File > Secure Configuration Builder does — and follows the
+// .ct3s the way a dealer's copy of the Manager does: read back for install,
+// its policy judged against the unit's facts, its sealed stream relayed into
+// the firmware. Then the unit is read back with a Get and compared TABLE BY
+// TABLE with a plain Send of the same .ct3, read back the same way: a package
+// must program exactly what a Send would, and comparing device against device
+// means the firmware's own normalisation cannot make a false difference.
+//
+// Also pinned: what each Builder option means for the FILE (install-only
+// cannot be opened; a package password gates the editable copy), that the
+// version and the Send password in the policy land on the unit, and the
+// refusals that matter — another fleet's package, a hardware match naming
+// another unit, and a tampered file.
+static void testBuilderPackageEndToEnd(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    const auto freshUnit = [&]() {
+        engine_init(&cb);
+        engine_set_access_keys(nullptr);
+        engine_set_viewer_key(nullptr);
+        engine_set_config_version(0);
+        flashErase();
+        serial_proto_init(restore);
+    };
+    freshUnit();
+    const QString passphrase = QStringLiteral("builder e2e fleet");
+    const QByteArray fleetKey = ct::deriveLicenseKey(passphrase);
+    CHECK(license_store_write("Minton Performance", "CAN Triple TD", "1.05",
+                              reinterpret_cast<const uint8_t *>(fleetKey.constData()), nullptr));
+
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    QString err;
+    ct::Configuration source;
+    fillTransferFixture(source);
+    source.setConfigTitle(QStringLiteral("Builder E2E"));
+    const QString sourcePath = dir.filePath(QStringLiteral("source.ct3"));
+    CHECK(source.saveToFile(sourcePath, &err));
+
+    const auto readBack = [](ct::DeviceTables *tables) {
+        ct::FakeDeviceLink link(firmwareReply);
+        TransferOutcome got;
+        runTransfer(ct::ConfigTransfer::get(&link), &got);
+        if (tables)
+            *tables = got.tables;
+        return got.done && got.ok && got.gotTables;
+    };
+    // Every table, record by record, as raw bytes: two read-backs of one
+    // configuration are identical or something differs.
+    const auto sameTables = [](const ct::DeviceTables &a, const ct::DeviceTables &b) {
+        bool same = true;
+        const auto cmp = [&same](const auto &x, const auto &y, const char *what) {
+            using T = typename std::decay_t<decltype(x)>::value_type;
+            const bool eq = x.size() == y.size()
+                            && std::memcmp(x.constData(), y.constData(),
+                                           size_t(x.size()) * sizeof(T)) == 0;
+            if (!eq)
+                std::printf("      tables differ: %s (%d vs %d records)\n", what,
+                            int(x.size()), int(y.size()));
+            same = same && eq;
+        };
+        cmp(a.messages, b.messages, "messages");
+        cmp(a.signalConfigs, b.signalConfigs, "signals");
+        cmp(a.math, b.math, "math");
+        cmp(a.conditions, b.conditions, "conditions");
+        cmp(a.counters, b.counters, "counters");
+        cmp(a.timers, b.timers, "timers");
+        cmp(a.constants, b.constants, "constants");
+        cmp(a.relays, b.relays, "relays");
+        cmp(a.tables2x16Def, b.tables2x16Def, "2x16 defs");
+        cmp(a.tables2x16Out, b.tables2x16Out, "2x16 outputs");
+        cmp(a.tables8x8Def, b.tables8x8Def, "8x8 defs");
+        cmp(a.tables8x8Row, b.tables8x8Row, "8x8 rows");
+        cmp(a.integrators, b.integrators, "integrators");
+        cmp(a.crc8, b.crc8, "crc8");
+        return same;
+    };
+    const auto configVersion = []() {
+        const auto p = exchange(ct::CMD_READ_CONFIG_VERSION, QByteArray());
+        return (p.size() == 1 && p[0].payload.size() == 2)
+                   ? int(quint8(p[0].payload[0]) | (quint8(p[0].payload[1]) << 8))
+                   : -1;
+    };
+    const auto accessMask = []() {
+        const auto p = exchange(ct::CMD_READ_ACCESS_KEYS, QByteArray());
+        return (p.size() == 1 && !p[0].payload.isEmpty()) ? int(quint8(p[0].payload[0])) : -1;
+    };
+
+    // ---- the reference: a plain Send of the same .ct3, read back ----------
+    ct::DeviceTables reference;
+    {
+        ct::Configuration reloaded;
+        CHECK(reloaded.loadFromFile(sourcePath, &err));
+        const ct::MappingResult mapped = ct::mapWithScript(reloaded);
+        CHECK(mapped.ok());
+        ct::FakeDeviceLink link(firmwareReply);
+        TransferOutcome sent;
+        runTransfer(ct::ConfigTransfer::send(&link, mapped.tables, /*verify=*/true, {},
+                                             /*saveToFlash=*/true),
+                    &sent);
+        CHECK(sent.done && sent.ok);
+        CHECK(readBack(&reference));
+        CHECK(!reference.messages.isEmpty() && !reference.signalConfigs.isEmpty());
+    }
+
+    const auto build = [&](const QString &name, const QString &fleet, bool editable,
+                           const QString &openPassword, const ct::SecurePackagePolicy &policy) {
+        ct::PackageBuildRequest req;
+        req.sourcePath = sourcePath;
+        req.outputPath = dir.filePath(name);
+        req.fleetPassphrase = fleet;
+        req.policy = policy;
+        req.includeEditable = editable;
+        req.openPassword = openPassword;
+        const ct::PackageBuildResult r = ct::buildSecurePackage(req);
+        if (!r.ok)
+            std::printf("      build %s refused: %s\n", qPrintable(name), qPrintable(r.error));
+        return r.ok ? req.outputPath : QString();
+    };
+    // The unit's facts as Send Secure Configuration gathers them.
+    ct::DeviceMatchFacts facts;
+    facts.licensed = true;
+    facts.manufacturer = QStringLiteral("Minton Performance");
+    facts.model = QStringLiteral("CAN Triple TD");
+    facts.version = QStringLiteral("1.05");
+    facts.identityKnown = true;
+    facts.mcuId = QStringLiteral("3E0023000C5032394B353620");
+    facts.viewerPasswordSupported = true; // the firmware under test is 1.0.14
+    // Read for install, judged, relayed. False at the first step that refuses.
+    const auto install = [&](const QString &path) {
+        ct::SecureFileInfo info;
+        QString e;
+        if (!ct::readSecureInstall(path, &info, &e)) {
+            std::printf("      readSecureInstall: %s\n", qPrintable(e));
+            return false;
+        }
+        if (!ct::packageInstallVerdict(info.policy, facts).ok())
+            return false;
+        ct::FakeDeviceLink link(firmwareReply);
+        RelayOutcome out;
+        runRelay(ct::SealedInstall::run(&link, info.installStream), &out);
+        return out.done && out.ok;
+    };
+
+    // ---- 1. install-only, with a version and a Send password --------------
+    const ct::AccessKey sendKey = ct::deriveAccessKey(QStringLiteral("dealer send"));
+    ct::SecurePackagePolicy p1;
+    p1.matchManufacturer = QStringLiteral("Minton Performance");
+    p1.configVersion = 21;
+    p1.setSend = true;
+    p1.sendKey = sendKey;
+    const QString installOnly =
+        build(QStringLiteral("install-only.ct3s"), passphrase, false, {}, p1);
+    CHECK(!installOnly.isEmpty());
+    {
+        ct::SecureFileInfo peek;
+        CHECK(ct::peekSecureFile(installOnly, &peek, &err));
+        CHECK(peek.installOnly && peek.hasInstallStream && !peek.requiresPassword);
+        ct::Configuration cannot;
+        CHECK(!cannot.loadFromFile(installOnly, &err)); // nothing editable inside
+        // The fleet key never travels: a proof of it does.
+        ct::SecureFileInfo info;
+        CHECK(ct::readSecureInstall(installOnly, &info, &err));
+        CHECK(info.policy.hasKeyProof() && info.policy.key.isEmpty());
+    }
+    freshUnit();
+    CHECK(install(installOnly));
+    {
+        ct::DeviceTables got;
+        CHECK(readBack(&got));
+        CHECK(sameTables(got, reference));
+    }
+    CHECK(configVersion() == 21);
+    CHECK(accessMask() >= 0 && (accessMask() & ct::ACCESS_MASK_SEND) != 0);
+
+    // ---- 2. editable copy, no password ------------------------------------
+    const QString editable =
+        build(QStringLiteral("editable.ct3s"), passphrase, true, {}, ct::SecurePackagePolicy{});
+    CHECK(!editable.isEmpty());
+    {
+        ct::Configuration opened;
+        CHECK(opened.loadFromFile(editable, &err));
+        CHECK(opened.configTitle() == QStringLiteral("Builder E2E"));
+    }
+    freshUnit();
+    CHECK(install(editable));
+    {
+        ct::DeviceTables got;
+        CHECK(readBack(&got));
+        CHECK(sameTables(got, reference));
+    }
+
+    // ---- 3. editable copy behind a package password ----------------------
+    const QString locked = build(QStringLiteral("locked.ct3s"), passphrase, true,
+                                 QStringLiteral("open sesame"), ct::SecurePackagePolicy{});
+    CHECK(!locked.isEmpty());
+    {
+        ct::Configuration::FilePeek peek;
+        CHECK(ct::Configuration::peekFile(locked, &peek, &err));
+        CHECK(peek.secure && peek.requiresPassword && !peek.installOnly);
+        ct::Configuration none;
+        CHECK(!none.loadFromFile(locked, &err));
+        ct::Configuration wrong;
+        CHECK(!wrong.loadFromFile(locked, &err, QStringLiteral("not it")));
+        ct::Configuration right;
+        CHECK(right.loadFromFile(locked, &err, QStringLiteral("open sesame")));
+        CHECK(right.configTitle() == QStringLiteral("Builder E2E"));
+    }
+    // ...and it installs WITHOUT that password: the device decrypts the
+    // stream, which the package password does not guard.
+    freshUnit();
+    CHECK(install(locked));
+
+    // ---- 4. a CAN Viewer password (firmware 1.0.14) ------------------------
+    // Carried like the others: named in the policy, the key only in the sealed
+    // stream, written ahead of the configuration and committed with it.
+    const ct::AccessKey viewerKey = ct::deriveAccessKey(QStringLiteral("dealer viewer"));
+    ct::SecurePackagePolicy p4;
+    p4.setViewer = true;
+    p4.viewerKey = viewerKey;
+    const QString withViewer =
+        build(QStringLiteral("viewer.ct3s"), passphrase, false, {}, p4);
+    CHECK(!withViewer.isEmpty());
+    {
+        ct::SecureFileInfo info;
+        CHECK(ct::readSecureInstall(withViewer, &info, &err));
+        CHECK(info.policy.setViewer && info.policy.changesPasswords());
+        CHECK(info.policy.viewerKey == ct::kNoAccessKey); // the key did not travel
+        // A unit whose firmware cannot hold it is refused before anything is sent.
+        ct::DeviceMatchFacts older = facts;
+        older.viewerPasswordSupported = false;
+        const ct::InstallVerdict v = ct::packageInstallVerdict(info.policy, older);
+        CHECK(!v.ok() && v.viewerPasswordUnsupported);
+    }
+    freshUnit();
+    CHECK(install(withViewer));
+    CHECK(accessMask() >= 0 && (accessMask() & ct::ACCESS_MASK_CAN_VIEWER) != 0);
+    {
+        ct::DeviceTables got;
+        CHECK(readBack(&got));
+        CHECK(sameTables(got, reference)); // the configuration went in with it
+    }
+    // Committed, not held in RAM: after a power cycle the unit still has the
+    // key, and the session that installed it has proved nothing.
+    {
+        const QByteArray bytes = ct::accessKeyBytes(viewerKey);
+        engine_set_viewer_key(nullptr);
+        CHECK(engine_load_config(nullptr));
+        CHECK(std::memcmp(engine_viewer_key(), bytes.constData(), ct::ACCESS_KEY_LEN) == 0);
+        serial_proto_init(restore);
+        CHECK((accessMask() & ct::ACCESS_MASK_CAN_VIEWER) != 0);
+        const auto keys = exchange(ct::CMD_READ_ACCESS_KEYS, QByteArray());
+        CHECK(keys.size() == 1 && keys[0].payload.size() >= 4
+              && (quint8(keys[0].payload[3]) & ct::ACCESS_MASK_CAN_VIEWER) == 0); // not open
+    }
+
+    // ---- refusals ------------------------------------------------------------
+    // A hardware match naming another unit stops before the device is touched.
+    {
+        ct::SecurePackagePolicy other;
+        other.matchMcuId = QStringLiteral("000000000000000000000001");
+        const QString path =
+            build(QStringLiteral("other-unit.ct3s"), passphrase, false, {}, other);
+        CHECK(!path.isEmpty());
+        ct::SecureFileInfo info;
+        CHECK(ct::readSecureInstall(path, &info, &err));
+        const ct::InstallVerdict v = ct::packageInstallVerdict(info.policy, facts);
+        CHECK(!v.ok());
+        CHECK(v.mismatches.size() == 1
+              && v.mismatches.first().field == QStringLiteral("mcuId"));
+    }
+    // Another fleet's package: sealed under a key this unit does not hold, so
+    // the firmware refuses the first frame and the unit keeps what it had.
+    {
+        const QString foreign = build(QStringLiteral("foreign.ct3s"),
+                                      QStringLiteral("someone else's fleet"), false, {},
+                                      ct::SecurePackagePolicy{});
+        CHECK(!foreign.isEmpty());
+        freshUnit();
+        CHECK(install(editable)); // something to keep
+        ct::SecureFileInfo info;
+        CHECK(ct::readSecureInstall(foreign, &info, &err));
+        ct::FakeDeviceLink link(firmwareReply);
+        RelayOutcome out;
+        runRelay(ct::SealedInstall::run(&link, info.installStream), &out);
+        CHECK(out.done && !out.ok);
+        ct::DeviceTables got;
+        CHECK(readBack(&got));
+        CHECK(sameTables(got, reference)); // untouched
+    }
+    // A tampered file does not even read.
+    {
+        QFile f(editable);
+        CHECK(f.open(QIODevice::ReadOnly));
+        QByteArray raw = f.readAll();
+        f.close();
+        raw[raw.size() / 2] = char(raw[raw.size() / 2] ^ 0x01);
+        const QString path = dir.filePath(QStringLiteral("tampered.ct3s"));
+        QFile t(path);
+        CHECK(t.open(QIODevice::WriteOnly));
+        t.write(raw);
+        t.close();
+        ct::SecureFileInfo info;
+        const bool read = ct::readSecureInstall(path, &info, &err);
+        // A flip in carrier noise is legitimately harmless; a flip in material
+        // must refuse. Either way the file must never install something else.
+        if (read) {
+            freshUnit();
+            CHECK(install(path));
+            ct::DeviceTables got;
+            CHECK(readBack(&got));
+            CHECK(sameTables(got, reference));
+        }
+    }
+
+    // Put the fixture back.
+    const QByteArray zero(int(ct::LICENSE_KEY_LEN), '\0');
+    CHECK(license_store_write("Minton Performance", "CAN Triple TD", "1.05", reinterpret_cast<const uint8_t *>(zero.constData()),
+                              nullptr));
+    freshUnit();
+}
+
+
 // CMD_GET_PROTECTION. The level comes through a callback — reading FLASH->OPTR
 // on a desktop would fault — so this checks the wiring both ways: a build with
 // no callback says "cannot tell you", which is what older firmware is to a
@@ -8284,6 +8876,26 @@ static void testFirmwareUpdaterUploadsAndCancels(const SerialProtoCallbacks *res
         CHECK(link.countOf(ct::CMD_FW_UPDATE_DATA) < (imageBytes.size() / 488) + 1);
         // And a cancelled upload never claims the image is complete.
         CHECK(!link.sentAny(ct::CMD_FW_UPDATE_END));
+    }
+
+    {
+        // A SINGLE-BANK UNIT refuses BEGIN's staging erase with ERR_FLASH_WRITE
+        // on every attempt (fwFlashErase in user_code.c, which the host build
+        // does not compile, hence the injected NACK). The message must name the
+        // likely cause and the tool that fixes it; the bare "flash write failed
+        // (0x05)" named neither.
+        flashErase();
+        fw_host_reset();
+        fw_update_init(&drv);
+        ct::FakeDeviceLink link(firmwareReply);
+        link.nackCommand(ct::CMD_FW_UPDATE_BEGIN, ct::ERR_FLASH_WRITE);
+        ct::FirmwareUpdater updater(&link);
+        QString error;
+        CHECK(!updater.upload(*image, &error));
+        CHECK(error.contains(QStringLiteral("0x05")));
+        CHECK(error.contains(QStringLiteral("single-bank")));
+        CHECK(error.contains(QStringLiteral("Initial Programming Tool")));
+        CHECK(!link.sentAny(ct::CMD_FW_UPDATE_DATA)); // nothing sent past the refusal
     }
 }
 
@@ -11214,6 +11826,7 @@ int main(int argc, char *argv[])
     testFirmwareLicense(&protoCb);
     testConfigVersion(&protoCb);
     testSealedInstallAgainstTheDevice(&protoCb);
+    testBuilderPackageEndToEnd(&protoCb);
     testBusSetupReadback(&protoCb);
     testCounterRateMode();
     testCounterResetUnlimited();
@@ -11258,6 +11871,7 @@ int main(int argc, char *argv[])
     testFirmwareUpdaterUploadsAndCancels(&protoCb);
     testMessageProtectionIsHostOnly(&protoCb);
     testAccessKeyDurability(&protoCb);
+    testCanViewerAccess(&protoCb);
     testDeviceBinding(&protoCb);
     testLayoutIdentity(&protoCb);
     testReceiveMatchIndex(&protoCb);

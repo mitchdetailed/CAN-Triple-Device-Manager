@@ -1,5 +1,6 @@
 // Calculations > Tables — 2x16 (1-axis) and 8x8 (2-axis) lookup tables.
 #include "tables_dialog.h"
+#include "window_memory.h"
 #include "hex_input.h"
 
 #include <QButtonGroup>
@@ -361,6 +362,7 @@ public:
         // Wide enough for roughly 12 of the 16 columns; the grid scrolls
         // horizontally for the rest rather than forcing an oversized window.
         resize(880, 470);
+        rememberWindowSize(this, QStringLiteral("table2x16")); // sized to content by default; a size the user chose wins
     }
 
     Table2x16Row result() const { return m_row; }
@@ -653,6 +655,7 @@ public:
         const int available = scr ? scr->availableGeometry().height() : 1040;
         const int wanted = content->sizeHint().height() + buttons->sizeHint().height() + 24;
         resize(700, qMin(wanted, available - 80));
+        rememberWindowSize(this, QStringLiteral("table8x8")); // sized to content by default; a size the user chose wins
     }
 
     Table8x8Row result() const { return m_row; }
@@ -951,6 +954,7 @@ TablesDialog::TablesDialog(Configuration *config, QWidget *parent)
     setWindowTitle(tr("Tables"));
     setModal(true);
     resize(660, 400);
+    rememberWindowSize(this, QStringLiteral("tables")); // the default, until the user changes it
 
     for (const Table2x16Row &t : m_rows2x16)
         m_orig2x16 << t.outputChannel;
@@ -978,9 +982,26 @@ TablesDialog::TablesDialog(Configuration *config, QWidget *parent)
     m_add8x8Button = new QPushButton(tr("Add 8x8…"), this);
     m_changeButton = new QPushButton(tr("Change…"), this);
     m_removeButton = new QPushButton(tr("Remove"), this);
+    // Row order is evaluation order — the engine runs every table top to
+    // bottom in one pass (see engine.html) — so a row that reads another row's
+    // output belongs below it. The same pair Communications Setup has, for the
+    // same reason; the object names are what the tests press.
+    m_upButton = new QPushButton(tr("↑ Move Up"), this);
+    m_upButton->setObjectName(QStringLiteral("moveUp"));
+    m_downButton = new QPushButton(tr("↓ Move Down"), this);
+    m_downButton->setObjectName(QStringLiteral("moveDown"));
+    const QString orderTip = tr("Tables run in list order within their kind — the 2x16 tables first, then "
+                                "the 8x8 — so a table whose axis is another table's output "
+                                "belongs below it.");
+    m_upButton->setToolTip(orderTip);
+    m_downButton->setToolTip(orderTip);
+    connect(m_upButton, &QPushButton::clicked, this, [this]() { onMove(-1); });
+    connect(m_downButton, &QPushButton::clicked, this, [this]() { onMove(+1); });
     buttonColumn->addWidget(m_add2x16Button);
     buttonColumn->addWidget(m_add8x8Button);
     buttonColumn->addWidget(m_changeButton);
+    buttonColumn->addWidget(m_upButton);
+    buttonColumn->addWidget(m_downButton);
     buttonColumn->addWidget(m_removeButton);
     buttonColumn->addStretch(1);
     topLayout->addLayout(buttonColumn);
@@ -1198,11 +1219,47 @@ void TablesDialog::onRemove()
     updateButtons();
 }
 
+// Swaps the selected table with its neighbour of the same kind and follows it.
+// The tree lists the 2x16 tables and then the 8x8 tables, in the order the
+// engine runs them, so a move never crosses from one kind into the other. The
+// rename-tracking name rides with its row, or commit() would treat the move
+// as a rename of whatever used to sit at this index.
+void TablesDialog::onMove(int delta)
+{
+    QTreeWidgetItem *item = m_tree->currentItem();
+    if (!item)
+        return;
+    const bool is8x8 = item->data(0, Qt::UserRole).toBool();
+    const int idx = item->data(0, Qt::UserRole + 1).toInt();
+    const int target = idx + delta;
+    if (is8x8) {
+        if (idx < 0 || target < 0 || target >= m_rows8x8.size())
+            return;
+        m_rows8x8.swapItemsAt(idx, target);
+        m_orig8x8.swapItemsAt(idx, target);
+    } else {
+        if (idx < 0 || target < 0 || target >= m_rows2x16.size())
+            return;
+        m_rows2x16.swapItemsAt(idx, target);
+        m_orig2x16.swapItemsAt(idx, target);
+    }
+    rebuild();
+    m_tree->setCurrentItem(m_tree->topLevelItem((is8x8 ? m_rows2x16.size() : 0) + target));
+    updateButtons();
+}
+
 void TablesDialog::updateButtons()
 {
     const bool sel = m_tree->currentItem() != nullptr && !m_tree->selectedItems().isEmpty();
     m_changeButton->setEnabled(sel);
     m_removeButton->setEnabled(sel);
+    // Within the table's own kind (see onMove).
+    QTreeWidgetItem *item = m_tree->currentItem();
+    const bool is8x8 = item && item->data(0, Qt::UserRole).toBool();
+    const int idx = item ? item->data(0, Qt::UserRole + 1).toInt() : -1;
+    const int kindCount = is8x8 ? m_rows8x8.size() : m_rows2x16.size();
+    m_upButton->setEnabled(sel && idx > 0);
+    m_downButton->setEnabled(sel && idx >= 0 && idx < kindCount - 1);
 }
 
 void TablesDialog::commit()

@@ -24,6 +24,21 @@ QString describeNack(quint8 errCode, const QString &fallback)
             "FirmwareUpdater",
             "The device is password protected. Unlock it before updating firmware.");
     }
+    // The firmware refuses every staging erase and write outright on a unit
+    // whose flash option bytes say single-bank (fwFlashErase/fwFlashProgram in
+    // user_code.c), and that refusal is this code, on every attempt. A genuine
+    // flash fault is the other cause, and the rarer one. The bare "flash write
+    // failed (0x05)" named neither, and the one fix, the programming tool's
+    // switch to dual-bank, was nowhere on screen.
+    if (errCode == ERR_FLASH_WRITE) {
+        return QCoreApplication::translate(
+            "FirmwareUpdater",
+            "The device could not write its flash (0x05). If this happens every time, "
+            "the unit's flash is most likely set to single-bank mode, where the firmware "
+            "refuses updates. The CAN Triple Initial Programming Tool (Start Menu) "
+            "switches it to dual-bank. That erases the stored configuration, so use "
+            "Get Configuration and save it first.");
+    }
     return DeviceLink::errorCodeText(errCode);
 }
 

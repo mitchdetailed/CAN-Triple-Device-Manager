@@ -1,4 +1,5 @@
 #include "axis_setup_dialog.h"
+#include "window_memory.h"
 #include "hex_input.h"
 
 #include <QComboBox>
@@ -128,6 +129,7 @@ AxisSetupDialog::AxisSetupDialog(Configuration *config, const Axis &axis,
     render(axis.sites);
     refreshChannelUi();
     resize(qMax(560, axis.maxSites * 64 + 60), sizeHint().height());
+    rememberWindowSize(this, QStringLiteral("axisSetup")); // sized to content by default; a size the user chose wins
 }
 
 AxisSetupDialog::~AxisSetupDialog()

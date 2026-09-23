@@ -16,7 +16,7 @@ Tables are evaluated right after [constants](constants.md) in every pass, before
 
 ## The Tables dialog
 
-To add a table, choose **Calculations → Tables…**. The dialog lists every table with the columns **#**, **Type**, **Output**, **Axes** and **Active**, with **Add 2x16…**, **Add 8x8…**, **Change…** and **Remove** buttons at the right. Double-clicking a row opens it for change. OK commits the changes; Cancel discards them. A new table's output channel is pre-named "Table N"; adding beyond the limit reports "The device supports at most 8 2x16 tables" (or 8x8 tables).
+To add a table, choose **Calculations → Tables…**. The dialog lists every table with the columns **#**, **Type**, **Output**, **Axes** and **Active**, with **Add 2x16…**, **Add 8x8…**, **Change…**, **↑ Move Up** / **↓ Move Down** and **Remove** buttons at the right. A table moves within its own kind — the 2×16 tables run before the 8×8 tables, so one cannot be moved across that boundary. Double-clicking a row opens it for change. OK commits the changes; Cancel discards them. A new table's output channel is pre-named "Table N"; adding beyond the limit reports "The device supports at most 8 2x16 tables" (or 8x8 tables).
 
 ## Editing a 2x16 table
 

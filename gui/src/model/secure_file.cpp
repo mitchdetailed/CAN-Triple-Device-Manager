@@ -388,12 +388,18 @@ bool parseHeader(const QByteArray &raw, Header *out, QString *error)
     if (h.formatVersion == 0)
         return fail(QStringLiteral("This secure configuration file's header is damaged."));
     // EXACTLY the current version. Newer is a file this build has no business
-    // guessing at; OLDER is a v1 file, and v1 is refused rather than read
+    // guessing at; OLDER is a v1 file, which is READ again (secure_file.h,
+    // kSecureFormatV1) — until 1.2.6 v1 was refused here, and with it every
+    // .ct3 Manager 1.1.14 and earlier had saved. The refusal below is for
+    // versions nothing ever wrote. What follows is the reasoning v1 was
+    // refused on, kept for the record:
+    // v1 is refused rather than read
     // because the mode it could carry — the file key wrapped under a passphrase
     // — no longer has any code to unwrap it. A "> version" test let every v1
     // file through to fail later and less clearly, which is what this used to
     // do and what the round-trip test caught.
-    if (h.formatVersion != kSecureFormatVersion && h.formatVersion != kSecureFormatV2) {
+    if (h.formatVersion != kSecureFormatVersion && h.formatVersion != kSecureFormatV2
+        && h.formatVersion != kSecureFormatV1) {
         return fail(h.formatVersion < kSecureFormatVersion
                         ? QStringLiteral("This secure configuration was written by an older "
                                          "version of CAN Triple Device Manager and can no "
@@ -408,7 +414,11 @@ bool parseHeader(const QByteArray &raw, Header *out, QString *error)
     // MAC, so without this check the byte is simply free to change.
     // Format 2 defined no flags; format 3 defines three. Anything else is a
     // header nothing wrote.
-    if ((h.formatVersion == kSecureFormatV2 && h.flags != 0) || (h.flags & ~kSecureFlagMask) != 0)
+    // Format 1 defined one flag, bit 0 — the password — which is the same bit
+    // format 3's kSecureFlagRequiresPassword uses, so a peek reads it right.
+    if ((h.formatVersion == kSecureFormatV1 && (h.flags & ~kSecureFlagRequiresPassword) != 0)
+        || (h.formatVersion == kSecureFormatV2 && h.flags != 0)
+        || (h.flags & ~kSecureFlagMask) != 0)
         return fail(QStringLiteral("This secure configuration file's header is damaged."));
 
     *out = h;
@@ -468,6 +478,8 @@ QJsonObject SecurePackagePolicy::toJson() const
         for (int i = 0; i < 4; ++i)
             if (setCommsSlot[i])
                 names.append(QStringLiteral("comms%1").arg(i + 1));
+        if (setViewer)
+            names.append(QStringLiteral("viewer"));
         o[QStringLiteral("passwordUpdates")] = names;
         return o;
     }
@@ -479,6 +491,8 @@ QJsonObject SecurePackagePolicy::toJson() const
         if (setCommsSlot[i])
             o[QStringLiteral("commsSlot%1Key").arg(i + 1)] = toHex(accessKeyBytes(commsSlotKey[i]));
     }
+    if (setViewer)
+        o[QStringLiteral("viewerKey")] = toHex(accessKeyBytes(viewerKey));
     return o;
 }
 
@@ -512,6 +526,8 @@ SecurePackagePolicy SecurePackagePolicy::fromJson(const QJsonObject &o)
         p.setCommsSlot[i] = o.contains(name);
         p.commsSlotKey[i] = keyAt(name);
     }
+    p.setViewer = o.contains(QStringLiteral("viewerKey"));
+    p.viewerKey = keyAt(QStringLiteral("viewerKey"));
     if (o.contains(QStringLiteral("passwordUpdates"))) {
         p.keysWithheld = true;
         for (const QJsonValue &v : o[QStringLiteral("passwordUpdates")].toArray()) {
@@ -524,6 +540,8 @@ SecurePackagePolicy SecurePackagePolicy::fromJson(const QJsonObject &o)
                 const int slot = n.mid(5).toInt();
                 if (slot >= 1 && slot <= 4)
                     p.setCommsSlot[slot - 1] = true;
+            } else if (n == QLatin1String("viewer")) {
+                p.setViewer = true;
             }
         }
     }
@@ -575,6 +593,12 @@ InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,
     // is a mismatch — nothing was asked for that the unit failed to be.
     if (!policy.tableCounts.isEmpty() && device.capacityKnown)
         v.shortfalls = countsExceeding(policy.tableCounts, device.capacity);
+
+    // A CAN Viewer password needs firmware that can hold one (1.0.14). Judged
+    // here, before anything is sent, rather than left to the device, which
+    // would refuse the sealed write in the middle of the stream.
+    if (policy.setViewer && !device.viewerPasswordSupported)
+        v.viewerPasswordUnsupported = true;
     return v;
 }
 
@@ -588,6 +612,13 @@ InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy, bool dev
     facts.model = deviceModel;
     facts.version = deviceVersion;
     return packageInstallVerdict(policy, facts);
+}
+
+quint16 secureBlobFormatVersion(const QByteArray &blob)
+{
+    if (blob.size() < kSecureHeaderBytes || !hasMagic(blob))
+        return 0;
+    return getU16(blob, kOffFormatVersion);
 }
 
 bool isSecureFile(const QString &path)
@@ -908,7 +939,24 @@ bool openSecureBlob(const QByteArray &raw, QByteArray *plainBody, SecureFileInfo
     // can, because the only thing that knows the right key is the tag on the
     // payload.
     QByteArray fileKey = chunkAt(carrier, slotOrder.at(0)) + chunkAt(carrier, slotOrder.at(1));
-    QByteArray mask = buildWrapMask(h.salt, h.formatVersion, h.flags);
+    // Format 1 (Manager <= 1.1.14): format 2's mask, and a password when flag
+    // bit 0 says so folded in as PBKDF2 of it — the v1.1.14 writer's
+    // buildWrapMask, reproduced exactly. Without the password the mask comes
+    // out wrong, the tag fails below, and the message says a password is
+    // wanted rather than that the file is damaged.
+    const bool v1 = h.formatVersion == kSecureFormatV1;
+    const bool v1Password = v1 && (h.flags & kSecureFlagRequiresPassword) != 0;
+    if (v1Password && (h.iterations == 0 || h.iterations > quint32(kMaxIterations)))
+        return damaged();
+    QByteArray mask = v1 ? hmac(h.salt, kLabelWrap)
+                         : buildWrapMask(h.salt, h.formatVersion, h.flags);
+    if (v1Password) {
+        QByteArray stretched = QPasswordDigestor::deriveKeyPbkdf2(
+            QCryptographicHash::Sha256, password.toUtf8(), h.salt, int(h.iterations),
+            kSecureFileKeyBytes);
+        xorInto(mask, stretched);
+        burn(stretched);
+    }
     xorInto(fileKey, mask); // wrapped in, unwrapped out
     burn(mask);
 
@@ -931,7 +979,36 @@ bool openSecureBlob(const QByteArray &raw, QByteArray *plainBody, SecureFileInfo
         // them apart — a wrong key and a corrupted byte look identical to a MAC.
         // With the password mode gone no password is ever involved, so damage is
         // the only explanation left and the message no longer has to hedge.
+        // Except in a format-1 file that asked for one, where a wrong password
+        // is by far the likelier cause — the v1.1.14 reader's own wording.
+        if (v1Password) {
+            return fail(password.isEmpty()
+                            ? QStringLiteral("This secure configuration requires a password.")
+                            : QStringLiteral("That password is not correct."));
+        }
         return damaged();
+    }
+
+    // FORMAT 1: [embedded key][body], nothing else — no policy, no section, no
+    // install stream. Authenticated above, so only the length needs checking.
+    if (v1) {
+        if (plain.size() < kEmbeddedKeyBytes) {
+            burn(plain);
+            return damaged();
+        }
+        if (info) {
+            info->formatVersion = h.formatVersion;
+            info->embeddedCommsKey = accessKeyFromBytes(plain.left(kEmbeddedKeyBytes));
+            info->policy = SecurePackagePolicy{};
+            info->installStream.clear();
+            info->hasInstallStream = false;
+            info->installOnly = false;
+            info->requiresPassword = v1Password;
+        }
+        if (plainBody)
+            *plainBody = plain.mid(kEmbeddedKeyBytes);
+        burn(plain);
+        return true;
     }
 
     // Authenticated, so the length is now trustworthy — but check it anyway

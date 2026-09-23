@@ -22,7 +22,8 @@ are written to their channels.</td></tr>
 <tr><td>4</td><td><a href="tables.md">Lookup tables</a></td><td>2×16 tables,
 then 8×8 tables.</td></tr>
 <tr><td>5</td><td><a href="math-channels.md">Math channels</a></td><td>All
-rows, in row order.</td></tr>
+rows, in row order — <b>Move Up</b> / <b>Move Down</b> in each Calculations
+dialog set the order of that dialog's rows.</td></tr>
 <tr><td>6</td><td><a href="counters.md">Up/Down counters</a></td><td>Edge
 detection and rate steps.</td></tr>
 <tr><td>7</td><td><a href="timers.md">Timers</a></td><td>Advance by the real

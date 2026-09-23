@@ -21,7 +21,8 @@ a transmit message, or be watched in <a href="monitor.html">Monitor Channels</a>
 <p>To add a math channel, choose <b>Calculations → Math Channels…</b>. The dialog
 lists every row with the columns <b>#</b>, <b>Active</b>, <b>Operation</b>,
 <b>Input A</b>, <b>Input B</b>, <b>Input C</b> and <b>Output Channel</b>, with
-<b>Add…</b>, <b>Change…</b> and <b>Remove</b> buttons at the right. Double-clicking
+<b>Add…</b>, <b>Change…</b>, <b>↑ Move Up</b> / <b>↓ Move Down</b> and <b>Remove</b>
+buttons at the right. Double-clicking
 a row also opens it for change. Operands an operation does not read are shown
 blank, so each row reads like the expression it computes. Changes are committed
 when the dialog is closed with OK; Cancel discards them.</p>
@@ -148,7 +149,8 @@ reads the output of a row <b>above</b> it sees that row's fresh result in the
 same pass, so a chain of calculations laid out in order settles immediately. A
 row that reads the output of a row <b>below</b> it sees the value from the
 <i>previous</i> pass — a one-pass lag. Order dependent chains accordingly: put
-the producer above the consumer.</p>
+the producer above the consumer — <b>↑ Move Up</b> and <b>↓ Move Down</b>
+change a row's place in the list.</p>
 
 <p class="note">The same one-pass rule applies across features: a math row
 reading a condition, counter, timer or integrator output sees the value those

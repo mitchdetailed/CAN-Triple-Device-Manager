@@ -1,4 +1,5 @@
 #include "monitor_channel_select_dialog.h"
+#include "window_memory.h"
 
 #include <QDialogButtonBox>
 #include <QDir>
@@ -82,6 +83,7 @@ MonitorChannelSelectDialog::MonitorChannelSelectDialog(const QList<Channel> &cha
 {
     setWindowTitle(tr("Select Channels"));
     resize(1100, 580);
+    rememberWindowSize(this, QStringLiteral("monitorSelect")); // the default, until the user changes it
 
     m_available = makeList(tr("Available Channels"), QStringLiteral("availableChannels"), this);
     m_selected = makeList(tr("Selected Channels"), QStringLiteral("selectedChannels"), this);

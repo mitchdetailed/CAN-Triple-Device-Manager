@@ -26,6 +26,10 @@ private:
     void onAdd8x8();
     void onChange();
     void onRemove();
+    // ↑ Move Up / ↓ Move Down: swaps the selected table with its neighbour OF
+    // THE SAME KIND — the engine runs the 2x16 tables and then the 8x8 tables,
+    // so a table cannot be moved across that boundary. Follows the row.
+    void onMove(int delta);
     void commit();
 
     // Names other calcs/channels already own — a table output must not collide.
@@ -54,6 +58,8 @@ private:
     QPushButton *m_add8x8Button = nullptr;
     QPushButton *m_changeButton = nullptr;
     QPushButton *m_removeButton = nullptr;
+    QPushButton *m_upButton = nullptr;
+    QPushButton *m_downButton = nullptr;
 };
 
 } // namespace ct

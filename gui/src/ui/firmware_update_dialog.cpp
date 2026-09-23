@@ -59,9 +59,9 @@ QString backupDirectory()
 } // namespace
 
 FirmwareUpdateDialog::FirmwareUpdateDialog(DeviceLink *link, QWidget *parent,
-                                           ReproveFn reproveSend)
+                                           ReproveFn reproveSend, ReproveFn reproveGet)
     : QDialog(parent), m_link(link), m_updater(link, this),
-      m_reproveSend(std::move(reproveSend))
+      m_reproveSend(std::move(reproveSend)), m_reproveGet(std::move(reproveGet))
 {
     setWindowTitle(tr("Update Firmware"));
     setMinimumWidth(560);
@@ -210,6 +210,14 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
 {
     QString error;
     m_statusValid = m_updater.readStatus(&m_status, &error);
+    // The status read is gated on the GET password, and the device's reset
+    // clears every proof — so on a unit that protects Get, the read that
+    // confirms an install failed after a perfectly good update, which was then
+    // reported as "did not answer a status request" with no restore offered.
+    // Prove it again, once, with the key MainWindow kept, and read again. A
+    // link that is really gone fails the retry the same way.
+    if (!m_statusValid && m_reproveGet && m_reproveGet())
+        m_statusValid = m_updater.readStatus(&m_status, &error);
     m_deviceCapacity.reset();
 
     if (!m_statusValid) {

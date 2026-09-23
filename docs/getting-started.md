@@ -4,10 +4,12 @@ This page takes you from a bare device to live values on screen. The program is 
 
 The program opens on a **start page** with nothing loaded. Choose **New Configuration**, **Open Configuration…** (or a file from the **Recent** list beneath), **Connect to Device…** or **Get Configuration from Device**; the same commands are in the **File** and **Online** menus. Until a configuration is open — by New, Open or Get — the commands that edit one are greyed out, and resting the pointer on a greyed item says why. The device-only commands (Device Status, CAN Viewer, Update Firmware, Send Secure Configuration and the rest) work without one.
 
+Every window remembers the size you left it at — the editors for a single row included — and the main window its place on the screen, for the next time it opens. The sizes are kept in `Settings\windows.ini` beside the program, so they are the same for everyone who uses this machine; delete the file to start from the defaults.
+
 ## 1. Connect to the device
 
 To open the serial link, choose **Connect to Device…** on the start page or **Tools → Connection Settings…**:
-- **Port:** lists every serial port with its Windows description. The ST-Link virtual COM port is preselected automatically when its description contains "STLink". Click **Refresh** after plugging the cable in.
+- **Port:** lists every serial port with its Windows description. The highest-numbered ST-LINK port is preselected (or the highest-numbered port when none is an ST-LINK), because Windows numbers a newly attached device after every port it already knows. Click **Refresh** after plugging the cable in.
 - **Baud rate:** defaults to **7372800 (CAN Triple default — ST-Link V3)**. The field is editable, and slower standard rates down to 115200 are listed, but the device firmware runs its UART at 7,372,800 baud — an ST-Link **V3** is required at that rate.
 - Click **Connect**. The label below the buttons changes to "Connected to COM5 @ 7372800", and the main window's status bar shows "Connected: COM5 @ 7372800" on the right. The button becomes **Disconnect**.
 - Click **Test** to confirm the device answers: it requests the device status and shows uptime, per-bus receive/transmit counters, and how many messages, signals, math channels and User Conditions are active.

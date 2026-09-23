@@ -235,11 +235,19 @@ mismatch between the two numbers is the point rather than an oversight.
   Configuration Builder, which reads its source from a file, stay live, so a
   dealer installing packages never needs a document — which is also why the
   start page is a page and not a dialog (offline-first document model; explicit
-  Send/Get to move it to/from the device).
+  Send/Get to move it to/from the device). Every window remembers its last size
+  (`src/ui/window_memory.h`, header-only; `windows/<name>/size` in
+  `{app}\Settings\windows.ini` — machine-wide, a fourth installer-granted
+  folder, emptied on uninstall; the registry only where that folder is not
+  writable —
+  saved on hide or close, bounded to the screen on restore) and the main window
+  its whole geometry (`windows/main/geometry`, QWidget save/restoreGeometry,
+  the first-run centring kept as the fallback); switched on by main() only, so
+  the tests and the --screenshots helper never write it.
 ## Set Access Passwords
 
 **Online → Set Access Passwords…** (`src/model/access_keys.*`,
-`src/ui/access_passwords_dialog.*`) — three protected functions across **six
+`src/ui/access_passwords_dialog.*`) — four protected functions across **seven
 rows**, because Protected Comms has four slots and one unit can accept
 configurations sealed under any of them (several vendors on one device). Send and
 Get are single-slot. Laid out like the same screen in Dash Manager: a list of
@@ -255,6 +263,16 @@ password.
   configuration traffic — no read, write, clear or commit is refused on it. The
   one command it does gate is its own: changing or clearing a Protected Comms
   password requires the current one proved, exactly as Send and Get do.
+- **CAN Viewer** (device firmware 1.0.14) — the raw frame stream and
+  `CMD_INJECT_CAN_FRAME`, and nothing else: decoded values and overrides stay
+  open. The firmware withholds each monitor frame at the point it would leave
+  (`serial_proto_stream_monitor`), so the stream mask need not change. Its key
+  is stored apart from the other three, so adding it cost no store-version bump,
+  which would have cost every unit its configuration and its passwords: a unit
+  updated from 1.0.13 keeps both and reads as having no CAN Viewer password. Its
+  set bit is derived from the key, never stored. READ_ACCESS_KEYS grew a third byte (functions the
+  firmware has — the row is greyed on older units) and a fourth (functions open
+  to this session), which the CAN Viewer uses to ask only once per power cycle.
 
 They live **in the device**, not in the file, which is why the dialog sits under
 Online and needs a connection; what it shows is read back from the unit every
@@ -606,8 +624,8 @@ are offered as the different guarantees they are.
 ```
 Header, 64 bytes, cleartext:
     0   u8[8]  magic          kSecureMagic
-    8   u16    formatVersion  2 or 3 (kSecureFormatV2, kSecureFormatVersion);
-                              a v1 file is refused, not read
+    8   u16    formatVersion  1, 2 or 3 (kSecureFormatV1, kSecureFormatV2,
+                              kSecureFormatVersion); v1 is read, never written
    10   u16    flags          v2: must be 0. v3: kSecureFlagRequiresPassword |
                               kSecureFlagInstallStream | kSecureFlagInstallOnly;
                               any other bit refuses the file
@@ -626,9 +644,18 @@ run. In order, the material is:
                                     multiple of 16 in the final chunk)
 ```
 
-Both checks are exact on purpose. A v1 file is refused by name because it is a
-password-protected package from a format that no longer exists, and refusing it
-beats half-reading it. Undefined flag bits refuse the file because an unused
+Both checks are exact on purpose. **Format 1 is read, never written** (1.2.6).
+From 1.1.15 it was refused, on the reasoning that a package is rebuilt from its
+`.ct3` — which missed that the `.ct3` is itself this container behind a text
+preamble, so every configuration Manager 1.1.1–1.1.14 saved (and every
+pre-update backup it wrote) stopped opening and was reported as "damaged".
+Format 1 is format 2's cryptography exactly — same labels, same wrap, same seal
+— except that its plaintext is `[embedded key][body]` with no policy, and flag
+bit 0 (the only one it defined) folds `PBKDF2(password, salt, iterations, 32)`
+into the wrap mask. A v1 package carries no install policy, so Send Secure
+Configuration refuses it by name and it opens as a document; any other flag bit
+on a v1 header refuses the file. The fixtures in `testLegacyFormat1Files` were
+written by the v1.1.14 writer itself. Undefined flag bits refuse the file because an unused
 field that is merely ignored is a field somebody can flip. The three v3 flags
 are legal to set, so they are handled the other way: format 3 folds the header's
 version and flags into the wrap mask — `HMAC-SHA256(salt, "ct3s/wrap/v3" ||
@@ -784,8 +811,11 @@ The policy holds:
   compared against what the device reports from `CMD_READ_LICENSE`.
 - A **Firmware Key the device must prove** — not optional, and not a string
   compare. An unlicensed unit therefore takes no packages at all.
-- The **access passwords the install sets** as it lands (Send, Get and the four
-  Protected Comms slots, each as a derived key, or a clear).
+- The **access passwords the install sets** as it lands (Send, Get, the four
+  Protected Comms slots and, from firmware 1.0.14, the CAN Viewer, each as a
+  derived key, or a clear). The CAN Viewer write leads the stream, and a unit
+  whose firmware cannot hold that password is refused by the verdict before
+  anything is sent (`DeviceMatchFacts::viewerPasswordSupported`).
 - The **configuration version** the install stamps on the unit.
 
 `packageInstallVerdict()` is the decision, extracted as a pure function so a test

@@ -4,7 +4,7 @@ A math channel computes one operation over up to three inputs (A, B and C) and w
 
 ## The Math Channels dialog
 
-To add a math channel, choose **Calculations → Math Channels…**. The dialog lists every row with the columns **#**, **Active**, **Operation**, **Input A**, **Input B**, **Input C** and **Output Channel**, with **Add…**, **Change…** and **Remove** buttons at the right. Double-clicking a row also opens it for change. Operands an operation does not read are shown blank, so each row reads like the expression it computes. Changes are committed when the dialog is closed with OK; Cancel discards them.
+To add a math channel, choose **Calculations → Math Channels…**. The dialog lists every row with the columns **#**, **Active**, **Operation**, **Input A**, **Input B**, **Input C** and **Output Channel**, with **Add…**, **Change…**, **↑ Move Up** / **↓ Move Down** and **Remove** buttons at the right. Double-clicking a row also opens it for change. Operands an operation does not read are shown blank, so each row reads like the expression it computes. Changes are committed when the dialog is closed with OK; Cancel discards them.
 
 > **Note:** Adding beyond the limit reports "The device supports at most 100 math channels."
 
@@ -84,7 +84,7 @@ example). If C ≤ B, wrapping is disabled.</td></tr>
 
 The device evaluates the configuration in a fixed pass: [constants](constants.md) first, then [lookup tables](tables.md), then the math rows in list order, then [User Conditions](conditions.md). The pass runs at 100 Hz and again when a received frame updates channels.
 
-Within the math list, rows run top to bottom in a single pass. A row that reads the output of a row **above** it sees that row's fresh result in the same pass, so a chain of calculations laid out in order settles immediately. A row that reads the output of a row **below** it sees the value from the *previous* pass — a one-pass lag. Order dependent chains accordingly: put the producer above the consumer.
+Within the math list, rows run top to bottom in a single pass. A row that reads the output of a row **above** it sees that row's fresh result in the same pass, so a chain of calculations laid out in order settles immediately. A row that reads the output of a row **below** it sees the value from the *previous* pass — a one-pass lag. Order dependent chains accordingly: put the producer above the consumer — **↑ Move Up** and **↓ Move Down** change a row's place in the list.
 
 > **Note:** The same one-pass rule applies across features: a math row reading a condition, counter, timer or integrator output sees the value those produced on their last evaluation.
 

@@ -120,11 +120,19 @@ namespace ct {
 
 constexpr int kSecureHeaderBytes = 64;
 constexpr int kSecureMagicBytes = 8;
-// v2 dropped the password-protected mode. A v1 file is REFUSED rather than
-// read: the mode is gone, so a file that depends on it could not be opened
-// anyway, and half-reading one would mean carrying the wrapping code forever to
-// service files nobody is making. Packages are rebuilt from their .ct3, which is
-// where the configuration actually lives.
+// v2 dropped the password-protected mode, and for a while v1 was REFUSED on
+// the reasoning that a package is rebuilt from its .ct3. That reasoning missed
+// that the .ct3 is ITSELF this container behind a text preamble — so every
+// configuration Manager 1.1.1-1.1.14 saved, and every pre-update backup it
+// wrote, stopped opening with 1.1.15 and was reported as "damaged". Format 1 is
+// therefore READ again and never WRITTEN: it is format 2's cryptography exactly
+// (same labels, same wrap without a password, same payload seal) with two
+// differences — the sealed plaintext is [embedded key][body] with no policy,
+// and a password, when flag bit 0 says there is one, folds
+// PBKDF2(password, salt, iterations, 32) into the wrap mask. A v1 package has
+// no install policy, so Send Secure Configuration does not install one; it
+// opens as a document. See openSecureBlob.
+constexpr quint16 kSecureFormatV1 = 1;
 // Format 3 (Manager 1.2.0) keeps a SECTION where format 2 kept the body: an
 // optional sealed install stream (sealed_stream.h) and an optional editable
 // copy that may be wrapped under a package password. A format-2 file still
@@ -170,7 +178,8 @@ extern const unsigned char kSecureMagic[kSecureMagicBytes];
 //
 // ---------------------------------------------------------------------------
 // The password updates are the other half: a package may set the device's Send,
-// Get and Protected Comms passwords as it installs. That reverses an older rule
+// Get, Protected Comms and (firmware 1.0.14) CAN Viewer passwords as it
+// installs. That reverses an older rule
 // which said access passwords must never be a side effect of a Send, and the
 // reversal is deliberate for two reasons.
 //
@@ -264,6 +273,11 @@ struct SecurePackagePolicy
     AccessKey getKey = kNoAccessKey;
     bool setCommsSlot[4] = {false, false, false, false};
     AccessKey commsSlotKey[4] = {kNoAccessKey, kNoAccessKey, kNoAccessKey, kNoAccessKey};
+    // Firmware 1.0.14's CAN Viewer password, one key like Send and Get. Older
+    // firmware cannot hold it, which the install verdict checks before anything
+    // is sent (DeviceMatchFacts::viewerPasswordSupported).
+    bool setViewer = false;
+    AccessKey viewerKey = kNoAccessKey;
 
     bool isValid() const { return key.size() == kLicenseKeyBytes || hasKeyProof(); }
     // Whether installing needs the two hardware round trips at all.
@@ -271,7 +285,7 @@ struct SecurePackagePolicy
     bool changesPasswords() const
     {
         return setSend || setGet || setCommsSlot[0] || setCommsSlot[1] || setCommsSlot[2]
-               || setCommsSlot[3];
+               || setCommsSlot[3] || setViewer;
     }
 
     QJsonObject toJson() const;
@@ -313,10 +327,15 @@ struct InstallVerdict
     // each (countsExceeding). Only judged when the package recorded its counts
     // and the unit's capacity is known; empty otherwise.
     QStringList shortfalls;
+    // The package sets a CAN Viewer password and the unit's firmware predates
+    // it. Fatal on its own, and fixed by a firmware update, not a different
+    // package: the sealed write would be refused mid-stream otherwise.
+    bool viewerPasswordUnsupported = false;
 
     bool ok() const
     {
-        return !noPolicy && !deviceUnlicensed && mismatches.isEmpty() && shortfalls.isEmpty();
+        return !noPolicy && !deviceUnlicensed && mismatches.isEmpty() && shortfalls.isEmpty()
+               && !viewerPasswordUnsupported;
     }
 };
 
@@ -342,6 +361,10 @@ struct DeviceMatchFacts
     // read itself failed, in which case a package's counts are not judged.
     bool capacityKnown = false;
     DeviceCapacity capacity;
+    // Whether the unit's firmware can hold a CAN Viewer password: 1.0.14 or
+    // newer, as READ_ACCESS_KEYS' third byte reports. Read only for a package
+    // that sets one; false otherwise, so an unchecked unit is never assumed to.
+    bool viewerPasswordSupported = false;
 };
 
 InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,
@@ -406,6 +429,10 @@ struct SecureFileInfo
 // True when `path` starts with kSecureMagic. Cheap; used to route Open between
 // the JSON and binary readers, and to stop a .ct3s being parsed as JSON.
 bool isSecureFile(const QString &path);
+// The container format version of an in-memory blob (the bytes after a .ct3's
+// preamble, or a whole .ct3s), or 0 when it does not carry the container magic.
+// Header-only: nothing is decrypted.
+quint16 secureBlobFormatVersion(const QByteArray &blob);
 
 // Read the header only. Enough to know whether to ask for a password before
 // disturbing the open document. Returns false only when the file is unreadable

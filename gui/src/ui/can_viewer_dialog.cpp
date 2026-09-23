@@ -1,6 +1,7 @@
 // Implementation of the CAN Viewer dialog: live raw-frame monitor fed by
 // the device's CMD_MONITOR_STREAM, plus an inject-frame panel.
 #include "can_viewer_dialog.h"
+#include "window_memory.h"
 
 #include <QApplication>
 #include <QPointer>
@@ -118,6 +119,7 @@ CanViewerDialog::CanViewerDialog(DeviceLink *link, QWidget *parent)
     setWindowTitle(tr("CAN Viewer"));
     setModal(false);
     resize(800, 600);
+    rememberWindowSize(this, QStringLiteral("canViewer")); // the default, until the user changes it
 
     auto *mainLayout = new QVBoxLayout(this);
 

@@ -2,6 +2,7 @@
 // Channels, F3). Live grid of channel values fed by the device's always-on
 // value stream.
 #include "monitor_channels_dialog.h"
+#include "window_memory.h"
 
 #include <QBrush>
 #include <QCloseEvent>
@@ -165,6 +166,7 @@ MonitorChannelsDialog::MonitorChannelsDialog(DeviceLink *link, Configuration *co
 {
     setWindowTitle(tr("Monitor Channels"));
     resize(760, 600);
+    rememberWindowSize(this, QStringLiteral("monitorChannels")); // the default, until the user changes it
 
     m_clock.start();
 

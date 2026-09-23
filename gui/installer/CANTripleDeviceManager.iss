@@ -429,6 +429,15 @@ Type: files; Name: "{app}\Firmware\can-triple-*.ctf"
 ; why not beside the standard one); the same argument applies, so the folder
 ; is emptied before this release's variants are laid down.
 Type: files; Name: "{app}\Firmware\Variants\can-triple-*.ctf"
+; The SWD tool as it was named before 2026-08-15, and its Start Menu entry.
+; The rename laid down CANTripleInitialProgramming.exe and deleted nothing, so
+; every install upgraded across it still carries the old exe beside the new one
+; (and, from a release that made it, the "CAN Triple Recovery Tool" shortcut).
+; A customer following an older instruction started a tool that predates every
+; fix to first-time programming since, against this release's firmware.
+; Nothing refers to either name any more.
+Type: files; Name: "{app}\Firmware\CANTripleRecovery.exe"
+Type: files; Name: "{group}\CAN Triple Recovery Tool.lnk"
 
 Type: filesandordirs; Name: "{app}\generic"
 Type: filesandordirs; Name: "{app}\iconengines"
@@ -472,11 +481,13 @@ Type: files; Name: "{autodesktop}\CAN Triple Manager.lnk"
 [Dirs]
 ; THE PRODUCT'S OWN FILE STRUCTURE, and the permission that makes it usable.
 ;
-; The program keeps three libraries beside its own executable:
+; The program keeps three libraries beside its own executable, and one folder
+; of its own machine-wide settings:
 ;
 ;     {app}\Configurations              .ct3 / .ct3s configurations
 ;     {app}\Communications Templates    .ct3t communications templates
 ;     {app}\Channel Lists               .ct3l channel lists (Monitor Channels)
+;     {app}\Settings                    windows.ini -- window sizes, shared by every account
 ;
 ; Program Files grants write to TrustedInstaller, SYSTEM and Administrators and
 ; to nobody else, and the account the program RUNS as is normally none of those
@@ -487,19 +498,20 @@ Type: files; Name: "{autodesktop}\CAN Triple Manager.lnk"
 ; grant below a Save into either folder does not quietly land somewhere else
 ; that works. It simply fails.
 ;
-; users-modify is therefore not decoration. Drop these three lines and the three
-; features that write here stop working for every non-elevated user, which is
+; users-modify is therefore not decoration. Drop these lines and everything
+; that writes here stops working for every non-elevated user, which is
 ; every user. ct::ensureWritableDirectory() probes for exactly this and reports
 ; it by name, so the failure is at least legible -- but it is still a failure.
 ;
-; SCOPE, deliberately: the grant is on these three subdirectories and NOT on
+; SCOPE, deliberately: the grant is on these four subdirectories and NOT on
 ; {app}. Everything else the installer lays down -- the executable, the Qt DLLs,
 ; the firmware payload, the OpenOCD kit -- keeps the default read-only ACL, so a
 ; writable folder here cannot become a way to replace something that gets
 ; loaded or run. None of the folders is on any DLL or executable search path,
 ; and nothing in them is ever executed: a .ct3 and a .ct3t are both encrypted
 ; blob, both parsed by this program's own readers, and a .ct3l is a plain JSON
-; list of channel names, parsed by the same program and run by nothing.
+; list of channel names, parsed by the same program and run by nothing, and
+; windows.ini is a plain settings file of window sizes read through QSettings.
 ;
 ; WHAT IT COSTS, stated rather than discovered: every account on the machine
 ; shares one library and may overwrite or delete another account's files. On a
@@ -507,6 +519,7 @@ Type: files; Name: "{autodesktop}\CAN Triple Manager.lnk"
 Name: "{app}\Configurations"; Permissions: users-modify
 Name: "{app}\Communications Templates"; Permissions: users-modify
 Name: "{app}\Channel Lists"; Permissions: users-modify
+Name: "{app}\Settings"; Permissions: users-modify
 
 [Files]
 ; The entire deploy/ tree, recursively, with no filtering. Every part of it is
@@ -570,7 +583,11 @@ Name: "{app}\Channel Lists"; Permissions: users-modify
 ; through this line, including the licences -- see the note on them above, and
 ; the compile-time guard near the top that refuses to build if the deploy target
 ; failed to stage them.
-Source: "{#MyDeployDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+;
+; Except logs. The programming tool writes its OpenOCD logs beside itself, so
+; one test run from deploy\Firmware leaves bench logs there that the next build
+; would install on every customer's machine. Nothing the payload needs is a .log.
+Source: "{#MyDeployDir}\*"; Excludes: "*.log"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 
 [Icons]
@@ -701,6 +718,10 @@ Type: dirifempty; Name: "{userappdata}\CANTriple"
 Type: dirifempty; Name: "{app}\Configurations"
 Type: dirifempty; Name: "{app}\Communications Templates"
 Type: dirifempty; Name: "{app}\Channel Lists"
+; The settings file is this program's own note to itself, regenerated at the
+; next launch, so it goes -- unlike everything the user made.
+Type: files; Name: "{app}\Settings\windows.ini"
+Type: dirifempty; Name: "{app}\Settings"
 Type: dirifempty; Name: "{app}"
 Type: dirifempty; Name: "{autopf}\{#MyAppVendor}"
 
@@ -731,6 +752,10 @@ Type: dirifempty; Name: "{autopf}\{#MyAppVendor}"
 ;   .ct3t communications templates, .ct3l channel lists
 ;       Written wherever the user chose in a save dialog. The installer has no
 ;       idea where those are and no business guessing.
+;
+;   {app}\Settings\windows.ini
+;       Window sizes. Regenerable, this program's own, and REMOVED -- see the
+;       [UninstallDelete] entry above.
 ;
 ;   {app}\Configurations, {app}\Communications Templates, {app}\Channel Lists
 ;       THE EXCEPTION, and the one worth reading. These three are created by the

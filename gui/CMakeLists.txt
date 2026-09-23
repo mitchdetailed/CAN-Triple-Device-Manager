@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.2.5 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.2.6 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -375,6 +375,7 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/ui/color_item_delegate.h
     src/ui/trimmed_spin_box.h
     src/ui/wheel_guard.h
+    src/ui/window_memory.h
     src/ui/counters_dialog.cpp
     src/ui/counters_dialog.h
     src/ui/import_dbc_dialog.cpp
@@ -608,6 +609,8 @@ if(FIRMWARE_FULL)
 qt_add_executable(test_firmware_link
     test/test_firmware_link.cpp
     test/fake_device_link.h
+    src/model/package_builder.cpp       # the Builder, end to end (testBuilderPackageEndToEnd)
+    src/scripting/script_compiler.cpp   # mapWithScript, which the Builder maps with
     src/protocol/config_transfer.cpp
     src/protocol/firmware_update.cpp
     src/protocol/sealed_install.cpp
@@ -671,7 +674,8 @@ target_include_directories(test_firmware_link PRIVATE ${FIRMWARE_DIR}/include)
 # SerialPort comes in with device_session -> device_link. The test never opens a
 # port; it only needs the wire-format parsers, which live on the same side of
 # the wall as the transport.
-target_link_libraries(test_firmware_link PRIVATE Qt6::Core Qt6::Network Qt6::SerialPort)
+target_link_libraries(test_firmware_link PRIVATE Qt6::Core Qt6::Network Qt6::SerialPort
+    ct_lua) # script_compiler.cpp, for the Builder
 
 # Unit test: the retained-value (PRESERVE) 2-page flash ring, exercised against
 # RAM pages. Pure firmware logic — no Qt needed. Full-tree only, like
@@ -876,6 +880,48 @@ target_link_libraries(test_help_access
     PRIVATE ct_lua Qt6::Widgets Qt6::Help Qt6::SerialPort Qt6::PrintSupport
             Qt6::Core Qt6::Network ct_device_core)
 
+# The Update Firmware window on a unit with a Get password. The status read is
+# gated on Get and a reset forgets every proof, so after a good update the
+# window used to report failure and skip the restore offer. This opens the
+# real window against a fake link that refuses the read until the re-prove
+# callback has run.
+qt_add_executable(test_firmware_update_dialog
+    test/test_firmware_update_dialog.cpp
+    test/fake_device_link.h
+    src/ui/firmware_update_dialog.cpp
+    src/protocol/device_link.cpp
+    src/protocol/device_session.cpp
+    src/protocol/capacity.cpp
+    src/protocol/framer.cpp
+    src/protocol/cobs.cpp
+    src/protocol/firmware_image.cpp
+    src/protocol/firmware_update.cpp
+    src/protocol/config_transfer.cpp
+    src/protocol/asc_log.cpp
+    src/protocol/can_log_export.cpp
+    src/scripting/script_compiler.cpp
+    src/scripting/script_disassembler.cpp
+    src/scripting/script_simulator.cpp
+    src/scripting/script_runner.cpp
+    src/scripting/lua_sandbox.cpp
+    src/scripting/config_bindings.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_firmware_update_dialog PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_firmware_update_dialog
+    PRIVATE ct_lua Qt6::Widgets Qt6::SerialPort Qt6::Core Qt6::Network ct_device_core)
+
 # Channel labels show the unit; channel IDENTITY stays the bare name. The
 # dialogs' read-only "Input :" boxes used to BE the identity — decorating them
 # without separating the two jobs rewrites the configuration to name a channel
@@ -909,6 +955,44 @@ qt_add_executable(test_channel_labels
 )
 target_include_directories(test_channel_labels PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_channel_labels PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
+    ct_device_core) # device_mapper.cpp — see test_roundtrip
+
+# Move Up / Move Down in the seven Calculations dialogs, driven offscreen by
+# the buttons' object names: the row follows the button, the edges refuse, OK
+# commits the new order, Tables never cross from 2x16 into 8x8, and the
+# rename-tracking lists in Constants and Tables move with their rows (a
+# consumer of a moved row must still name it after OK). Same link list as
+# test_channel_labels plus constants_dialog.cpp.
+qt_add_executable(test_calc_order
+    test/test_calc_order.cpp
+    src/ui/math_dialog.cpp
+    src/ui/conditions_dialog.cpp
+    src/ui/counters_dialog.cpp
+    src/ui/timers_dialog.cpp
+    src/ui/integrators_dialog.cpp
+    src/ui/constants_dialog.cpp
+    src/ui/tables_dialog.cpp
+    src/ui/numeric_grid.cpp
+    src/ui/axis_setup_dialog.cpp
+    src/ui/select_channel_dialog.cpp
+    src/ui/edit_channel_dialog.cpp
+    src/model/access_keys.cpp
+    src/model/channel_catalog.cpp
+    src/model/comms_template.cpp
+    src/model/config_lock.cpp
+    src/model/config_report.cpp
+    src/model/frame_layout.cpp
+    src/model/configuration.cpp
+    src/model/dbc_import.cpp
+    src/model/device_mapper.cpp
+    src/protocol/capacity.cpp
+    src/model/secure_file.cpp
+    src/model/config_file.cpp
+    src/model/user_paths.cpp
+    src/model/validation.cpp
+)
+target_include_directories(test_calc_order PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_calc_order PRIVATE Qt6::Widgets Qt6::Core Qt6::Network
     ct_device_core) # device_mapper.cpp — see test_roundtrip
 
 # ct3check - load a configuration, map it, and report what it costs, without a
@@ -957,6 +1041,22 @@ add_executable(CANTripleInitialProgramming
 target_include_directories(CANTripleInitialProgramming PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(CANTripleInitialProgramming PRIVATE ct_device_core) # fw_image
 target_link_options(CANTripleInitialProgramming PRIVATE -static)
+
+# A stand-in for OpenOCD that plays an STM32G473 through a state file: not a
+# test itself (no test_ prefix, so the sweep does not run it), the fixture for
+# the next one.
+add_executable(fake_openocd test/fake_openocd.cpp)
+target_link_options(fake_openocd PRIVATE -static)
+
+# The initial programming tool, end to end against fake_openocd: the prompts,
+# the OpenOCD commands in order, and the chip it leaves behind, for every path
+# including the single-bank switch, which on real silicon is a mass erase.
+qt_add_executable(test_initial_programming
+    test/test_initial_programming.cpp
+)
+target_include_directories(test_initial_programming PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_initial_programming PRIVATE Qt6::Core ct_device_core)
+add_dependencies(test_initial_programming CANTripleInitialProgramming fake_openocd)
 
 # Multiple selection in Communications Setup, driven through the real dialog.
 # The list order is the TRANSMIT order, so a reorder that loses a message or
@@ -1111,6 +1211,15 @@ qt_add_executable(test_hex_input
     test/test_hex_input.cpp
 )
 target_link_libraries(test_hex_input PRIVATE Qt6::Widgets Qt6::Core)
+
+# Windows remember their size between runs, and only when main() has enabled
+# it: a dialog hidden at one size opens at it next time, per key; a tiny saved
+# size is ignored; the main window's whole geometry comes back. Header-only
+# (window_memory.h), so nothing but Qt links; QSettings goes to a scratch dir.
+qt_add_executable(test_window_memory
+    test/test_window_memory.cpp
+)
+target_link_libraries(test_window_memory PRIVATE Qt6::Widgets Qt6::Core)
 
 # The Monitor Channels picker, driven offscreen: which rows >> and << move and
 # in what order, what selection() returns, the Find box, and that an empty

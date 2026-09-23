@@ -1,4 +1,5 @@
 #include "communications_dialog.h"
+#include "window_memory.h"
 
 #include <array>
 
@@ -151,6 +152,7 @@ CommunicationsDialog::CommunicationsDialog(Configuration *config, QWidget *paren
 {
     setWindowTitle(tr("Communications Setup"));
     resize(720, 480);
+    rememberWindowSize(this, QStringLiteral("communications")); // the default, until the user changes it
 
     for (int i = 0; i < 3; ++i)
         m_buses[i] = config->bus[i];

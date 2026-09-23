@@ -1,4 +1,5 @@
 #include "script_editor_dialog.h"
+#include "window_memory.h"
 #include "hex_input.h"
 
 #include <QDialogButtonBox>
@@ -63,6 +64,7 @@ ScriptEditorDialog::ScriptEditorDialog(Configuration &config, QWidget *parent)
 {
     setWindowTitle(tr("Device Script"));
     resize(940, 700);
+    rememberWindowSize(this, QStringLiteral("scriptEditor")); // the default, until the user changes it
     // WINDOW-modal, not application-modal, and that distinction is the whole
     // reason F1 works from here. exec() makes a dialog application-modal by
     // default, which blocks input to EVERY other window in the program — the

@@ -53,11 +53,18 @@
 
 namespace ct {
 
-// The three protected functions, in the order the dialog lists them. The
+// The four protected functions, in the order the dialog lists them. The
 // numeric values are the wire's ACCESS_FN_* and are part of the protocol.
-enum class AccessFunction { SendConfiguration = 0, GetConfiguration = 1, EditProtectedComms = 2 };
+// CanViewer is firmware 1.0.14's: older firmware reports it as unknown
+// (AccessState::knows), and the dialogs say so rather than offering it.
+enum class AccessFunction {
+    SendConfiguration = 0,
+    GetConfiguration = 1,
+    EditProtectedComms = 2,
+    CanViewer = 3,
+};
 
-constexpr int kAccessFunctionCount = 3;
+constexpr int kAccessFunctionCount = 4;
 constexpr int kAccessKeyBytes = 4;
 constexpr int kAccessChallengeBytes = 16;
 constexpr int kAccessVerifierSaltBytes = 16;

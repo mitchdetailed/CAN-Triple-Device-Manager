@@ -12,18 +12,38 @@
 namespace ct {
 namespace device_session {
 
-// v19: which of the three access passwords the device has set. Never carries
-// the keys — the device does not hand those out, which is the point of them.
+// v19: which of the access passwords the device has set. Never carries the
+// keys — the device does not hand those out, which is the point of them.
 struct AccessState {
-    bool set[kAccessFunctionCount] = {false, false, false};
+    bool set[kAccessFunctionCount] = {false, false, false, false};
     bool supported = false; // false on pre-v19 firmware
     // v17: which of the four Protected Comms slots hold a password (bit i =
     // slot i+1). 0 on firmware that predates the slots even when the single
     // password is set, so display code should fall back to isSet().
     quint8 protSlots = 0;
+    // Firmware 1.0.14: the functions the firmware HAS (READ_ACCESS_KEYS's third
+    // byte). Older firmware sends no such byte and has the first three and no
+    // CAN Viewer password, which is what the default says.
+    quint8 knownFunctions = 0x07;
+    // ...and the functions OPEN to this session (the fourth byte): none set,
+    // already proved, or the Firmware Key. Unknown on older firmware, where
+    // isOpen() answers false and a caller asks as it always has.
+    bool openKnown = false;
+    quint8 openFunctions = 0;
 
     bool isSet(AccessFunction fn) const { return set[int(fn)]; }
-    bool any() const { return set[0] || set[1] || set[2]; }
+    bool knows(AccessFunction fn) const { return (knownFunctions & (1u << int(fn))) != 0; }
+    bool isOpen(AccessFunction fn) const
+    {
+        return openKnown && (openFunctions & (1u << int(fn))) != 0;
+    }
+    bool any() const
+    {
+        for (bool s : set)
+            if (s)
+                return true;
+        return false;
+    }
 };
 
 // THE PROTECT COMMUNICATION SEND GATE, as a decision rather than as dialogs.

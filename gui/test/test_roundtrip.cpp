@@ -4494,6 +4494,8 @@ static void testAccessKeys()
           == QStringLiteral("getConfiguration"));
     CHECK(accessFunctionKey(AccessFunction::EditProtectedComms)
           == QStringLiteral("editProtectedComms"));
+    CHECK(int(AccessFunction::CanViewer) == ACCESS_FN_CAN_VIEWER);
+    CHECK(accessFunctionKey(AccessFunction::CanViewer) == QStringLiteral("canViewer"));
     for (int i = 0; i < kAccessFunctionCount; ++i) {
         CHECK(!accessFunctionLabel(all[i]).isEmpty());
         CHECK(!accessFunctionDescription(all[i]).isEmpty());
@@ -4649,6 +4651,159 @@ static void testAccessKeys()
 // in the plaintext must not survive anywhere in the file. Everything else —
 // round trip, wrong password, tampering — is what makes that opacity worth
 // having rather than a party trick.
+// FORMAT 1 — every .ct3 and .ct3s Manager 1.1.1-1.1.14 wrote. From 1.1.15
+// until 1.2.6 the reader refused the container version outright, and the .ct3
+// path reworded the refusal as "damaged": a customer's saved configurations
+// and the Manager's own pre-update backups simply stopped opening. Found by
+// sweeping every .ct3 on a development machine (2026-09-22): all eight that
+// failed were format 1, written by 1.1.1 through 1.1.14.
+//
+// The three fixtures below were written by the v1.1.14 WRITER ITSELF — its
+// secure_file / config_file / config_lock / access_keys compiled from git
+// (e7ba9d6^) into a throwaway generator — so this is the current reader
+// against the real old format, not against a re-creation of it. Body: the
+// CANTripleConfig marker, schema 20 (what v1-era files carry), and a title.
+// Both .ct3s carry the embedded comms key deriveAccessKey("legacy-comms");
+// the protected one's password is "legacy-v1".
+static void testLegacyFormat1Files()
+{
+    static const char kCt3[] =
+        "43414e20547269706c6520446576696365204d616e6167657220636f6e66696775726174696f6e0d0a666f726d617420"
+        "320d0a736368656d612032300d0a7772697474656e2d627920312e312e31340d0a1a0000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000008ac7b21d0d0a1a0a01000000d3e1d6f0"
+        "aca614b288e12f7bb972106650340300100100008b0000005dced75d4ce452308b02e1ce2748a8fd40982578bb3f8634"
+        "e7dcbfca1e8a811ac04564371b0d9d7845a882652be5847a0f4720b59b5f710476e9fc4bf2791df56f6caaf34c9e2eb2"
+        "0af733b080ad6a4244118f0ba32a693d87fcb6066d77d0fa1b1901f4818d27aef75d33acc1314e39a0953fcb7fd54b95"
+        "54744138dc097fb91b48868c52be7b26ec0c5e7925d49d927a409ff3b1f517158b6066d6137f21a7ef5efeca8fae7661"
+        "c725eb23853c20a1423ebdfe4204ebb0c30a19fd3de4fd3b15efa43b4d8e3b27d094a97ff2d20071b06523059bb8be0a"
+        "fbd67465ccbea5194a140d5fd4b43ca088d6f111fc2ef3e188cd5b0000000000ab555399249519d1c7c89ea6a9ba9037"
+        "f8223393a5b4e8d8c6bc1b0017399564b66fbbf399d1fa51c1bc6defa4d13dab";
+    static const char kOpenCt3s[] =
+        "8ac7b21d0d0a1a0a010000006c99286f9efde6be4e8a6a2c7a9db5d450340300100100008b000000c3d5be85a5e535d4"
+        "48c196c6eb41810ea739ec5be70e688d42d97192a2da6dca56fd547d167fd19a9f9e90afcba74e531cfa7975ae784868"
+        "6ec7bca4990a243d7e197eaa8b3c0e49b6d8eccea26da1c5e445a06602f29e5db6b41bda52f44dafc3b3cecc92c9839f"
+        "720cd903f575b67c885d7986de548021f1ce860cf1564871cece1de93d4e384a7a2e436b38548ea7bacb411be2522082"
+        "ff0e8aab973b70a36a6b3d0a1fe75d6b0f2c8706bcc47a29a2be8c552132237fcee48f57b94a066c3a95be906ce723cf"
+        "6cf8b130167123a955bdced2b2727970cd5695e44ebe7973e34eac00000000004949c484ce3a87ff6006678de8803aa6"
+        "0f63c5f43117de607f9f47f513e7da198f3e813d308406a89f6a93b632b254e50b3b50c4b50dd6bc8f69a5d3ac177e2e";
+    static const char kPasswordCt3s[] =
+        "8ac7b21d0d0a1a0a01000100ef2a8e50b58914c9e2b227cdc2ef0db650340300400100008b0000005c97f3344869aa6b"
+        "c45c109b3b53e7efe8877902b68c1c0c42ee88b5a563ffb15f255af2f1fef34e38f5816d6576598bf2df3a4b9d3687bc"
+        "fb12bcb2daf039c2717dca0353e41681ee6c0fef8a63ea72b67961f6a50ddf1e9596450055f63bcd4382f0274c6f26cf"
+        "fd639bd9d24ac8df9d076ad6749ef5fe2228fbdd0f7f7d8960aa792d0aab24172ea2c5adcfda2fbeb2d6360000000000"
+        "a070951d5f6534375802371ab269e9200a3fa5249114a95a93b573444dae473afcc4591de6885ee5d9e136a062adbb06"
+        "ab4b4d2e27d4465f7e0b2d31a9a059b65092998446b9b8eead663931733523a7e12515cc21a01aa870038c6ceae997e6"
+        "5c89a7b3a2f96e51fc715de04b1723b9d3110a5dafe45744fb14e2cc7ffa0ce421a1dc6c37a29fe917443b50a6ecd12d"
+        "df6a009edd50b5f363934d37e2764522bb15ec49a4359ac434816f0441fd42efb362f1fdb7b266980caf3f88603f98cb";
+
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const auto put = [&dir](const char *name, const char *hex) {
+        const QString path = dir.filePath(QString::fromLatin1(name));
+        QFile f(path);
+        if (f.open(QIODevice::WriteOnly))
+            f.write(QByteArray::fromHex(QByteArray(hex)));
+        return path;
+    };
+    const QString ct3 = put("legacy-v1.ct3", kCt3);
+    const QString openCt3s = put("legacy-v1-open.ct3s", kOpenCt3s);
+    const QString lockedCt3s = put("legacy-v1-password.ct3s", kPasswordCt3s);
+    const QString title = QStringLiteral("Legacy format-1 fixture");
+    const AccessKey embedded = deriveAccessKey(QStringLiteral("legacy-comms"));
+    CHECK(embedded == AccessKey(0x5BCD5881u)); // what the generator printed
+    QString err;
+
+    // ---- the .ct3: a plain configuration, no password, ever ----
+    {
+        Configuration::FilePeek peek;
+        CHECK(Configuration::peekFile(ct3, &peek, &err));
+        CHECK(!peek.secure && !peek.requiresPassword && !peek.installOnly);
+        Configuration cfg;
+        CHECK(cfg.loadFromFile(ct3, &err));
+        if (!err.isEmpty())
+            std::printf("  legacy .ct3 load said: %s\n", qPrintable(err));
+        CHECK(cfg.configTitle() == title);
+    }
+
+    // ---- the open .ct3s: opens with no password, embedded key intact ----
+    {
+        SecureFileInfo info;
+        CHECK(peekSecureFile(openCt3s, &info, &err));
+        CHECK(info.formatVersion == kSecureFormatV1 && !info.requiresPassword
+              && !info.installOnly && !info.hasInstallStream);
+        QByteArray body;
+        CHECK(readSecureFile(openCt3s, &body, &info, &err));
+        CHECK(body.contains("Legacy format-1 fixture"));
+        CHECK(info.embeddedCommsKey == embedded);
+        CHECK(!info.policy.isValid()); // format 1 carries no install policy
+        Configuration cfg;
+        CHECK(cfg.loadFromFile(openCt3s, &err));
+        CHECK(cfg.configTitle() == title);
+        CHECK(cfg.commsKey() == embedded);
+        // Not installable: no stream, and Send Secure refuses format 1 by name.
+        SecureFileInfo install;
+        CHECK(!readSecureInstall(openCt3s, &install, &err));
+    }
+
+    // ---- the protected .ct3s: the v1 password wrap, reproduced exactly ----
+    {
+        Configuration::FilePeek peek;
+        CHECK(Configuration::peekFile(lockedCt3s, &peek, &err));
+        CHECK(peek.secure && peek.requiresPassword && !peek.installOnly);
+        Configuration none;
+        CHECK(!none.loadFromFile(lockedCt3s, &err));
+        CHECK(err.contains(QStringLiteral("requires a password")));
+        Configuration wrong;
+        CHECK(!wrong.loadFromFile(lockedCt3s, &err, QStringLiteral("not-it")));
+        CHECK(err.contains(QStringLiteral("not correct")));
+        Configuration right;
+        CHECK(right.loadFromFile(lockedCt3s, &err, QStringLiteral("legacy-v1")));
+        CHECK(right.configTitle() == title);
+        CHECK(right.commsKey() == embedded);
+    }
+
+    // ---- what format 1 never had stays refused ----
+    {
+        // A flag format 1 never defined (format 3's install-only bit).
+        QByteArray raw = QByteArray::fromHex(QByteArray(kOpenCt3s));
+        raw[10] = char(0x04);
+        const QString path = dir.filePath(QStringLiteral("v1-bad-flag.ct3s"));
+        QFile f(path);
+        CHECK(f.open(QIODevice::WriteOnly));
+        f.write(raw);
+        f.close();
+        QByteArray body;
+        CHECK(!readSecureFile(path, &body, nullptr, &err));
+        // And a container from a NEWER Manager inside a .ct3 says so, rather
+        // than calling the file damaged.
+        QByteArray newer = QByteArray::fromHex(QByteArray(kCt3));
+        newer[kConfigPreambleBytes + 8] = char(kSecureFormatVersion + 1);
+        const QString npath = dir.filePath(QStringLiteral("newer.ct3"));
+        QFile nf(npath);
+        CHECK(nf.open(QIODevice::WriteOnly));
+        nf.write(newer);
+        nf.close();
+        Configuration cfg;
+        CHECK(!cfg.loadFromFile(npath, &err));
+        CHECK(err.contains(QStringLiteral("newer version")));
+    }
+
+    // ---- and a Save writes the CURRENT format, never format 1 ----
+    {
+        Configuration cfg;
+        CHECK(cfg.loadFromFile(ct3, &err));
+        const QString saved = dir.filePath(QStringLiteral("resaved.ct3"));
+        CHECK(cfg.saveToFile(saved, &err));
+        QFile f(saved);
+        CHECK(f.open(QIODevice::ReadOnly));
+        const QByteArray raw = f.readAll();
+        CHECK(secureBlobFormatVersion(raw.mid(kConfigPreambleBytes)) >= kSecureFormatV2);
+        Configuration back;
+        CHECK(back.loadFromFile(saved, &err));
+        CHECK(back.configTitle() == title);
+    }
+}
+
 static void testSecureFile()
 {
     QTemporaryDir dir;
@@ -4767,6 +4922,10 @@ static void testSecureFile()
         po.policy.getKey = kNoAccessKey;
         po.policy.setCommsSlot[2] = true;
         po.policy.commsSlotKey[2] = slotKey;
+        // Firmware 1.0.14's CAN Viewer password rides the same way.
+        const AccessKey viewerKey = deriveAccessKey(QStringLiteral("viewer-secret"));
+        po.policy.setViewer = true;
+        po.policy.viewerKey = viewerKey;
 
         CHECK(writeSecureFile(packaged, body, po, &err));
 
@@ -4794,7 +4953,20 @@ static void testSecureFile()
         CHECK(got.setCommsSlot[2]);
         CHECK(got.commsSlotKey[2] == slotKey);
         CHECK(!got.setCommsSlot[3]);
+        CHECK(got.setViewer);
+        CHECK(got.viewerKey == viewerKey);
         CHECK(got.changesPasswords());
+        {
+            // The CAN Viewer password alone is a password change, and a policy
+            // that leaves it alone does not name it.
+            SecurePackagePolicy only;
+            only.setViewer = true;
+            CHECK(only.changesPasswords());
+            SecurePackagePolicy none;
+            CHECK(!none.changesPasswords());
+            CHECK(!none.toJson().contains(QStringLiteral("viewerKey")));
+            CHECK(!SecurePackagePolicy::fromJson(none.toJson()).setViewer);
+        }
 
         // NOT READABLE WITHOUT OPENING THE FILE. A peek reads the cleartext
         // header alone, and the policy is sealed with the body — so a package
@@ -4945,6 +5117,37 @@ static void testSecureFile()
         CHECK(packageInstallVerdict(fleetOnly, mute).ok());
     }
 
+    // ---- a CAN Viewer password needs firmware that can hold one ----
+    // Firmware before 1.0.14 knows three access functions. A package that sets
+    // the fourth is refused BEFORE anything is sent, on its own flag, because
+    // the fix is a firmware update rather than a different package or unit.
+    {
+        SecurePackagePolicy viewer;
+        viewer.key = deriveLicenseKey(QStringLiteral("fleet master phrase"));
+        viewer.setViewer = true;
+        viewer.viewerKey = deriveAccessKey(QStringLiteral("viewer-secret"));
+
+        DeviceMatchFacts older;
+        older.licensed = true; // viewerPasswordSupported left false
+        InstallVerdict v = packageInstallVerdict(viewer, older);
+        CHECK(!v.ok());
+        CHECK(v.viewerPasswordUnsupported);
+        CHECK(!v.deviceUnlicensed && v.mismatches.isEmpty() && v.shortfalls.isEmpty());
+
+        DeviceMatchFacts current = older;
+        current.viewerPasswordSupported = true;
+        CHECK(packageInstallVerdict(viewer, current).ok());
+
+        // A clear is still a CAN Viewer password instruction, so it needs the
+        // same firmware; a package that leaves it alone never asks.
+        SecurePackagePolicy clearIt = viewer;
+        clearIt.viewerKey = kNoAccessKey;
+        CHECK(packageInstallVerdict(clearIt, older).viewerPasswordUnsupported);
+        SecurePackagePolicy untouched;
+        untouched.key = viewer.key;
+        CHECK(packageInstallVerdict(untouched, older).ok());
+    }
+
     // ---- the sealed install stream, and the format-3 container around it ----
     //
     // The Builder's half (buildSealedStream) and the device's half (seal_open,
@@ -5018,6 +5221,8 @@ static void testSecureFile()
         sealedPolicy.configVersion = 9;
         sealedPolicy.setSend = true;
         sealedPolicy.sendKey = deriveAccessKey(QStringLiteral("new-send-secret"));
+        sealedPolicy.setViewer = true;
+        sealedPolicy.viewerKey = deriveAccessKey(QStringLiteral("viewer-secret"));
         sealedPolicy.keysWithheld = true;
         sealedPolicy.keyProofNonce = QByteArray(kAccessChallengeBytes, char(0x5A));
         sealedPolicy.keyProofMac = licenseProveExpected(fleetKey, sealedPolicy.keyProofNonce);
@@ -5029,9 +5234,11 @@ static void testSecureFile()
             CHECK(!pj.contains(QStringLiteral("key")));
             CHECK(!pj.contains(QStringLiteral("sendKey"))); // withheld
             CHECK(pj.contains(QStringLiteral("passwordUpdates")));
+            CHECK(!pj.contains(QStringLiteral("viewerKey"))); // withheld too
             const SecurePackagePolicy back = SecurePackagePolicy::fromJson(pj);
             CHECK(back.keysWithheld && back.setSend && !back.setGet);
             CHECK(back.sendKey == kNoAccessKey); // the key did not travel
+            CHECK(back.setViewer && back.viewerKey == kNoAccessKey);
             CHECK(back.hasKeyProof() && back.keyProofMac == sealedPolicy.keyProofMac);
         }
         const QString sealedPath = dir.filePath(QStringLiteral("sealed.ct3s"));
@@ -5052,7 +5259,7 @@ static void testSecureFile()
         CHECK(readSecureInstall(sealedPath, &inst, &err));
         CHECK(inst.hasInstallStream && inst.installStream == stream);
         CHECK(inst.policy.isValid() && inst.policy.key.isEmpty() && inst.policy.hasKeyProof());
-        CHECK(inst.policy.keysWithheld && inst.policy.setSend);
+        CHECK(inst.policy.keysWithheld && inst.policy.setSend && inst.policy.setViewer);
         CHECK(inst.policy.sendKey == kNoAccessKey);
         CHECK(inst.policy.matchModel == QStringLiteral("CAN Triple TD"));
         CHECK(inst.policy.configVersion == 9);
@@ -5133,8 +5340,10 @@ static void testSecureFile()
     // where it should not be is the licence match at install, which is a
     // different guarantee from being unreadable and must not be mistaken for it.
     {
-        // A v1 file is refused rather than read \u2014 there is no wrapping code left
-        // to service one. Forged by hand because no writer produces v1 any more.
+        // A CURRENT file relabelled as v1 is refused: format 3 binds its version
+        // into the wrap mask, so editing the header byte derives the wrong key
+        // and the tag fails. (Genuine v1 files are read — see
+        // testLegacyFormat1Files, whose fixtures the v1.1.14 writer produced.)
         const QString old = dir.filePath(QStringLiteral("v1.ct3s"));
         QByteArray legacy;
         {
@@ -7672,6 +7881,7 @@ int main(int argc, char *argv[])
     testCryptoPrimitives();
     testAccessKeys();
     testSecureFile();
+    testLegacyFormat1Files();
     testBinaryConfigFormat();
     testTimerTriggerMigration();
     testRenamingAMessageRepointsWhatNamedIt();

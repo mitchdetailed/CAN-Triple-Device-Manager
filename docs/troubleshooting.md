@@ -3,7 +3,7 @@
 ## Serial connection problems
 
 The device talks over the ST-Link's virtual COM port at **7,372,800 baud** — an ST-Link **V3** is required at that rate. In **Tools → Connection Settings…**:
-- Click **Refresh** after plugging in; the ST-Link port is preselected when its description contains "STLink".
+- Click **Refresh** after plugging in; the highest-numbered ST-LINK port is preselected, which is nearly always the device just attached. Pick another if it is not.
 - "Failed to open COMx" usually means another program holds the port — close other terminals, loggers or a second copy of this program.
 - After connecting, click **Test**. If the device answers, the link is fine and any remaining problem is elsewhere; if it times out, check the cable and that the CAN Triple firmware (not a bootloader) is running.
 
@@ -42,8 +42,13 @@ cable or the serial line.</td></tr>
 <td>An index outside the device's table — normally prevented by validation
 before a send.</td></tr>
 <tr><td>flash write failed (0x05)</td>
-<td>The device could not write its flash during Save to Flash. Retry; if it
-persists the unit needs attention.</td></tr>
+<td>The device could not write its flash, during Save to Flash or a firmware
+update. Retry once. If every firmware update fails this way, the unit's flash
+is almost certainly set to single-bank mode, where the firmware refuses updates
+and licences. Run the <b>CAN Triple Initial Programming Tool</b> from the Start
+Menu: it switches the flash to dual-bank and programs the firmware. The switch
+erases the stored configuration, so use <b>Get Configuration</b> and save it
+first. If it persists on a dual-bank unit, the unit needs attention.</td></tr>
 <tr><td>bus busy (0x06)</td>
 <td>The device could not act on a bus command at that moment. Retry.</td></tr>
 <tr><td>the device configuration is password protected (0x07)</td>

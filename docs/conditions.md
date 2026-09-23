@@ -10,7 +10,7 @@ A User Condition is a boolean logic channel: it evaluates up to three comparison
 
 ## The User Conditions dialog
 
-To add a User Condition, choose **Calculations → User Conditions…**. The dialog lists every row with the columns **#**, **Active**, **Condition** and **Output channel**, with **Add…**, **Change…** and **Remove** buttons at the right. The **Condition** column shows the expression exactly as the device evaluates it, brackets included. Double-clicking a row opens it for change. OK commits the changes; Cancel discards them.
+To add a User Condition, choose **Calculations → User Conditions…**. The dialog lists every row with the columns **#**, **Active**, **Condition** and **Output channel**, with **Add…**, **Change…**, **↑ Move Up** / **↓ Move Down** and **Remove** buttons at the right. The **Condition** column shows the expression exactly as the device evaluates it, brackets included. Double-clicking a row opens it for change. OK commits the changes; Cancel discards them.
 
 > **Note:** Adding beyond the limit reports "The device supports at most 200 User Conditions."
 

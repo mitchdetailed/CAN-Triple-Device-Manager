@@ -4,7 +4,7 @@
 
 A timer accumulates elapsed time, in seconds, into a generated [channel](channels.md) while it is running. It is started and stopped by **comparisons** — "Engine RPM &gt; 4000", or "this message was received" — each firing on the **rising edge** of that comparison becoming true. A [User Condition](conditions.md) output still works as a trigger, and is what you want when the test needs more than one comparison joined with AND/OR; a single comparison no longer needs one. Timers are evaluated on the device at 100 Hz, and their outputs can feed [math channels](math-channels.md), other calculations, transmit messages, or be watched in [Monitor Channels](monitor.md).
 
-To edit timers, choose **Calculations → Timers…**. The dialog lists every timer with columns **#**, **Active**, **Output**, **Start**, **Stop** and **Mode** (**Count up** or **Count down**). Use **Add…**, **Change…** (or double-click a row) and **Remove**. The device supports at most **50** timers. Changes are written into the configuration only when you close the dialog with **OK**; **Cancel** discards them.
+To edit timers, choose **Calculations → Timers…**. The dialog lists every timer with columns **#**, **Active**, **Output**, **Start**, **Stop** and **Mode** (**Count up** or **Count down**). Use **Add…**, **Change…** (or double-click a row), **↑ Move Up** / **↓ Move Down** and **Remove**. The device supports at most **50** timers. Changes are written into the configuration only when you close the dialog with **OK**; **Cancel** discards them.
 
 ## To add a timer
 1. Choose **Calculations → Timers…** and click **Add…**. The **Timer** editor opens with two tabs.

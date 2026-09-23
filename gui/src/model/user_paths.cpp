@@ -17,6 +17,7 @@ const QLatin1String kProduct("CAN Triple Device Manager");
 const QLatin1String kConfigurations("Configurations");
 const QLatin1String kCommsTemplates("Communications Templates");
 const QLatin1String kChannelLists("Channel Lists");
+const QLatin1String kSettings("Settings");
 const QLatin1String kFirmwareImages("Firmware");
 const QLatin1String kFirmwareBackups("Firmware Update Backups");
 const QLatin1String kDeviceScripts("Scripts");
@@ -41,6 +42,11 @@ QString commsTemplatesDirectory()
 QString channelListsDirectory()
 {
     return programRoot() + QLatin1Char('/') + kChannelLists;
+}
+
+QString settingsDirectory()
+{
+    return programRoot() + QLatin1Char('/') + kSettings;
 }
 
 QString firmwareImagesDirectory()

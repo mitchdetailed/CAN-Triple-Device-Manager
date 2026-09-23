@@ -1073,14 +1073,23 @@ constexpr int ACCESS_CHALLENGE_LEN   = 16;
 constexpr uint8_t ACCESS_FN_SEND       = 0;
 constexpr uint8_t ACCESS_FN_GET        = 1;
 constexpr uint8_t ACCESS_FN_EDIT_COMMS = 2;
-constexpr int ACCESS_FN_COUNT        = 3;
+// Firmware 1.0.14: the CAN Viewer password — raw frame stream and injection.
+// Its key is NOT in AccessKeyRecord (it sits in the flash header's tail, so the
+// store layout did not move), hence the record's own count below.
+constexpr uint8_t ACCESS_FN_CAN_VIEWER = 3;
+constexpr int ACCESS_FN_COUNT        = 4;
+constexpr int ACCESS_FN_RECORD_KEYS  = 3; // functions keyed in AccessKeyRecord.keys
 constexpr uint8_t ACCESS_MASK_SEND       = 1u << ACCESS_FN_SEND;
 constexpr uint8_t ACCESS_MASK_GET        = 1u << ACCESS_FN_GET;
 constexpr uint8_t ACCESS_MASK_EDIT_COMMS = 1u << ACCESS_FN_EDIT_COMMS;
+constexpr uint8_t ACCESS_MASK_CAN_VIEWER = 1u << ACCESS_FN_CAN_VIEWER;
+// READ_ACCESS_KEYS's third byte on 1.0.14: every function the firmware has.
+constexpr uint8_t ACCESS_FN_KNOWN_MASK =
+    ACCESS_MASK_SEND | ACCESS_MASK_GET | ACCESS_MASK_EDIT_COMMS | ACCESS_MASK_CAN_VIEWER;
 
 struct AccessKeyRecord {
     uint8_t set_mask;                              // ACCESS_MASK_*; 0 = no passwords
-    uint8_t keys[ACCESS_FN_COUNT][ACCESS_KEY_LEN]; // never read back off the device
+    uint8_t keys[ACCESS_FN_RECORD_KEYS][ACCESS_KEY_LEN]; // never read back off the device
     // v17: Protected Comms slots 2..4 (slot 1 is keys[ACCESS_FN_EDIT_COMMS]).
     // An all-zero key is an empty slot; any non-empty slot proves the function.
     uint8_t prot_comms_extra[3][ACCESS_KEY_LEN];

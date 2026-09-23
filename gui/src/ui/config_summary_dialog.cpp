@@ -1,4 +1,5 @@
 #include "config_summary_dialog.h"
+#include "window_memory.h"
 
 #include <QDialogButtonBox>
 #include <QFile>
@@ -24,6 +25,7 @@ ConfigSummaryDialog::ConfigSummaryDialog(Configuration *config, QWidget *parent)
 {
     setWindowTitle(tr("Config Summary — %1").arg(config->displayName()));
     resize(900, 650);
+    rememberWindowSize(this, QStringLiteral("configSummary")); // the default, until the user changes it
 
     auto *layout = new QVBoxLayout(this);
 

@@ -45,12 +45,13 @@ Opening the Firmware License Manager connects to the device first (Connection Se
 
 ## Set Access Passwords…
 
-**Online → Set Access Passwords…** manages the passwords that live in the device, which is why the dialog needs a connected CAN Triple. There are three functions, and Protected Comms holds four slots, so the list shows six rows.
+**Online → Set Access Passwords…** manages the passwords that live in the device, which is why the dialog needs a connected CAN Triple. There are four functions, and Protected Comms holds four slots, so the list shows seven rows. The CAN Viewer password needs device firmware 1.0.14 or newer; on older firmware its row is shown greyed out, with a note saying so.
 
 <table>
 <tr><th>Function</th><th>Without the password</th></tr>
 <tr><td>Send a Configuration</td><td>The device refuses to have its configuration replaced.</td></tr>
 <tr><td>Get a Configuration</td><td>The device refuses to have its configuration read back.</td></tr>
+<tr><td>CAN Viewer</td><td>The device sends no raw CAN frames to the CAN Viewer and refuses frames injected from it. The viewer asks for this password when it opens. Monitor Channels, which shows decoded values, is not affected.</td></tr>
 <tr><td>Protected Comms (Slots 1–4)</td><td>The send gate has nothing to confirm. A configuration containing Protect Communication messages goes only to a unit that confirms the matching password, and a unit with none set cannot confirm anything. Confirming any of the four slots satisfies the gate, which lets one unit accept sealed configurations from several suppliers without any of them sharing a password.</td></tr>
 </table>
 
@@ -86,7 +87,9 @@ The three licence matches are exact. The two hardware matches name one unit rath
 
 ### Set device passwords on install
 
-Six more options, one per access password: Send, Get, and the four Protected Comms slots. A ticked box with a value sets that password as the package installs; **a ticked box with an empty field removes it**; unticked leaves it alone. Those are three different instructions and the file records them separately.
+Seven more options, one per access password: Send, Get, the four Protected Comms slots, and the CAN Viewer. A ticked box with a value sets that password as the package installs; **a ticked box with an empty field removes it**; unticked leaves it alone. Those are three different instructions and the file records them separately.
+
+The CAN Viewer password needs device firmware 1.0.14 or newer. The Manager will not install a package that sets or removes it on an older unit: it stops before anything is sent and says to update the unit's firmware first.
 
 The password writes ride inside the sealed install stream, ahead of the configuration, so the device applies them because the stream is sealed under its own Firmware Key — the master key described above. Without that, a package could only ever provision a blank unit. The policy records *which* passwords the package sets; the keys themselves are in the stream, where only the device can reach them.
 

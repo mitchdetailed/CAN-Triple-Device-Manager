@@ -22,6 +22,9 @@ private:
     void onAdd();
     void onChange();
     void onRemove();
+    // ↑ Move Up / ↓ Move Down: swaps the selected row with its neighbour in the
+    // working copy and follows it. Row order is evaluation order.
+    void onMove(int delta);
     void updateButtons();
 
     Configuration *m_config;
@@ -30,6 +33,8 @@ private:
     QPushButton *m_addButton;
     QPushButton *m_changeButton;
     QPushButton *m_removeButton;
+    QPushButton *m_upButton;
+    QPushButton *m_downButton;
 };
 
 } // namespace ct

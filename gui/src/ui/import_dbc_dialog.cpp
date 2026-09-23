@@ -1,4 +1,5 @@
 #include "import_dbc_dialog.h"
+#include "window_memory.h"
 
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -236,6 +237,7 @@ ImportDbcDialog::ImportDbcDialog(Configuration *config, const DbcFile &dbc,
 {
     setWindowTitle(tr("Import DBC — %1").arg(sourceName));
     resize(820, 620);
+    rememberWindowSize(this, QStringLiteral("importDbc")); // the default, until the user changes it
 
     auto *layout = new QVBoxLayout(this);
 

@@ -87,8 +87,9 @@ void testBuilderRefusesWhatCannotInstall()
         return;
 
     // Creation order: source, five match fields, the key, the package password
-    // and its confirmation, six password
-    // fields. Cross-checked by what is visible so a reordered form is caught.
+    // and its confirmation, seven password fields (Send, Get, the four Protected
+    // Comms slots, the CAN Viewer). Cross-checked by what is visible so a
+    // reordered form is caught.
     //
     // The Package version QSpinBox owns a QLineEdit of its own, which
     // findChildren() also returns — the first run of this test counted twelve
@@ -97,13 +98,14 @@ void testBuilderRefusesWhatCannotInstall()
     for (QLineEdit *e : dlg.findChildren<QLineEdit *>())
         if (!(e->parent() && e->parent()->inherits("QAbstractSpinBox")))
             edits << e;
-    CHECK(edits.size() == 15);
-    if (edits.size() != 15)
+    CHECK(edits.size() == 16);
+    if (edits.size() != 16)
         return;
     QLineEdit *source = edits[0];
     QLineEdit *matchModel = edits[2];
     QLineEdit *key = edits[6];
     QLineEdit *sendPassword = edits[9];
+    QLineEdit *viewerPassword = edits[15];
     CHECK(source->placeholderText() == QStringLiteral("Choose a .ct3 to package"));
     CHECK(key->echoMode() == QLineEdit::Password);
     CHECK(key->isEnabled()); // the one secret with no checkbox: always live
@@ -153,6 +155,23 @@ void testBuilderRefusesWhatCannotInstall()
     CHECK(!build->isEnabled());
     CHECK(labelStartingWith(&dlg, QStringLiteral("Send Config Password:")) != nullptr);
     sendPassword->setText(QStringLiteral("a-long-enough-fleet-password"));
+    CHECK(build->isEnabled());
+
+    // The CAN Viewer row (firmware 1.0.14), last in the form: gated behind its
+    // checkbox and held to the same password policy as the rest.
+    QCheckBox *viewerCheck = checkboxNamed(&dlg, QStringLiteral("Update CAN Viewer Password:"));
+    CHECK(viewerCheck != nullptr);
+    if (!viewerCheck)
+        return;
+    CHECK(viewerPassword->echoMode() == QLineEdit::Password);
+    CHECK(!viewerPassword->isEnabled());
+    viewerCheck->setChecked(true);
+    CHECK(viewerPassword->isEnabled());
+    CHECK(build->isEnabled()); // empty = remove the CAN Viewer password
+    viewerPassword->setText(QStringLiteral("a"));
+    CHECK(!build->isEnabled());
+    CHECK(labelStartingWith(&dlg, QStringLiteral("CAN Viewer Password:")) != nullptr);
+    viewerPassword->setText(QStringLiteral("a-long-enough-viewer-password"));
     CHECK(build->isEnabled());
 
     // The package version: the one numeric input, bounded to the wire's u16.
@@ -251,8 +270,8 @@ void testBuilderHardwareMatches()
     for (QLineEdit *e : dlg.findChildren<QLineEdit *>())
         if (!(e->parent() && e->parent()->inherits("QAbstractSpinBox")))
             edits << e;
-    CHECK(edits.size() == 15);
-    if (edits.size() != 15)
+    CHECK(edits.size() == 16);
+    if (edits.size() != 16)
         return;
     QLineEdit *source = edits[0];
     QLineEdit *mcuId = edits[4];

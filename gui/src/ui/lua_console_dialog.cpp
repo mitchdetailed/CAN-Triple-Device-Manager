@@ -1,4 +1,5 @@
 #include "lua_console_dialog.h"
+#include "window_memory.h"
 
 #include <QCloseEvent>
 #include <QCoreApplication>
@@ -97,6 +98,7 @@ LuaConsoleDialog::LuaConsoleDialog(Configuration &config, QWidget *parent)
 {
     setWindowFlag(Qt::WindowMinMaxButtonsHint, true);
     resize(780, 620);
+    rememberWindowSize(this, QStringLiteral("luaConsole")); // the default, until the user changes it
     buildUi();
     updateTitle();
 }

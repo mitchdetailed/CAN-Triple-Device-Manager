@@ -20,6 +20,7 @@ namespace {
 static_assert(int(AccessFunction::SendConfiguration) == ACCESS_FN_SEND, "wire order");
 static_assert(int(AccessFunction::GetConfiguration) == ACCESS_FN_GET, "wire order");
 static_assert(int(AccessFunction::EditProtectedComms) == ACCESS_FN_EDIT_COMMS, "wire order");
+static_assert(int(AccessFunction::CanViewer) == ACCESS_FN_CAN_VIEWER, "wire order");
 static_assert(kAccessFunctionCount == ACCESS_FN_COUNT, "wire order");
 static_assert(kAccessKeyBytes == ACCESS_KEY_LEN, "wire size");
 static_assert(kAccessChallengeBytes == ACCESS_CHALLENGE_LEN, "wire size");
@@ -180,6 +181,15 @@ bool parseAccessState(const QByteArray &payload, AccessState *out)
     // fall back to the single-password reading of isSet().
     if (payload.size() >= 2)
         out->protSlots = quint8(payload[1]);
+    // Firmware 1.0.14: the functions it has, then the ones open to this
+    // session. Absent on older firmware; the defaults say what that firmware
+    // means (three functions, openness unknown).
+    if (payload.size() >= 3)
+        out->knownFunctions = quint8(payload[2]);
+    if (payload.size() >= 4) {
+        out->openKnown = true;
+        out->openFunctions = quint8(payload[3]);
+    }
     out->supported = true;
     return true;
 }

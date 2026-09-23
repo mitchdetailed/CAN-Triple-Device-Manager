@@ -1,5 +1,6 @@
 // Calculations > Math Channels — grid editor for Configuration::mathRows.
 #include "math_dialog.h"
+#include "window_memory.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -181,6 +182,7 @@ public:
         QObject::connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
         resize(420, sizeHint().height());
+        rememberWindowSize(this, QStringLiteral("mathRow")); // sized to content by default; a size the user chose wins
     }
 
     MathRow result() const { return m_row; }
@@ -302,6 +304,7 @@ MathDialog::MathDialog(Configuration *config, QWidget *parent)
     setWindowTitle(tr("Math Channels"));
     setModal(true);
     resize(700, 400);
+    rememberWindowSize(this, QStringLiteral("math")); // the default, until the user changes it
 
     auto *mainLayout = new QVBoxLayout(this);
     auto *topLayout = new QHBoxLayout;
@@ -329,8 +332,24 @@ MathDialog::MathDialog(Configuration *config, QWidget *parent)
     m_addButton = new QPushButton(tr("Add…"), this);
     m_changeButton = new QPushButton(tr("Change…"), this);
     m_removeButton = new QPushButton(tr("Remove"), this);
+    // Row order is evaluation order — the engine runs every table top to
+    // bottom in one pass (see engine.html) — so a row that reads another row's
+    // output belongs below it. The same pair Communications Setup has, for the
+    // same reason; the object names are what the tests press.
+    m_upButton = new QPushButton(tr("↑ Move Up"), this);
+    m_upButton->setObjectName(QStringLiteral("moveUp"));
+    m_downButton = new QPushButton(tr("↓ Move Down"), this);
+    m_downButton->setObjectName(QStringLiteral("moveDown"));
+    const QString orderTip = tr("Rows run in list order, top first — a row that reads another row's "
+                                "output belongs below it.");
+    m_upButton->setToolTip(orderTip);
+    m_downButton->setToolTip(orderTip);
+    connect(m_upButton, &QPushButton::clicked, this, [this]() { onMove(-1); });
+    connect(m_downButton, &QPushButton::clicked, this, [this]() { onMove(+1); });
     buttonColumn->addWidget(m_addButton);
     buttonColumn->addWidget(m_changeButton);
+    buttonColumn->addWidget(m_upButton);
+    buttonColumn->addWidget(m_downButton);
     buttonColumn->addWidget(m_removeButton);
     buttonColumn->addStretch(1);
     topLayout->addLayout(buttonColumn);
@@ -460,12 +479,30 @@ void MathDialog::onRemove()
     updateButtons();
 }
 
+// Swaps the selected row with its neighbour and follows it, so the button can
+// be pressed again to keep going. The working copy moves here; the document
+// takes the new order on OK like every other edit.
+void MathDialog::onMove(int delta)
+{
+    const int row = m_tree->indexOfTopLevelItem(m_tree->currentItem());
+    const int target = row + delta;
+    if (row < 0 || target < 0 || target >= m_rows.size())
+        return;
+    m_rows.swapItemsAt(row, target);
+    rebuild();
+    m_tree->setCurrentItem(m_tree->topLevelItem(target));
+    updateButtons();
+}
+
 void MathDialog::updateButtons()
 {
     const bool hasSelection = m_tree->currentItem() != nullptr
         && !m_tree->selectedItems().isEmpty();
     m_changeButton->setEnabled(hasSelection);
     m_removeButton->setEnabled(hasSelection);
+    const int row = m_tree->indexOfTopLevelItem(m_tree->currentItem());
+    m_upButton->setEnabled(hasSelection && row > 0);
+    m_downButton->setEnabled(hasSelection && row >= 0 && row < m_rows.size() - 1);
 }
 
 } // namespace ct

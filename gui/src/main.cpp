@@ -8,6 +8,7 @@
 #include <QTimer>
 
 #include "model/configuration.h"
+#include "model/user_paths.h"
 #include "ui/add_channel_dialog.h"
 #include "ui/communications_dialog.h"
 #include "ui/conditions_dialog.h"
@@ -17,6 +18,7 @@
 #include "ui/wheel_guard.h"
 #include "ui/section_editor_dialog.h"
 #include "ui/select_channel_dialog.h"
+#include "ui/window_memory.h"
 
 // The version has exactly one source: the project() call in CMakeLists.txt,
 // which passes ${PROJECT_VERSION} down as -DCT_APP_VERSION. Nothing here (or
@@ -190,18 +192,32 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // Windows remember their size from here on — and only from here on: the
+    // screenshot helper above shows and hides every dialog, and none of that
+    // may be written down. See window_memory.h.
+    ct::setWindowMemoryEnabled(true);
+    // Into a file beside the program rather than this account's registry, so
+    // the sizes are the machine's — see window_memory.h. Where the folder
+    // cannot be written the registry stands in, silently.
+    if (ct::ensureWritableDirectory(ct::settingsDirectory()))
+        ct::setWindowMemoryFile(ct::settingsDirectory() + QStringLiteral("/windows.ini"));
+
     ct::MainWindow window;
     window.resize(1100, 700);
-    // Center on the screen under the cursor (the monitor the app was launched
-    // from), falling back to the primary screen. Qt's default placement can
-    // otherwise land the window off the visible area on multi-monitor setups —
-    // it appears in the taskbar but nowhere on screen.
-    QScreen *screen = QGuiApplication::screenAt(QCursor::pos());
-    if (!screen)
-        screen = QGuiApplication::primaryScreen();
-    if (screen)
-        window.setGeometry(QStyle::alignedRect(Qt::LeftToRight, Qt::AlignCenter,
-                                               window.size(), screen->availableGeometry()));
+    // Every run after the first comes back exactly where it was left. The
+    // first run centers on the screen under the cursor (the monitor the app
+    // was launched from), falling back to the primary screen: Qt's default
+    // placement can otherwise land the window off the visible area on
+    // multi-monitor setups — it appears in the taskbar but nowhere on screen.
+    if (!ct::rememberWindowGeometry(&window, QStringLiteral("main"))) {
+        QScreen *screen = QGuiApplication::screenAt(QCursor::pos());
+        if (!screen)
+            screen = QGuiApplication::primaryScreen();
+        if (screen)
+            window.setGeometry(QStyle::alignedRect(Qt::LeftToRight, Qt::AlignCenter,
+                                                   window.size(),
+                                                   screen->availableGeometry()));
+    }
     window.show();
     return app.exec();
 }

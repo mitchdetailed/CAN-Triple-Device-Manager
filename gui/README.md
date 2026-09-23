@@ -81,7 +81,8 @@ rules, 8 integrators, and
   and termination back off the device via `CMD_READ_CAN_SETUP`, so the document
   reflects what the buses are actually running, not an assumption.
 - **Online → Set Access Passwords…** — function passwords held
-  **in the device**: Send a Configuration, Get a Configuration, and **Protected
+  **in the device**: Send a Configuration, Get a Configuration, **CAN Viewer**
+  (device firmware 1.0.14: raw frames and frame injection), and **Protected
   Comms with four slots** (any slot opens, so one unit can accept sealed
   configurations from several suppliers; only Slot 1 also updates the open
   document's own password). Each folds into a 4-byte key the device stores

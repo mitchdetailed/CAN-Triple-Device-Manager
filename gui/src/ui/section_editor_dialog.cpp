@@ -1,4 +1,5 @@
 #include "section_editor_dialog.h"
+#include "window_memory.h"
 #include "hex_input.h"
 
 #include <QButtonGroup>
@@ -206,6 +207,7 @@ SectionEditorDialog::SectionEditorDialog(Configuration *config, const CommsSecti
     // Taller than the old 560x520: the Channels tab now carries the frame
     // layout map under both panes, and a squashed map is a useless one.
     resize(720, 700);
+    rememberWindowSize(this, QStringLiteral("sectionEditor")); // the default, until the user changes it
 
     auto *layout = new QVBoxLayout(this);
     m_tabs = new QTabWidget;

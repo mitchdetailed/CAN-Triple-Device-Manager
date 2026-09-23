@@ -1,5 +1,6 @@
 // Calculations > Constants — grid editor for Configuration::constantRows.
 #include "constants_dialog.h"
+#include "window_memory.h"
 #include "hex_input.h"
 
 #include <QCheckBox>
@@ -275,6 +276,7 @@ ConstantsDialog::ConstantsDialog(Configuration *config, QWidget *parent)
     setWindowTitle(tr("Constants"));
     setModal(true);
     resize(640, 380);
+    rememberWindowSize(this, QStringLiteral("constants")); // the default, until the user changes it
 
     // Remember each row's committed name so a rename can carry references along.
     for (const ConstantRow &k : m_rows)
@@ -301,8 +303,24 @@ ConstantsDialog::ConstantsDialog(Configuration *config, QWidget *parent)
     m_addButton = new QPushButton(tr("Add…"), this);
     m_changeButton = new QPushButton(tr("Change…"), this);
     m_removeButton = new QPushButton(tr("Remove"), this);
+    // Row order is evaluation order — the engine runs every table top to
+    // bottom in one pass (see engine.html) — so a row that reads another row's
+    // output belongs below it. The same pair Communications Setup has, for the
+    // same reason; the object names are what the tests press.
+    m_upButton = new QPushButton(tr("↑ Move Up"), this);
+    m_upButton->setObjectName(QStringLiteral("moveUp"));
+    m_downButton = new QPushButton(tr("↓ Move Down"), this);
+    m_downButton->setObjectName(QStringLiteral("moveDown"));
+    const QString orderTip = tr("Constants are kept in list order — in the file, the summary and on the "
+                                "device.");
+    m_upButton->setToolTip(orderTip);
+    m_downButton->setToolTip(orderTip);
+    connect(m_upButton, &QPushButton::clicked, this, [this]() { onMove(-1); });
+    connect(m_downButton, &QPushButton::clicked, this, [this]() { onMove(+1); });
     buttonColumn->addWidget(m_addButton);
     buttonColumn->addWidget(m_changeButton);
+    buttonColumn->addWidget(m_upButton);
+    buttonColumn->addWidget(m_downButton);
     buttonColumn->addWidget(m_removeButton);
     buttonColumn->addStretch(1);
     topLayout->addLayout(buttonColumn);
@@ -421,12 +439,33 @@ void ConstantsDialog::onRemove()
     updateButtons();
 }
 
+// Swaps the selected row with its neighbour and follows it, so the button can
+// be pressed again to keep going. The working copy moves here; the document
+// takes the new order on OK like every other edit.
+void ConstantsDialog::onMove(int delta)
+{
+    const int row = m_tree->indexOfTopLevelItem(m_tree->currentItem());
+    const int target = row + delta;
+    if (row < 0 || target < 0 || target >= m_rows.size())
+        return;
+    m_rows.swapItemsAt(row, target);
+    // The committed name rides with its row, or commit() would treat the
+    // move as a rename of whatever used to sit at this index.
+    m_originalNames.swapItemsAt(row, target);
+    rebuild();
+    m_tree->setCurrentItem(m_tree->topLevelItem(target));
+    updateButtons();
+}
+
 void ConstantsDialog::updateButtons()
 {
     const bool hasSelection = m_tree->currentItem() != nullptr
         && !m_tree->selectedItems().isEmpty();
     m_changeButton->setEnabled(hasSelection);
     m_removeButton->setEnabled(hasSelection);
+    const int row = m_tree->indexOfTopLevelItem(m_tree->currentItem());
+    m_upButton->setEnabled(hasSelection && row > 0);
+    m_downButton->setEnabled(hasSelection && row >= 0 && row < m_rows.size() - 1);
 }
 
 void ConstantsDialog::commit()

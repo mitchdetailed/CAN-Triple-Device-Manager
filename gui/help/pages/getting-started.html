@@ -21,6 +21,12 @@ that edit one are greyed out, and resting the pointer on a greyed item says
 why. The device-only commands (Device Status, CAN Viewer, Update Firmware,
 Send Secure Configuration and the rest) work without one.</p>
 
+<p>Every window remembers the size you left it at — the editors for a single
+row included — and the main window its place on the screen, for the next
+time it opens. The sizes are kept in
+<code>Settings\windows.ini</code> beside the program, so they are the same for
+everyone who uses this machine; delete the file to start from the defaults.</p>
+
 <h2>1. Connect to the device</h2>
 
 <p>To open the serial link, choose <b>Connect to Device…</b> on the start
@@ -28,8 +34,10 @@ page or <b>Tools&nbsp;→&nbsp;Connection Settings…</b>:</p>
 
 <ul>
 <li><b>Port:</b> lists every serial port with its Windows description. The
-ST-Link virtual COM port is preselected automatically when its description
-contains "STLink". Click <b>Refresh</b> after plugging the cable in.</li>
+highest-numbered ST-LINK port is preselected (or the highest-numbered port
+when none is an ST-LINK), because Windows numbers a newly attached device after
+every port it already knows. Click <b>Refresh</b> after plugging the cable
+in.</li>
 <li><b>Baud rate:</b> defaults to <b>7372800 (CAN Triple default — ST-Link
 V3)</b>. The field is editable, and slower standard rates down to 115200 are
 listed, but the device firmware runs its UART at 7,372,800 baud — an ST-Link

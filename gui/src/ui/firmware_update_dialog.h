@@ -53,8 +53,10 @@ public:
     // restore is then still offered, and simply reports the lock if it hits one.
     using ReproveFn = std::function<bool()>;
 
+    // reproveGet proves the Get password again after the device's reset has
+    // cleared it — the status read that confirms an install is gated on Get.
     explicit FirmwareUpdateDialog(DeviceLink *link, QWidget *parent = nullptr,
-                                  ReproveFn reproveSend = {});
+                                  ReproveFn reproveSend = {}, ReproveFn reproveGet = {});
 
 signals:
     // F1, or the Help button. A signal rather than another constructor callback
@@ -112,6 +114,7 @@ private:
     DeviceLink *m_link;
     FirmwareUpdater m_updater;
     ReproveFn m_reproveSend;
+    ReproveFn m_reproveGet;
 
     std::optional<FirmwareImage> m_image;
     FwUpdateStatus m_status {};

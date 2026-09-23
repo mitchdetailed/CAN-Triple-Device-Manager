@@ -3,6 +3,7 @@
 // Momentary pulses the output on the rising edge of Set and drops it again by
 // itself, Set/Reset latches it between Set and Reset. See ConditionRow.
 #include "conditions_dialog.h"
+#include "window_memory.h"
 #include "hex_input.h"
 
 #include <QButtonGroup>
@@ -199,10 +200,11 @@ public:
         setWindowTitle(tr("User Condition"));
         setModal(true);
 
-        // TWO expression groups of three comparisons each — a much taller body
-        // than the single expression that already did not fit a 1080p screen at
-        // 150% scaling, where the usable height is only ~720 logical px. So the
-        // body scrolls and the button box stays outside it, always reachable.
+        // TWO expression groups of three comparisons each — even side by side
+        // (see below) a body taller than a 1080p screen at 150% scaling, where
+        // the usable height is only ~720 logical px, once all six comparisons
+        // are shown. So the body scrolls and the button box stays outside it,
+        // always reachable.
         m_content = new QWidget;
         auto *mainLayout = new QVBoxLayout(m_content);
         auto *intro = new QLabel(
@@ -246,9 +248,19 @@ public:
         latchRow->addStretch(1);
         mainLayout->addWidget(m_latchHolder);
 
-        // --- The two expressions -------------------------------------------
-        buildExpression(m_set, tr("Set"), mainLayout);
-        buildExpression(m_reset, tr("Reset"), mainLayout);
+        // --- The two expressions, SIDE BY SIDE -----------------------------
+        // Stacked, the pair made a window taller than most screens even with
+        // the body scrolling. Beside each other they read as the pair they are
+        // — what sets the output on the left, what clears it on the right —
+        // and the window is half the height and twice the width, which is the
+        // shape a screen has. Top-aligned, so a Reset with one comparison sits
+        // level with a Set that has three rather than being stretched to match.
+        // In Momentary mode the Reset group is hidden (updateMode) and Set
+        // takes the whole width.
+        auto *exprRow = new QHBoxLayout;
+        buildExpression(m_set, tr("Set"), exprRow);
+        buildExpression(m_reset, tr("Reset"), exprRow);
+        mainLayout->addLayout(exprRow);
 
         // --- Output channel ------------------------------------------------
         auto *outForm = new QFormLayout;
@@ -274,7 +286,10 @@ public:
         scroll->setWidget(m_content);
         scroll->setWidgetResizable(true);
         scroll->setFrameShape(QFrame::NoFrame);
-        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        // As needed, not always off: two columns have a real minimum width,
+        // and a window made narrower than it must scroll sideways rather than
+        // clip the Reset column out of reach.
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         auto *outer = new QVBoxLayout(this);
         outer->addWidget(scroll, 1);
         outer->addWidget(m_buttons);
@@ -311,7 +326,12 @@ public:
         m_activeCheck->setChecked(m_row.active);
         updateMode();
 
-        resizeToContent(620);
+        // Two columns wide in Set / Reset mode, one in Momentary — see
+        // defaultWidth(); the two-column body is what makes the height fit.
+        resizeToContent(defaultWidth());
+        // Over the content-sized default; later mode changes keep width()
+        // (resizeToContent), so a remembered width survives them.
+        rememberWindowSize(this, QStringLiteral("conditionRow"));
     }
 
     ConditionRow row() const { return m_row; }
@@ -357,7 +377,7 @@ private:
         QLabel *qualifyHint = nullptr;
     };
 
-    void buildExpression(Expr &e, const QString &title, QVBoxLayout *parentLayout)
+    void buildExpression(Expr &e, const QString &title, QBoxLayout *parentLayout)
     {
         e.title = title;
         e.box = new QGroupBox(title, this);
@@ -434,7 +454,8 @@ private:
         e.preview->setTextFormat(Qt::PlainText);
         layout->addWidget(e.preview);
 
-        parentLayout->addWidget(e.box);
+        // Equal share of the row, and top-aligned (see the caller).
+        parentLayout->addWidget(e.box, 1, Qt::AlignTop);
 
         {
             Expr *qe = &e;
@@ -845,18 +866,57 @@ private:
         // are not looking at.
         updateTermVisibility(m_set);
         updateTermVisibility(m_reset);
+        // Two columns need the width for two: a window last sized for one
+        // (Momentary) grows when the mode gives it a second column. The other
+        // way stays put — a wide Set column costs nothing.
+        if (!momentary && width() < defaultWidth())
+            resizeToContent(defaultWidth());
     }
 
-    // Height the body wants, but never more than the screen can show. Anything
-    // beyond that scrolls rather than pushing the buttons off the bottom.
+    // The width the body reads well at: two columns of comparisons in
+    // Set / Reset mode, one in Momentary, within the screen. Not the layout's
+    // own idea of its width — word-wrapped labels report almost none, and a
+    // window sized from that wrapped the "for" hints one word to a line and
+    // grew tall again, which was the whole complaint.
+    int defaultWidth() const
+    {
+        const QScreen *scr = screen();
+        const int availableWidth = scr ? scr->availableGeometry().width() : 1920;
+        const int wanted = currentMode() == ConditionMode::Momentary ? 640 : 1180;
+        return qMin(wanted, availableWidth - 80);
+    }
+
+    // Height the body wants AT THE TARGET WIDTH, but never more than the
+    // screen can show; anything beyond that scrolls rather than pushing the
+    // buttons off the bottom. Asked of the layout as height-for-width rather
+    // than taken from sizeHint(): the intro and the hints wrap, so the height
+    // they want depends on the width they get, and a window sized from the
+    // narrow default's line count opened with a blank band under Active once
+    // the two columns made it wide.
     void resizeToContent(int targetWidth)
     {
         const QScreen *scr = screen();
         const int available = scr ? scr->availableGeometry().height() : 1040;
         const int maxHeight = available - 80; // title bar + a margin
-        const int wanted = m_content->sizeHint().height()
-                           + m_buttons->sizeHint().height() + 24;
-        resize(targetWidth > 0 ? targetWidth : 620, qMin(wanted, maxHeight));
+        const int width = targetWidth > 0 ? targetWidth : 620;
+        QLayout *body = m_content->layout();
+        // Measured from scratch. Comparisons were shown or hidden a moment ago,
+        // and a box layout's cached size hint does not notice a grandchild's
+        // change until the layout is activated — which only an event-loop pass
+        // does on its own. Without this the constructor measured Reset at three
+        // comparisons after only Set's had been hidden, and the window opened
+        // with a blank band under Active.
+        if (body)
+            body->activate();
+        const int bodyWidth = width - 24; // the outer layout's margins, near enough
+        const int bodyHeight = body && body->hasHeightForWidth()
+                                   ? body->heightForWidth(bodyWidth)
+                                   : m_content->sizeHint().height();
+        // The margins of the outer layout and the button row, with a little
+        // over: a body one line taller than the viewport earns a scrollbar and
+        // clips the Active box, which is worse than a few spare pixels.
+        const int wanted = bodyHeight + m_buttons->sizeHint().height() + 48;
+        resize(width, qMin(wanted, maxHeight));
     }
 
     void updatePreviews()
@@ -1060,6 +1120,7 @@ ConditionsDialog::ConditionsDialog(Configuration *config, QWidget *parent)
     // column, and truncating the Reset would hide the half that says when the
     // latch lets go.
     resize(760, 400);
+    rememberWindowSize(this, QStringLiteral("conditions")); // the default, until the user changes it
 
     m_tree = new QTreeWidget(this);
     m_tree->setColumnCount(4);
@@ -1075,6 +1136,20 @@ ConditionsDialog::ConditionsDialog(Configuration *config, QWidget *parent)
     m_addButton = new QPushButton(tr("Add…"), this);
     m_changeButton = new QPushButton(tr("Change…"), this);
     m_removeButton = new QPushButton(tr("Remove"), this);
+    // Row order is evaluation order — the engine runs every table top to
+    // bottom in one pass (see engine.html) — so a row that reads another row's
+    // output belongs below it. The same pair Communications Setup has, for the
+    // same reason; the object names are what the tests press.
+    m_upButton = new QPushButton(tr("↑ Move Up"), this);
+    m_upButton->setObjectName(QStringLiteral("moveUp"));
+    m_downButton = new QPushButton(tr("↓ Move Down"), this);
+    m_downButton->setObjectName(QStringLiteral("moveDown"));
+    const QString orderTip = tr("Rows run in list order, top first — a row that reads another row's "
+                                "output belongs below it.");
+    m_upButton->setToolTip(orderTip);
+    m_downButton->setToolTip(orderTip);
+    connect(m_upButton, &QPushButton::clicked, this, [this]() { onMove(-1); });
+    connect(m_downButton, &QPushButton::clicked, this, [this]() { onMove(+1); });
 
     auto *buttonBox = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, this);
@@ -1082,6 +1157,8 @@ ConditionsDialog::ConditionsDialog(Configuration *config, QWidget *parent)
     auto *sideLayout = new QVBoxLayout;
     sideLayout->addWidget(m_addButton);
     sideLayout->addWidget(m_changeButton);
+    sideLayout->addWidget(m_upButton);
+    sideLayout->addWidget(m_downButton);
     sideLayout->addWidget(m_removeButton);
     sideLayout->addStretch(1);
 
@@ -1189,12 +1266,30 @@ void ConditionsDialog::onRemove()
     updateButtons();
 }
 
+// Swaps the selected row with its neighbour and follows it, so the button can
+// be pressed again to keep going. The working copy moves here; the document
+// takes the new order on OK like every other edit.
+void ConditionsDialog::onMove(int delta)
+{
+    const int row = m_tree->indexOfTopLevelItem(m_tree->currentItem());
+    const int target = row + delta;
+    if (row < 0 || target < 0 || target >= m_rows.size())
+        return;
+    m_rows.swapItemsAt(row, target);
+    rebuild();
+    m_tree->setCurrentItem(m_tree->topLevelItem(target));
+    updateButtons();
+}
+
 void ConditionsDialog::updateButtons()
 {
     const bool hasSelection =
         m_tree->indexOfTopLevelItem(m_tree->currentItem()) >= 0;
     m_changeButton->setEnabled(hasSelection);
     m_removeButton->setEnabled(hasSelection);
+    const int row = m_tree->indexOfTopLevelItem(m_tree->currentItem());
+    m_upButton->setEnabled(hasSelection && row > 0);
+    m_downButton->setEnabled(hasSelection && row >= 0 && row < m_rows.size() - 1);
 }
 
 } // namespace ct

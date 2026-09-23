@@ -4,7 +4,7 @@ An integrator is a *rate accumulator*: at its configured rate it adds its input 
 
 > **Note:** To integrate a rate channel into a total — litres per second into litres, for example — pre-scale the input with a [math channel](math-channels.md) first, so that one step adds the right slice (input ÷ rate). The editor's summary line shows the resulting per-second movement as you type.
 
-To edit integrators, choose **Calculations → Integrators…**. The dialog lists every integrator with columns **#**, **Active**, **Output**, **Applies** (the channel or fixed value it accumulates), **Rate**, **Direction**, **Starts at** (with "(preserved)" appended when Preserve is on) and **Reset**. Use **Add…**, **Change…** (or double-click a row) and **Remove**. The device supports at most **8** integrators. Changes are written into the configuration only when you close the dialog with **OK**; **Cancel** discards them.
+To edit integrators, choose **Calculations → Integrators…**. The dialog lists every integrator with columns **#**, **Active**, **Output**, **Applies** (the channel or fixed value it accumulates), **Rate**, **Direction**, **Starts at** (with "(preserved)" appended when Preserve is on) and **Reset**. Use **Add…**, **Change…** (or double-click a row), **↑ Move Up** / **↓ Move Down** and **Remove**. The device supports at most **8** integrators. Changes are written into the configuration only when you close the dialog with **OK**; **Cancel** discards them.
 
 ## To add an integrator
 1. Choose **Calculations → Integrators…** and click **Add…**. The **Integrator** editor opens.

@@ -1,6 +1,7 @@
 // "Select Channel" — searchable list of the document's user-created channels.
 
 #include "select_channel_dialog.h"
+#include "window_memory.h"
 
 #include <QHBoxLayout>
 #include <QLabel>
@@ -55,6 +56,7 @@ SelectChannelDialog::SelectChannelDialog(Configuration *config, ChannelRole role
     setWindowTitle(role == ChannelRole::Input ? tr("Select Input Channel")
                                               : tr("Select Output Channel"));
     resize(460, 520);
+    rememberWindowSize(this, QStringLiteral("selectChannel")); // the default, until the user changes it
 
     refreshLiveView();
 

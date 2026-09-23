@@ -1322,7 +1322,23 @@ void MainWindow::onSendSecureConfiguration()
         // could not reach, which is the read's own error. Anything older falls
         // through to the path that has always installed it.
         SecureFileInfo peeked;
-        if (peekSecureFile(path, &peeked) && peeked.formatVersion >= kSecureFormatVersion) {
+        const bool peekedOk = peekSecureFile(path, &peeked);
+        // Format 1 (Manager 1.1.14 and earlier) predates install packages: it
+        // carries no install policy, so there is nothing here to hold it to,
+        // and installing it blind would be the one package that asks nothing
+        // of the unit it lands on. It opens as a document instead.
+        if (peekedOk && peeked.formatVersion == kSecureFormatV1) {
+            QMessageBox::information(
+                this, title,
+                tr("\"%1\" was saved by CAN Triple Device Manager 1.1.14 or earlier, before "
+                   "secure packages carried install rules, so it cannot be installed from "
+                   "here.\n\nOpen it with File \u2192 Open and use Online \u2192 Send "
+                   "Configuration, or build a package from it with File \u2192 Secure "
+                   "Configuration Builder.")
+                    .arg(QFileInfo(path).fileName()));
+            return;
+        }
+        if (peekedOk && peeked.formatVersion >= kSecureFormatVersion) {
             QMessageBox::critical(
                 this, title,
                 peeked.hasInstallStream
@@ -1444,6 +1460,10 @@ void MainWindow::onSendSecureConfiguration()
         };
         {
             BusyScope busy(this);
+            // The CAN Viewer password first, as in the sealed stream: on firmware
+            // that cannot hold it, the refusal comes before any other write.
+            applyOne(policy.setViewer, policy.viewerKey, AccessFunction::CanViewer, 1,
+                     tr("CAN Viewer"));
             applyOne(policy.setSend, policy.sendKey, AccessFunction::SendConfiguration, 1,
                      tr("Send Configuration"));
             applyOne(policy.setGet, policy.getKey, AccessFunction::GetConfiguration, 1,
@@ -1560,6 +1580,16 @@ bool MainWindow::checkPackagePolicy(const SecurePackagePolicy &policy, const QSt
             facts.capacity = capacity.reported ? capacity : DeviceCapacity::builtIn();
         }
     }
+    // Whether the unit can hold a CAN Viewer password, asked only for a package
+    // that sets one: firmware before 1.0.14 reports three functions, not four.
+    if (policy.setViewer) {
+        BusyScope busy(this);
+        device_session::AccessState access;
+        QString ignored;
+        if (device_session::readAccessState(&m_link, &access, &ignored))
+            facts.viewerPasswordSupported =
+                access.supported && access.knows(AccessFunction::CanViewer);
+    }
     const InstallVerdict verdict = packageInstallVerdict(policy, facts);
     if (verdict.noPolicy) {
         QMessageBox::critical(
@@ -1575,6 +1605,14 @@ bool MainWindow::checkPackagePolicy(const SecurePackagePolicy &policy, const QSt
             this, title,
             tr("This unit's firmware cannot report a licence, so it cannot be matched against "
                "this package.\n\nIt has NOT been sent. Update the unit's firmware."));
+        return false;
+    }
+    if (verdict.viewerPasswordUnsupported) {
+        QMessageBox::critical(
+            this, title,
+            tr("This package sets a CAN Viewer password, which the connected unit's firmware "
+               "cannot hold. That needs device firmware 1.0.14 or newer.\n\nIt has NOT been "
+               "sent. Update the unit's firmware first."));
         return false;
     }
     if (!verdict.shortfalls.isEmpty()) {
@@ -2452,6 +2490,31 @@ void MainWindow::onCanViewer()
 {
     if (!ensureConnected()) // see onMonitorChannels
         return;
+    // Firmware 1.0.14's CAN Viewer password: a unit holding one sends no raw
+    // frame and accepts no injected one until it is proved, so it is asked for
+    // HERE, before the window opens, rather than leaving a viewer that sits
+    // empty with no reason given.
+    //
+    // Only when this session has not already proved it — READ_ACCESS_KEYS's
+    // fourth byte says which functions are open — so reopening the viewer does
+    // not ask again for a password the unit is still honouring. That shortcut
+    // is taken for the viewer alone: a Protect Communication send re-proves on
+    // purpose, because what it checks is that the DOCUMENT's key matches, not
+    // merely that the session holds some key. ensureDeviceAccess returns at
+    // once when no password is set or the firmware predates the function.
+    {
+        device_session::AccessState state;
+        QString error;
+        bool read = false;
+        {
+            BusyScope busy(this);
+            read = device_session::readAccessState(&m_link, &state, &error);
+        }
+        const bool open = read && (!state.supported || !state.isSet(AccessFunction::CanViewer)
+                                   || state.isOpen(AccessFunction::CanViewer));
+        if (!open && !ensureDeviceAccess(AccessFunction::CanViewer))
+            return;
+    }
     if (!m_viewerDialog) {
         m_viewerDialog = new CanViewerDialog(&m_link, this);
         m_viewerDialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -2495,6 +2558,25 @@ void MainWindow::onUpdateFirmware()
     // so ask for it here rather than letting the first NACK be the prompt.
     if (!ensureDeviceAccess(AccessFunction::SendConfiguration))
         return;
+    // ...and the GET password, when the unit has one. The firmware answers the
+    // update status read — made when the dialog opens and again to confirm the
+    // install — and the pre-update backup under Get, like every other read, so
+    // a unit protecting Get used to refuse an update right after its Send
+    // password had been typed ("The device is password protected. Unlock it
+    // before updating firmware."). The key is KEPT so the dialog can prove it
+    // again after the reset clears every proof. promptAndProve asks nothing
+    // when no Get password is set.
+    AccessKey getKey = kNoAccessKey;
+    if (!AccessPasswordsDialog::promptAndProve(&m_link, AccessFunction::GetConfiguration, this,
+                                               &getKey))
+        return;
+    const auto reproveGet = [this, getKey]() {
+        if (getKey == kNoAccessKey)
+            return true; // nothing was set, so there is nothing to prove again
+        QString error;
+        return device_session::proveAccess(&m_link, AccessFunction::GetConfiguration, getKey,
+                                           &error);
+    };
 
     // The dialog resets the device part-way through, which clears the access
     // proofs held in its RAM. Give it a way to establish them again before the
@@ -2503,7 +2585,7 @@ void MainWindow::onUpdateFirmware()
     // worth restoring.
     FirmwareUpdateDialog dialog(&m_link, this, [this]() {
         return ensureDeviceAccess(AccessFunction::SendConfiguration);
-    });
+    }, reproveGet);
     connect(&dialog, &FirmwareUpdateDialog::helpRequested, this, &MainWindow::showHelpPage);
     dialog.exec();
 

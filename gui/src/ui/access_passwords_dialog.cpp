@@ -11,6 +11,7 @@
 // confirm — and a single form with three fields would let a user fill in the
 // new password before discovering the device wants the old one first.
 #include "access_passwords_dialog.h"
+#include "window_memory.h"
 
 #include <QApplication>
 #include <QColor>
@@ -87,6 +88,9 @@ QString colourRule(const QColor &colour)
 QString clearingMeans(AccessFunction fn)
 {
     switch (fn) {
+    case AccessFunction::CanViewer:
+        return QObject::tr("Anyone who can connect to this device will be able to watch its raw "
+                           "CAN traffic in the CAN Viewer and send frames onto its buses.");
     case AccessFunction::SendConfiguration:
         return QObject::tr("Anyone who can connect to this device will be able to replace its "
                            "configuration.");
@@ -229,6 +233,7 @@ AccessPasswordsDialog::AccessPasswordsDialog(DeviceLink *link, Configuration *co
 
     refreshList();
     resize(520, 320);
+    rememberWindowSize(this, QStringLiteral("accessPasswords")); // the default, until the user changes it
 }
 
 void AccessPasswordsDialog::refreshList()
@@ -292,6 +297,16 @@ void AccessPasswordsDialog::refreshList()
             item->setData(0, Qt::UserRole + 1, slot);
             if (isSet)
                 item->setForeground(0, tick);
+            // Firmware 1.0.14's CAN Viewer password on a unit that predates
+            // it: still LISTED — the list says what an update would let you
+            // protect, as it does for pre-v19 firmware — but not settable.
+            if (m_state.supported && !m_state.knows(fn)) {
+                item->setDisabled(true);
+                item->setToolTip(0, tr("This device's firmware cannot hold a %1 password — it "
+                                       "needs firmware 1.0.14 or newer. Update the firmware to "
+                                       "set one.")
+                                        .arg(accessFunctionLabel(fn)));
+            }
             if (int(fn) == previous && slot == qMax(1, previousSlot))
                 m_functionList->setCurrentItem(item);
         }
@@ -304,7 +319,8 @@ void AccessPasswordsDialog::onSelectionChanged()
 {
     // Nothing to set without a row, and nothing to set on a device that cannot
     // hold a password — but the list stays readable in both cases.
-    m_setButton->setEnabled(m_state.supported && m_functionList->currentItem() != nullptr);
+    const QTreeWidgetItem *item = m_functionList->currentItem();
+    m_setButton->setEnabled(m_state.supported && item != nullptr && !item->isDisabled());
 }
 
 AccessFunction AccessPasswordsDialog::selectedFunction() const

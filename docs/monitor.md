@@ -33,6 +33,8 @@ With device firmware 1.0.12 or newer, two more columns appear: **Override** and 
 
 Choose **Online → CAN Viewer…** or press **F4**. The viewer shows raw frames from all three buses as they arrive, with columns **Time (s)**, **Bus**, **Dir** (Rx or Tx), **ID**, **Len** and **Data**, plus a **Count** column in [Overwrite Mode](#overwrite). Standard IDs are shown as three hex digits (0x123), extended IDs as eight (0x18FEF100).
 
+> **Note:** A device can protect the viewer with a **CAN Viewer** password (**Online → Set Access Passwords…**, device firmware 1.0.14 or newer). The viewer then asks for it as it opens; until it is entered the device sends no frames and refuses injected ones. Once entered it holds until the unit is powered off, so reopening the viewer does not ask again. Monitor Channels is not affected.
+
 <table>
 <tr><th>Control</th><th>Meaning</th></tr>
 <tr><td>Pause</td><td>Stops capturing new frames; frames arriving while paused

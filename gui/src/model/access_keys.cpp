@@ -69,6 +69,7 @@ const AccessFunction *allAccessFunctions()
         AccessFunction::SendConfiguration,
         AccessFunction::GetConfiguration,
         AccessFunction::EditProtectedComms,
+        AccessFunction::CanViewer,
     };
     return fns;
 }
@@ -82,6 +83,8 @@ QString accessFunctionLabel(AccessFunction fn)
         return QObject::tr("Get a Configuration");
     case AccessFunction::EditProtectedComms:
         return QObject::tr("Protected Comms");
+    case AccessFunction::CanViewer:
+        return QObject::tr("CAN Viewer");
     }
     return {};
 }
@@ -117,6 +120,12 @@ QString accessFunctionDescription(AccessFunction fn)
                            "password. The device confirms it before this application will move "
                            "a message's Protect Communication marking — alongside that "
                            "message's own Message Password, which this one never replaces.");
+    case AccessFunction::CanViewer:
+        // Both halves of what the viewer is, and the one thing it is not:
+        // Monitor Channels reads decoded values, which this leaves open.
+        return QObject::tr("Prevents the CAN Viewer showing the device's raw CAN traffic, or "
+                           "sending frames onto its buses, without this password. Monitor "
+                           "Channels is not affected. Needs device firmware 1.0.14 or newer.");
     }
     return {};
 }
@@ -132,6 +141,8 @@ QString accessFunctionKey(AccessFunction fn)
         return QStringLiteral("getConfiguration");
     case AccessFunction::EditProtectedComms:
         return QStringLiteral("editProtectedComms");
+    case AccessFunction::CanViewer:
+        return QStringLiteral("canViewer");
     }
     return {};
 }

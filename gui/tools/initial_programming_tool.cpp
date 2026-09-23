@@ -17,8 +17,9 @@
 // What it deliberately does NOT do:
 //   - touch the configuration store, retained values, or access keys — this
 //     tool reinstates the PROGRAM, not the device's data (the erase is
-//     bounded to the pages the two images occupy, all in bank 1). The one
-//     exception is --unlock, below, which is a mass erase by definition;
+//     bounded to the pages the two images occupy, all in bank 1). The two
+//     exceptions are --unlock and switching a single-bank unit to dual-bank,
+//     both below, which are mass erases by definition;
 //   - upload configurations. Configuration transfer belongs to the serial
 //     protocol, where the device's own gates — access passwords, upload
 //     policy, per-device binding — are enforced. An SWD write would bypass
@@ -43,7 +44,7 @@
 // --unlock is the way back from readout protection. A licensed unit sets RDP
 // level 1 on itself at boot (firmware 1.0.9, lockReadoutIfLicensed() in the
 // firmware), after which the debug port can neither read nor program the
-// flash, and the plain run of this tool fails at the first verify. Regressing
+// flash, and the plain run of this tool stops at the probe. Regressing
 // to level 0 makes the chip MASS-ERASE itself — bootloader, application,
 // configuration, retained values, access keys and the licence page all go —
 // which is precisely what level 1 promises. So --unlock does that erase first,
@@ -51,10 +52,27 @@
 // plain run does. The unit comes back blank and unlicensed: issue its licence
 // again in the Manager, and it locks itself at the next power-up.
 //
+// The flash must be in DUAL-BANK mode: option bit DBANK set, which is the
+// factory setting. The firmware's flash map is laid out for it, and the
+// firmware refuses firmware updates and licences on a unit whose option bytes
+// say single-bank ("flash write failed (0x05)"). So before programming, the
+// tool reads the option register, and a single-bank unit is switched first:
+// mass erase, DBANK written, option
+// bytes reloaded; then a fresh probe must read DBANK set, and the chip is
+// erased again in the new geometry. Reload, mass erase, program is ST's
+// procedure for a bank-mode change. The erase BEFORE the reload is this
+// tool's addition, so that the reset the reload causes starts an empty chip
+// rather than code laid out for the other geometry. The switch costs the
+// stored configuration, which the firmware would not find after it anyway,
+// because the store is placed differently in the two modes. So it asks again,
+// separately, unless --yes or --unlock (which erases everything already) was
+// given.
+//
 // Exit 0 on success, 1 on any failure, so it can gate a provisioning script.
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -210,6 +228,140 @@ void printLogTail(const std::string &text)
     std::fwrite(text.data() + start, 1, text.size() - start, stdout);
 }
 
+// Every exit from main goes through here, so a window opened from the Start
+// Menu never vanishes before its last line can be read. A wrong answer at the
+// prompt, a missing file and a failed validation all used to close it on the
+// spot — only the two OpenOCD failures paused — and from the shortcut that
+// looks like a tool that does nothing.
+int finish(int code, bool assumeYes)
+{
+    if (!assumeYes) {
+        std::printf("\n  Press Enter to close.");
+        std::fflush(stdout);
+        std::getchar();
+    }
+    return code;
+}
+
+// The readout-protection level OpenOCD's stm32l4x driver reports when it
+// probes the flash — "RDP level 0 (0xAA)" on every probe of an open chip — or
+// -1 when the log has none. The LAST report wins: it is the chip's current
+// state.
+int rdpLevelIn(const std::string &text)
+{
+    const std::string key = "RDP level ";
+    const size_t at = text.rfind(key);
+    if (at == std::string::npos || at + key.size() >= text.size())
+        return -1;
+    const char c = text[at + key.size()];
+    return (c >= '0' && c <= '2') ? c - '0' : -1;
+}
+
+// FLASH_OPTR, the option register the bank-mode decision is read from: bit 22
+// is DBANK, and the low byte is the readout-protection level (0xAA level 0,
+// 0xCC level 2, anything else level 1). It is read with a plain "mdw", whose
+// "0x40022020: ffeff8aa" line does not depend on how a particular OpenOCD
+// build chooses to word its flash driver's messages.
+const char kOptrRead[] = "mdw 0x40022020";
+const char kOptrLine[] = "0x40022020: ";
+constexpr uint32_t kOptrDbank = 1u << 22;
+
+// The LAST value read wins, like rdpLevelIn: it is the chip's current state.
+bool optrIn(const std::string &text, uint32_t *optr)
+{
+    const size_t at = text.rfind(kOptrLine);
+    if (at == std::string::npos)
+        return false;
+    const char *start = text.c_str() + at + std::strlen(kOptrLine);
+    char *end = nullptr;
+    const unsigned long value = std::strtoul(start, &end, 16);
+    if (end == start)
+        return false;
+    *optr = static_cast<uint32_t>(value);
+    return true;
+}
+
+int rdpLevelOf(uint32_t optr)
+{
+    const uint32_t rdp = optr & 0xFFu;
+    return rdp == 0xAAu ? 0 : (rdp == 0xCCu ? 2 : 1);
+}
+
+// "initial-programming-unlock.log" -> "initial-programming-unlock-probe.log":
+// a follow-up run's log sits beside the one it follows.
+std::string siblingLog(const std::string &logPath, const char *suffix)
+{
+    const size_t dot = logPath.rfind(".log");
+    return (dot == std::string::npos ? logPath : logPath.substr(0, dot)) + suffix + ".log";
+}
+
+// A line typed at the console, all of it: a reply longer than a fixed buffer
+// would otherwise leave its tail to answer the next prompt, or to satisfy the
+// "Press Enter to close" pause before anyone has read the window.
+std::string readLine()
+{
+    std::string line;
+    for (int c; (c = std::getchar()) != EOF && c != '\n';)
+        line += static_cast<char>(c);
+    return line;
+}
+
+// YES in any case, and nothing else on the line. Someone who types "yes" means
+// yes; a case-sensitive compare used to answer them with "Nothing done" and a
+// window that closed on the spot.
+bool askYes(const char *prompt)
+{
+    std::printf("%s", prompt);
+    std::fflush(stdout);
+    std::string reply = readLine();
+    while (!reply.empty() && (reply.back() == '\r' || reply.back() == ' '
+                              || reply.back() == '\t'))
+        reply.pop_back();
+    const size_t lead = reply.find_first_not_of(" \t");
+    reply = lead == std::string::npos ? std::string() : reply.substr(lead);
+    return _stricmp(reply.c_str(), "yes") == 0;
+}
+
+// What the tool says about a unit whose readout protection is set, wherever it
+// finds it: the probe before anything is written, or a failed OpenOCD run whose
+// log shows it. The wording is the product's, chosen 2026-09-22.
+void printProtectedStatement()
+{
+    std::printf("\n  This unit has readout protection set. Unit appears to have licensed firmware defined.\n"
+                "\n  Action Not Completed.\n");
+}
+
+// What a failed OpenOCD run most likely means, in words the person at the
+// bench can act on. Matched against the bundled OpenOCD's own messages.
+//
+// The readout-protection statement is given ONLY when the chip reports level 1
+// or 2. Advice used to follow any log containing "RDP" — and every probe of an
+// OPEN chip prints "RDP level 0" — so any failure at all was reported as a
+// protected unit.
+void explainFailure(const std::string &text)
+{
+    if (text.find("open failed") != std::string::npos
+        || text.find("libusb_open() failed") != std::string::npos) {
+        std::printf("\n  OpenOCD could not open the ST-LINK. Check the USB cable, close\n"
+                    "  anything else using the ST-LINK's debug interface\n"
+                    "  (STM32CubeProgrammer, another OpenOCD), and make sure the ST-LINK\n"
+                    "  USB driver is installed: Start Menu > CAN Triple Device Manager >\n"
+                    "  Install ST-Link USB Drivers.\n");
+        return;
+    }
+    if (text.find("init mode failed") != std::string::npos
+        || text.find("Target voltage too low") != std::string::npos) {
+        std::printf("\n  The ST-LINK was found but the CAN Triple's processor did not\n"
+                    "  answer. Check the unit is powered and properly connected, then\n"
+                    "  run this again.\n");
+        return;
+    }
+    if (rdpLevelIn(text) >= 1)
+        printProtectedStatement();
+    // Anything else: the log tail above is the evidence, and no advice here
+    // is better than advice that erases a working unit's licence.
+}
+
 // Run one command line with its output captured to logPath (which may move,
 // see runOpenocd) and hand the log text back. Returns the exit code, or -1 when
 // the process could not be started or the log could not be written.
@@ -224,7 +376,12 @@ int runLogged(const std::string &cmd, std::string &logPath, std::string &text)
         char tmp[MAX_PATH];
         const DWORD n = GetTempPathA(MAX_PATH, tmp);
         if (n > 0 && n < MAX_PATH) {
-            logPath = std::string(tmp) + "initial-programming-openocd.log";
+            // The same file name, in %TEMP%. One shared fallback name used to
+            // be enough; with a probe, a bank switch and an unlock each keeping
+            // a log of its own, it would leave only the last of them.
+            const size_t slash = logPath.find_last_of("\\/");
+            logPath = std::string(tmp)
+                    + (slash == std::string::npos ? logPath : logPath.substr(slash + 1));
             log = CreateFileA(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                               &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         }
@@ -269,6 +426,18 @@ int runLogged(const std::string &cmd, std::string &logPath, std::string &text)
     return int(exitCode);
 }
 
+// A read-only look at the chip: the flash driver's probe, which logs "RDP level
+// n" and "flash mode : dual-bank" for a person reading the log, and the option
+// register itself for the tool. Nothing is halted, erased or written, so it is
+// safe against a unit that is running.
+int runOpenocdProbe(const std::string &ocd, const std::string &scripts,
+                    std::string &logPath, std::string &text)
+{
+    return runLogged(openocdPrefix(ocd, scripts) + " -c \"init\" -c \"flash probe 0\""
+                         + " -c \"" + kOptrRead + "\" -c \"shutdown\"",
+                     logPath, text);
+}
+
 bool runOpenocd(const std::string &ocd, const std::string &scripts,
                 const std::string &blPath, const std::string &appPath,
                 std::string &logPath)
@@ -298,12 +467,7 @@ bool runOpenocd(const std::string &ocd, const std::string &scripts,
                 "  The tail of its log (%s):\n\n",
                 exitCode, verified, logPath.c_str());
     printLogTail(text);
-    if (text.find("RDP") != std::string::npos || text.find("protect") != std::string::npos
-        || text.find("Error: failed erasing") != std::string::npos
-        || text.find("Error: error writing") != std::string::npos)
-        std::printf("\n  If this unit has readout protection set - a licensed unit running\n"
-                    "  firmware 1.0.9 or newer locks itself - run this tool again with\n"
-                    "  --unlock, which erases the chip first and then programs it.\n");
+    explainFailure(text);
     return false;
 }
 
@@ -332,14 +496,94 @@ bool runOpenocdUnlock(const std::string &ocd, const std::string &scripts, std::s
     const int exitCode = runLogged(cmd, logPath, text);
     if (exitCode < 0)
         return false;
-    if (text.find("unlocked") != std::string::npos) {
+    // SUCCESS IS NOT IN THIS LOG. The bundled OpenOCD's stm32l4x driver prints
+    // nothing when an unlock works — its one message is "%s failed to unlock
+    // device" — while two of its FAILURE messages ("flash not unlocked",
+    // "options not unlocked") contain the word this used to look for. So the
+    // old check read failure as success and success as failure, and a unit
+    // that unlocked perfectly was reported as refusing, every time. The chip
+    // is asked instead: once the reload's reset and mass erase have run, a
+    // fresh probe must report RDP level 0.
+    if (text.find("failed to unlock device") == std::string::npos) {
         Sleep(2000); // the option-byte reload resets the chip and runs the mass erase
-        return true;
+        std::string probePath = siblingLog(logPath, "-probe");
+        std::string probe;
+        const int probeExit = runOpenocdProbe(ocd, scripts, probePath, probe);
+        if (probeExit >= 0 && rdpLevelIn(probe) == 0)
+            return true;
+        text += "\n--- probe after the unlock ---\n" + probe;
     }
     std::printf("\n  FAILED  the unlock did not take (OpenOCD exit code %d).\n"
                 "  The tail of its log (%s):\n\n",
                 exitCode, logPath.c_str());
     printLogTail(text);
+    return false;
+}
+
+// Switch a single-bank unit to dual-bank, leaving it erased. Two OpenOCD runs,
+// each judged by what the chip says rather than by exit codes:
+//
+//  1. mass erase, write DBANK, reload the option bytes. OpenOCD stops at the
+//     first command that fails, so the option byte is never written over an
+//     erase that did not complete. The reload resets the target and drops the
+//     debug connection, so a complaint AFTER "Option written" means nothing.
+//  2. a fresh session must read DBANK set and readout protection at level 0
+//     from the option register, and mass-erases again in the new geometry.
+//
+// Every stop is safe to re-run from: a unit left single-bank is switched again,
+// and one that switched but was not erased the second time is programmed by
+// the ordinary pass, whose own erase covers the pages it writes.
+bool runOpenocdDualBank(const std::string &ocd, const std::string &scripts,
+                        std::string &logPath)
+{
+    std::string cmd = openocdPrefix(ocd, scripts);
+    cmd += " -c \"init\"";
+    cmd += " -c \"reset halt\"";
+    cmd += " -c \"stm32l4x mass_erase 0\"";
+    // Bank 0, FLASH_OPTR (offset 0x20 from the flash registers), value, mask:
+    // DBANK alone. Every other option bit is left exactly as it was read.
+    cmd += " -c \"stm32l4x option_write 0 0x20 0x00400000 0x00400000\"";
+    cmd += " -c \"stm32l4x option_load 0\"";
+    cmd += " -c \"shutdown\"";
+
+    std::string text;
+    const int exitCode = runLogged(cmd, logPath, text);
+    if (exitCode < 0)
+        return false;
+    if (text.find("mass erase complete") == std::string::npos
+        || text.find("Option written") == std::string::npos) {
+        std::printf("\n  FAILED  the switch to dual-bank did not go through (OpenOCD exit code %d).\n"
+                    "  The tail of its log (%s):\n\n",
+                    exitCode, logPath.c_str());
+        printLogTail(text);
+        explainFailure(text);
+        return false;
+    }
+
+    Sleep(2000); // the option-byte reload resets the chip
+    std::string checkPath = siblingLog(logPath, "-check");
+    std::string check;
+    const int checkExit = runLogged(openocdPrefix(ocd, scripts)
+                                        + " -c \"init\" -c \"flash probe 0\" -c \""
+                                        + kOptrRead + "\" -c \"reset halt\""
+                                        + " -c \"stm32l4x mass_erase 0\" -c \"shutdown\"",
+                                    checkPath, check);
+    uint32_t optr = 0;
+    const bool read = checkExit >= 0 && optrIn(check, &optr);
+    if (read && (optr & kOptrDbank) != 0 && rdpLevelOf(optr) == 0
+        && check.find("mass erase complete") != std::string::npos)
+        return true;
+
+    if (read && (optr & kOptrDbank) == 0)
+        std::printf("\n  FAILED  the option bytes still say single-bank (0x%08X) after the\n"
+                    "  reload.",
+                    static_cast<unsigned>(optr));
+    else
+        std::printf("\n  FAILED  the unit did not confirm the switch (OpenOCD exit code %d).",
+                    checkExit);
+    std::printf(" The tail of the log (%s):\n\n", checkPath.c_str());
+    printLogTail(check);
+    explainFailure(check);
     return false;
 }
 
@@ -357,6 +601,11 @@ int main(int argc, char **argv)
     std::string scripts = dir + "\\openocd\\scripts";
     bool assumeYes = false;
     bool unlock = false;
+    // Known before the first possible exit, so even the usage message pauses
+    // exactly when a run would have.
+    for (int i = 1; i < argc; ++i)
+        if (std::string(argv[i]) == "--yes")
+            assumeYes = true;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -374,7 +623,7 @@ int main(int argc, char **argv)
         else {
             std::printf("usage: CANTripleInitialProgramming [--yes] [--unlock] "
                         "[--bootloader FILE] [--firmware FILE] [--openocd EXE]\n");
-            return 1;
+            return finish(1, assumeYes);
         }
     }
 
@@ -408,7 +657,7 @@ int main(int argc, char **argv)
         if (appPath.empty()) {
             std::printf("  FAILED  no can-triple-*.ctf found beside this "
                         "program and no --firmware given\n");
-            return 1;
+            return finish(1, assumeYes);
         }
     }
 
@@ -427,7 +676,7 @@ int main(int argc, char **argv)
     }
     if (!fileExists(ocdPath)) {
         std::printf("  FAILED  openocd not found at %s\n", ocdPath.c_str());
-        return 1;
+        return finish(1, assumeYes);
     }
     // The 512K-bank target config normally sits in the bundled scripts dir;
     // when running against the PlatformIO fallback it is not there, so look
@@ -437,7 +686,7 @@ int main(int argc, char **argv)
         std::printf("  FAILED  stm32g4x_512k.cfg not found in %s or beside "
                     "this program - without it OpenOCD uses the stock 128 KB "
                     "flash map\n", scripts.c_str());
-        return 1;
+        return finish(1, assumeYes);
     }
 
     // ---------------------------------------------------- validate both images
@@ -445,23 +694,23 @@ int main(int argc, char **argv)
     std::vector<uint8_t> bl, app;
     if (!readFile(blPath, bl)) {
         std::printf("  FAILED  cannot read %s\n", blPath.c_str());
-        return 1;
+        return finish(1, assumeYes);
     }
     if (!readFile(appPath, app)) {
         std::printf("  FAILED  cannot read %s\n", appPath.c_str());
-        return 1;
+        return finish(1, assumeYes);
     }
 
     uint32_t blVersion = 0;
     if (!validateBootloader(bl, &blVersion))
-        return 1;
+        return finish(1, assumeYes);
 
     // The device's own validator, against the bootloader ABOUT TO BE
     // INSTALLED — not whatever the unit currently runs, which may be nothing.
     const uint8_t r = fw_image_validate(app.data(), (uint32_t)app.size(), blVersion);
     if (r != FW_RESULT_OK) {
         std::printf("  FAILED  %s: %s\n", appPath.c_str(), describe(r));
-        return 1;
+        return finish(1, assumeYes);
     }
     const FwImageHeader *hdr = fw_image_header(app.data(), (uint32_t)app.size());
 
@@ -472,7 +721,9 @@ int main(int argc, char **argv)
                 hdr->fw_version_patch, app.size());
     std::printf("\n  This programs the bootloader at 0x08000000 and the\n"
                 "  application at 0x08004000 over the built-in ST-LINK.\n"
-                "  The stored configuration and retained values are NOT touched.\n"
+                "  The stored configuration and retained values are NOT touched,\n"
+                "  unless the unit's flash turns out to be in single-bank mode:\n"
+                "  switching it to dual-bank erases the chip, and you are asked first.\n"
                 "  The firmware installed here is a starting point - pick the\n"
                 "  firmware you want inside the CAN Triple Device Manager\n"
                 "  (Online > Update Firmware) once the device is running.\n"
@@ -486,14 +737,9 @@ int main(int argc, char **argv)
                     "  the Manager (Online > Firmware License Manager), and it locks itself\n"
                     "  at the next power-up.\n\n");
 
-    if (!assumeYes) {
-        std::printf("  Type YES to program the device: ");
-        char answer[16] = {0};
-        if (!std::fgets(answer, sizeof(answer), stdin)
-            || std::strncmp(answer, "YES", 3) != 0) {
-            std::printf("  Nothing done.\n");
-            return 1;
-        }
+    if (!assumeYes && !askYes("  Type YES to program the device: ")) {
+        std::printf("  Nothing done - type YES to program the device.\n");
+        return finish(1, assumeYes);
     }
 
     if (unlock) {
@@ -501,12 +747,66 @@ int main(int argc, char **argv)
         std::string unlockLog = dir + "\\initial-programming-unlock.log";
         if (!runOpenocdUnlock(ocdPath, scripts, unlockLog)) {
             std::printf("\n  Nothing was programmed. Fix the cause above and run again.\n");
-            if (!assumeYes) {
-                std::printf("\n  Press Enter to close.");
-                std::getchar();
-            }
-            return 1;
+            return finish(1, assumeYes);
         }
+    }
+
+    // ------------------------------------------------- the flash's bank mode
+    //
+    // Read before anything is programmed: a single-bank unit is switched first,
+    // and the switch erases the chip, so the programming pass must come after
+    // it. The same read settles readout protection, which would fail the
+    // programming pass at its first verify.
+    std::printf("\n  reading the device's option bytes...\n");
+    std::string probeLog = dir + "\\initial-programming-probe.log";
+    std::string probe;
+    const int probeExit = runOpenocdProbe(ocdPath, scripts, probeLog, probe);
+    uint32_t optr = 0;
+    if (probeExit < 0) {
+        std::printf("\n  Nothing was programmed. Fix the cause above and run again.\n");
+        return finish(1, assumeYes);
+    }
+    if (!optrIn(probe, &optr)) {
+        std::printf("\n  FAILED  could not read the device (OpenOCD exit code %d).\n"
+                    "  The tail of its log (%s):\n\n",
+                    probeExit, probeLog.c_str());
+        printLogTail(probe);
+        explainFailure(probe);
+        std::printf("\n  Nothing was programmed. Fix the cause above and run again.\n");
+        return finish(1, assumeYes);
+    }
+    if (rdpLevelOf(optr) != 0) {
+        // Only reachable without --unlock: the unlock's own check demands level 0.
+        printProtectedStatement();
+        return finish(1, assumeYes);
+    }
+
+    bool switchedToDualBank = false;
+    if ((optr & kOptrDbank) == 0) {
+        std::printf("\n  This unit's flash is in SINGLE-BANK mode (option bytes 0x%08X).\n"
+                    "  The CAN Triple firmware needs dual-bank: in single-bank mode it\n"
+                    "  refuses firmware updates and licences (\"flash write failed (0x05)\")\n"
+                    "  and stalls while saving a configuration. Switching to dual-bank\n"
+                    "  ERASES THE WHOLE CHIP, stored configuration and retained values\n"
+                    "  included - after the switch the firmware would not find them anyway.\n"
+                    "  To keep the configuration: close this window, use Get Configuration\n"
+                    "  in the CAN Triple Device Manager and save it, run this again, and\n"
+                    "  Send it back once the unit is running.\n\n",
+                    static_cast<unsigned>(optr));
+        if (!assumeYes && !unlock
+            && !askYes("  Type YES to switch to dual-bank and program the device: ")) {
+            std::printf("  Nothing done - the unit is still in single-bank mode.\n");
+            return finish(1, assumeYes);
+        }
+        std::printf("\n  switching the flash to dual-bank (this erases the chip)...\n");
+        std::string bankLog = dir + "\\initial-programming-dualbank.log";
+        if (!runOpenocdDualBank(ocdPath, scripts, bankLog)) {
+            std::printf("\n  Nothing was programmed. Fix the cause above and run again -\n"
+                        "  a unit still in single-bank mode is switched again.\n");
+            return finish(1, assumeYes);
+        }
+        switchedToDualBank = true;
+        std::printf("  done - the flash is in dual-bank mode and erased.\n");
     }
 
     std::printf("\n  programming (the device resets when this finishes)...\n");
@@ -515,11 +815,7 @@ int main(int argc, char **argv)
         std::printf("\n  The device was NOT necessarily left working - run this "
                     "tool again once the\n  cause above is fixed. Nothing about "
                     "a failed attempt is unrecoverable.\n");
-        if (!assumeYes) {
-            std::printf("\n  Press Enter to close.");
-            std::getchar();
-        }
-        return 1;
+        return finish(1, assumeYes);
     }
 
     std::printf("\n  DONE - bootloader v%u and firmware %u.%u.%u installed "
@@ -528,13 +824,12 @@ int main(int argc, char **argv)
                 "  the CAN Triple Device Manager and use Online > Update Firmware.\n",
                 blVersion, hdr->fw_version_major, hdr->fw_version_minor,
                 hdr->fw_version_patch);
+    if (switchedToDualBank)
+        std::printf("\n  The flash was switched to dual-bank mode, which erased the chip:\n"
+                    "  the unit has no stored configuration. Send it one from the Manager.\n");
     if (unlock)
         std::printf("\n  The unit is blank and unlicensed. Issue its licence in the Manager\n"
                     "  (Online > Firmware License Manager); it locks itself at the next\n"
                     "  power-up after that.\n");
-    if (!assumeYes) {
-        std::printf("\n  Press Enter to close.");
-        std::getchar();
-    }
-    return 0;
+    return finish(0, assumeYes);
 }

@@ -2,7 +2,7 @@
 
 A counter is a calculation that steps a value up or down on the edges of boolean input channels. Its output is an ordinary generated [channel](channels.md), so it can feed [math channels](math-channels.md), [User Conditions](conditions.md), transmit messages, or be watched live in [Monitor Channels](monitor.md). Counters are evaluated on the device at 100 Hz.
 
-To edit counters, choose **Calculations → Up / Down Counters…**. The dialog lists every counter with columns **#**, **Active**, **Output**, **Type** and **Inputs**. Use **Add…**, **Change…** (or double-click a row) and **Remove** to manage the list. The device supports at most **50** counters. Changes are written into the configuration only when you close the dialog with **OK**; **Cancel** discards them.
+To edit counters, choose **Calculations → Up / Down Counters…**. The dialog lists every counter with columns **#**, **Active**, **Output**, **Type** and **Inputs**. Use **Add…**, **Change…** (or double-click a row), **↑ Move Up** / **↓ Move Down** and **Remove** to manage the list. The device supports at most **50** counters. Changes are written into the configuration only when you close the dialog with **OK**; **Cancel** discards them.
 
 ## To add a counter
 1. Choose **Calculations → Up / Down Counters…** and click **Add…**. The **Up / Down Counter Settings** editor opens.

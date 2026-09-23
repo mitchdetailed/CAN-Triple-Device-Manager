@@ -6,7 +6,7 @@ A constant is essentially a custom channel (name, data type, decimal places, wit
 
 ## The Constants dialog
 
-To add a constant, choose **Calculations → Constants…**. The dialog lists every row with the columns **#**, **Active**, **Name**, **Data Type** and **Value**, with **Add…**, **Change…** and **Remove** buttons at the right. Double-clicking a row opens it for change. OK commits the changes; Cancel discards them.
+To add a constant, choose **Calculations → Constants…**. The dialog lists every row with the columns **#**, **Active**, **Name**, **Data Type** and **Value**, with **Add…**, **Change…**, **↑ Move Up** / **↓ Move Down** and **Remove** buttons at the right. Double-clicking a row opens it for change. OK commits the changes; Cancel discards them.
 
 > **Note:** Adding beyond the limit reports "The device supports at most 100 constants."
 

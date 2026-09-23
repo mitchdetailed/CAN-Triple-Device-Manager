@@ -123,6 +123,13 @@ shows raw frames from all three buses as they arrive, with columns
 <a href="#overwrite">Overwrite Mode</a>. Standard IDs are shown as three hex
 digits (0x123), extended IDs as eight (0x18FEF100).</p>
 
+<p class="note">A device can protect the viewer with a <b>CAN Viewer</b>
+password (<b>Online → Set Access Passwords…</b>, device firmware 1.0.14 or
+newer). The viewer then asks for it as it opens; until it is entered the device
+sends no frames and refuses injected ones. Once entered it holds until the unit
+is powered off, so reopening the viewer does not ask again. Monitor Channels is
+not affected.</p>
+
 <table>
 <tr><th>Control</th><th>Meaning</th></tr>
 <tr><td>Pause</td><td>Stops capturing new frames; frames arriving while paused

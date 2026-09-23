@@ -1,6 +1,7 @@
 // Calculations > Timers — grid editor for Configuration::timerRows.
 // Two tabs: Start/Stop and Settings.
 #include "timers_dialog.h"
+#include "window_memory.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -231,6 +232,7 @@ public:
         m_activeCheck->setChecked(m_row.active);
 
         resize(460, sizeHint().height());
+        rememberWindowSize(this, QStringLiteral("timerRow")); // sized to content by default; a size the user chose wins
     }
 
     TimerRow result() const { return m_row; }
@@ -541,6 +543,7 @@ TimersDialog::TimersDialog(Configuration *config, QWidget *parent)
     setWindowTitle(tr("Timers"));
     setModal(true);
     resize(700, 400);
+    rememberWindowSize(this, QStringLiteral("timers")); // the default, until the user changes it
 
     m_tree = new QTreeWidget(this);
     m_tree->setColumnCount(6);
@@ -560,10 +563,26 @@ TimersDialog::TimersDialog(Configuration *config, QWidget *parent)
     m_addButton = new QPushButton(tr("Add…"), this);
     m_changeButton = new QPushButton(tr("Change…"), this);
     m_removeButton = new QPushButton(tr("Remove"), this);
+    // Row order is evaluation order — the engine runs every table top to
+    // bottom in one pass (see engine.html) — so a row that reads another row's
+    // output belongs below it. The same pair Communications Setup has, for the
+    // same reason; the object names are what the tests press.
+    m_upButton = new QPushButton(tr("↑ Move Up"), this);
+    m_upButton->setObjectName(QStringLiteral("moveUp"));
+    m_downButton = new QPushButton(tr("↓ Move Down"), this);
+    m_downButton->setObjectName(QStringLiteral("moveDown"));
+    const QString orderTip = tr("Rows run in list order, top first — a row that reads another row's "
+                                "output belongs below it.");
+    m_upButton->setToolTip(orderTip);
+    m_downButton->setToolTip(orderTip);
+    connect(m_upButton, &QPushButton::clicked, this, [this]() { onMove(-1); });
+    connect(m_downButton, &QPushButton::clicked, this, [this]() { onMove(+1); });
 
     auto *sideLayout = new QVBoxLayout;
     sideLayout->addWidget(m_addButton);
     sideLayout->addWidget(m_changeButton);
+    sideLayout->addWidget(m_upButton);
+    sideLayout->addWidget(m_downButton);
     sideLayout->addWidget(m_removeButton);
     sideLayout->addStretch(1);
 
@@ -665,6 +684,21 @@ void TimersDialog::onRemove()
     updateButtons();
 }
 
+// Swaps the selected row with its neighbour and follows it, so the button can
+// be pressed again to keep going. The working copy moves here; the document
+// takes the new order on OK like every other edit.
+void TimersDialog::onMove(int delta)
+{
+    const int row = m_tree->indexOfTopLevelItem(m_tree->currentItem());
+    const int target = row + delta;
+    if (row < 0 || target < 0 || target >= m_rows.size())
+        return;
+    m_rows.swapItemsAt(row, target);
+    rebuild();
+    m_tree->setCurrentItem(m_tree->topLevelItem(target));
+    updateButtons();
+}
+
 void TimersDialog::updateButtons()
 {
     // QTreeWidget keeps a non-null currentItem() after the selection clears, so
@@ -672,6 +706,9 @@ void TimersDialog::updateButtons()
     const bool hasSelection = !m_tree->selectedItems().isEmpty();
     m_changeButton->setEnabled(hasSelection);
     m_removeButton->setEnabled(hasSelection);
+    const int row = m_tree->indexOfTopLevelItem(m_tree->currentItem());
+    m_upButton->setEnabled(hasSelection && row > 0);
+    m_downButton->setEnabled(hasSelection && row >= 0 && row < m_rows.size() - 1);
 }
 
 } // namespace ct

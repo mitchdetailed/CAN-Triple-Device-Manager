@@ -1,4 +1,5 @@
 #include "help_window.h"
+#include "window_memory.h"
 
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -114,6 +115,7 @@ HelpWindow::HelpWindow(QWidget *parent)
 {
     setWindowTitle(tr("CAN Triple Device Manager Help"));
     resize(900, 650);
+    rememberWindowSize(this, QStringLiteral("help")); // the default, until the user changes it
 
     m_engine = new QHelpEngine(prepareCollection(), this);
     const bool engineReady = m_engine->setupData();

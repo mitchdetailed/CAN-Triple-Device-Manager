@@ -87,7 +87,16 @@ void ConnectionSettingsDialog::refreshPorts()
     m_portCombo->clear();
 
     int preselect = -1;
-    int stlinkIndex = -1;
+    // THE HIGHEST-NUMBERED COM PORT is the default. Windows numbers a device it
+    // has not met before after every port it already knows, so the unit that
+    // was just plugged in is nearly always the highest. Among ST-LINK ports
+    // first, though: a Bluetooth serial port is often the highest number on a
+    // laptop, and it is never a CAN Triple. No ST-LINK at all, and the highest
+    // port stands. The port already chosen still wins on Refresh.
+    int highestIndex = -1;
+    int highestNumber = -1;
+    int highestStlinkIndex = -1;
+    int highestStlinkNumber = -1;
     const auto ports = QSerialPortInfo::availablePorts();
     for (const QSerialPortInfo &info : ports) {
         QString label = info.portName();
@@ -97,12 +106,30 @@ void ConnectionSettingsDialog::refreshPorts()
         const int idx = m_portCombo->count() - 1;
         if (info.portName() == previous && preselect < 0)
             preselect = idx;
-        if (stlinkIndex < 0 && info.description().contains(QStringLiteral("STLink"), Qt::CaseInsensitive))
-            stlinkIndex = idx;
+        const QString name = info.portName();
+        if (name.startsWith(QStringLiteral("COM"), Qt::CaseInsensitive)) {
+            bool ok = false;
+            const int number = name.mid(3).toInt(&ok);
+            if (ok && number > highestNumber) {
+                highestNumber = number;
+                highestIndex = idx;
+            }
+            const bool stlink =
+                info.description().contains(QStringLiteral("STLink"), Qt::CaseInsensitive)
+                || info.description().contains(QStringLiteral("ST-Link"), Qt::CaseInsensitive)
+                || info.manufacturer().contains(QStringLiteral("STMicroelectronics"),
+                                                Qt::CaseInsensitive);
+            if (ok && stlink && number > highestStlinkNumber) {
+                highestStlinkNumber = number;
+                highestStlinkIndex = idx;
+            }
+        }
     }
 
     if (preselect < 0)
-        preselect = stlinkIndex;
+        preselect = highestStlinkIndex;
+    if (preselect < 0)
+        preselect = highestIndex;
     if (preselect < 0 && m_portCombo->count() > 0)
         preselect = 0;
     if (preselect >= 0)

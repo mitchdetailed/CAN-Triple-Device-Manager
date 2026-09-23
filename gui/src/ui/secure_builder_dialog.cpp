@@ -177,9 +177,14 @@ SecureBuilderDialog::SecureBuilderDialog(const QString &openDocumentPath, BuildF
         m_setSlotCheck[i] = r.check;
         m_setSlot[i] = r.edit;
     }
+    r = addRow(pwForm, tr("Update CAN Viewer Password:"), pwGroup, true);
+    m_setViewerCheck = r.check;
+    m_setViewer = r.edit;
     auto *pwNote = new QLabel(
         tr("A ticked box with an empty field REMOVES that password. Unticked leaves it "
-           "unchanged. The device accepts these because the package proves the Firmware Key."),
+           "unchanged. The device accepts these because the package proves the Firmware Key. "
+           "The CAN Viewer password needs device firmware 1.0.14 or newer; the Manager will "
+           "not install a package that sets it on an older unit."),
         pwGroup);
     pwNote->setWordWrap(true);
     pwForm->addRow(pwNote);
@@ -199,12 +204,12 @@ SecureBuilderDialog::SecureBuilderDialog(const QString &openDocumentPath, BuildF
     for (QLineEdit *e : {m_source, m_matchManufacturer, m_matchModel, m_matchVersion,
                          m_matchMcuId, m_matchSerial, m_key, m_openPassword,
                          m_openPasswordConfirm, m_setSend, m_setGet, m_setSlot[0], m_setSlot[1],
-                         m_setSlot[2], m_setSlot[3]})
+                         m_setSlot[2], m_setSlot[3], m_setViewer})
         connect(e, &QLineEdit::textChanged, this, &SecureBuilderDialog::refreshEnabled);
     for (QCheckBox *c : {m_matchManufacturerCheck, m_matchModelCheck, m_matchVersionCheck,
                          m_matchMcuIdCheck, m_matchSerialCheck, m_includeEditable,
                          m_setSendCheck, m_setGetCheck, m_setSlotCheck[0], m_setSlotCheck[1],
-                         m_setSlotCheck[2], m_setSlotCheck[3]})
+                         m_setSlotCheck[2], m_setSlotCheck[3], m_setViewerCheck})
         connect(c, &QCheckBox::toggled, this, &SecureBuilderDialog::refreshEnabled);
 
     refreshEnabled();
@@ -267,6 +272,8 @@ bool SecureBuilderDialog::collectPolicy(SecurePackagePolicy *out, QString *why) 
         p.setCommsSlot[i] = m_setSlotCheck[i]->isChecked();
         p.commsSlotKey[i] = deriveAccessKey(m_setSlot[i]->text());
     }
+    p.setViewer = m_setViewerCheck->isChecked();
+    p.viewerKey = deriveAccessKey(m_setViewer->text());
 
     if (out)
         *out = p;
@@ -321,6 +328,7 @@ void SecureBuilderDialog::refreshEnabled()
     weak(m_setGetCheck, m_setGet, tr("Get Config Password"));
     for (int i = 0; i < 4; ++i)
         weak(m_setSlotCheck[i], m_setSlot[i], tr("Protected Comms Slot %1 Password").arg(i + 1));
+    weak(m_setViewerCheck, m_setViewer, tr("CAN Viewer Password"));
 
     // An editable copy is only as protected as its password, so it takes the
     // same policy as a device password, plus a confirmation: a typo here is a

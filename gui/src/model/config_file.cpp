@@ -205,8 +205,16 @@ bool readBinaryConfigFile(const QString &path, QByteArray *plainBody, ConfigFile
     // its wording, so the wording is replaced: for a file that cannot require a
     // password there is exactly one explanation left for a tag that does not
     // verify, and naming it is more use than repeating the container's hedge.
+    // A container NEWER than this build is a newer Manager's file, not a
+    // damaged one, and says so — the rewrite below is for a tag that fails.
+    // (Until 1.2.6 an OLDER one, format 1, landed here too and was called
+    // damaged; it is read again now.)
+    const QByteArray blob = raw.mid(kConfigPreambleBytes);
+    if (secureBlobFormatVersion(blob) > kSecureFormatVersion)
+        return fail(QStringLiteral("This file was saved by a newer version of "
+                                   "CAN Triple Device Manager and can't be opened."));
     SecureFileInfo blobInfo;
-    if (!openSecureBlob(raw.mid(kConfigPreambleBytes), plainBody, &blobInfo, nullptr))
+    if (!openSecureBlob(blob, plainBody, &blobInfo, nullptr))
         return fail(QStringLiteral("This configuration file is damaged and cannot be opened."));
 
     if (info)

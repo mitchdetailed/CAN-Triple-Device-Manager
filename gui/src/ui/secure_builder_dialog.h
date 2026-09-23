@@ -103,6 +103,8 @@ private:
     QLineEdit *m_setGet = nullptr;
     QCheckBox *m_setSlotCheck[4] = {nullptr, nullptr, nullptr, nullptr};
     QLineEdit *m_setSlot[4] = {nullptr, nullptr, nullptr, nullptr};
+    QCheckBox *m_setViewerCheck = nullptr;
+    QLineEdit *m_setViewer = nullptr;
 
     QLabel *m_warning = nullptr;
     QDialogButtonBox *m_buttons = nullptr;

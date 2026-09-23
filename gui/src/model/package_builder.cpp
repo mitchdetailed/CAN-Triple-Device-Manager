@@ -48,6 +48,13 @@ QList<PlannedFrame> passwordFrames(const SecurePackagePolicy &policy)
         f.stage = QStringLiteral("Setting %1 password").arg(label);
         out.append(f);
     };
+    // The CAN Viewer password FIRST. Firmware before 1.0.14 refuses the
+    // function, and a Manager that predates it relays the stream without the
+    // verdict that would have stopped it. Leading, that refusal comes before
+    // any other password or any configuration write, so the unit is left
+    // exactly as it was.
+    add(policy.setViewer, policy.viewerKey, AccessFunction::CanViewer, 1,
+        QStringLiteral("CAN Viewer"));
     add(policy.setSend, policy.sendKey, AccessFunction::SendConfiguration, 1,
         QStringLiteral("Send Configuration"));
     add(policy.setGet, policy.getKey, AccessFunction::GetConfiguration, 1,

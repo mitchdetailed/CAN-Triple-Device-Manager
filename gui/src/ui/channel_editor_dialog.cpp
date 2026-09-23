@@ -1,5 +1,6 @@
 // Tools > Channel Editor — every channel in the document in one table.
 #include "channel_editor_dialog.h"
+#include "window_memory.h"
 
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -124,6 +125,7 @@ ChannelEditorDialog::ChannelEditorDialog(Configuration *config, QWidget *parent)
     setWindowTitle(tr("Channel Editor"));
     setModal(true);
     resize(1000, 620);
+    rememberWindowSize(this, QStringLiteral("channelEditor")); // the default, until the user changes it
 
     auto *layout = new QVBoxLayout(this);
 

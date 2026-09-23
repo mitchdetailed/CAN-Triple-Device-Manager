@@ -1,5 +1,6 @@
 // File > Check Channels — validation report dialog.
 #include "check_channels_dialog.h"
+#include "window_memory.h"
 
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -44,6 +45,7 @@ CheckChannelsDialog::CheckChannelsDialog(Configuration *config, QWidget *parent)
     setWindowTitle(tr("Check Channels"));
     setModal(true);
     resize(700, 450);
+    rememberWindowSize(this, QStringLiteral("checkChannels")); // the default, until the user changes it
 
     auto *mainLayout = new QVBoxLayout(this);
 

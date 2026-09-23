@@ -16,6 +16,7 @@
 //       Configurations              .ct3 / .ct3s
 //       Communications Templates    .ct3t
 //       Channel Lists               .ct3l
+//       Settings                    windows.ini — window sizes (ui/window_memory.h)
 //       Firmware                    the paired .ctf, staged by the installer
 //
 //     The first three are the product's own file structure, sited with the
@@ -55,14 +56,15 @@
 // fallback only ever applied to 32-bit binaries — so a refused write does not
 // quietly land somewhere else that works. It simply fails.
 //
-// So the INSTALLER grants it, on these three subdirectories and nothing else:
+// So the INSTALLER grants it, on these four subdirectories and nothing else:
 //
 //     [Dirs] Name: "{app}\Configurations";           Permissions: users-modify
 //     [Dirs] Name: "{app}\Communications Templates"; Permissions: users-modify
 //     [Dirs] Name: "{app}\Channel Lists";            Permissions: users-modify
+//     [Dirs] Name: "{app}\Settings";                 Permissions: users-modify
 //
 // That is what makes the layout above work at all, and it is the reason those
-// three entries must not be dropped from the .iss. Three consequences follow, and
+// four entries must not be dropped from the .iss. Three consequences follow, and
 // a caller should know them:
 //
 //   1. A build that no installer ever ran — a development build, a copy of
@@ -102,6 +104,11 @@ QString commsTemplatesDirectory();
 // Channel lists (.ct3l) — Save List… / Load List… in the Monitor Channels
 // picker. Plain JSON of channel names; see model/channel_list.h.
 QString channelListsDirectory();
+
+// The program's own settings that are the MACHINE's rather than an account's:
+// windows.ini, the window sizes (ui/window_memory.h). Regenerable, and the
+// one folder here the uninstaller empties.
+QString settingsDirectory();
 
 // The firmware image the installer staged — {app}\Firmware, holding
 // can-triple-<version>.ctf. Where Update Firmware's Select Firmware Image

@@ -130,10 +130,21 @@ either finished or was never started; either way the device is running valid
 firmware.</td></tr>
 
 <tr><td>The device is password protected</td>
-<td>The update needs the Send Configuration password. On a unit that also guards
-"Get a Configuration", prove that password first from any Online command — the
-dialog cannot read the device's firmware status or take a configuration backup
-without it, and the Update button stays disabled.</td></tr>
+<td>The update asks for the Send Configuration password and, on a unit that also
+guards "Get a Configuration", for that password as well: the dialog cannot read
+the device's firmware status or take a configuration backup without it.
+Cancelling either prompt leaves the update closed. The restart at the end of an
+update clears the device's memory of both; the dialog proves the Get password
+again by itself. If this message appears anyway, close the dialog and open it
+again to be asked afresh.</td></tr>
+
+<tr><td>The device could not write its flash (0x05)</td>
+<td>If it happens on every attempt, the unit's flash is set to single-bank mode,
+where the firmware refuses updates and licences. Run the <b>CAN Triple Initial
+Programming Tool</b> from the Start Menu with the unit connected: it reads the
+flash mode, switches it to dual-bank, and programs the firmware. The switch
+erases the whole chip, stored configuration included, so use <b>Get
+Configuration</b> and save it first, then Send it back afterwards.</td></tr>
 </table>
 
 <p>A device whose front LED is flashing rapidly and which does not answer at all
