@@ -8,9 +8,10 @@ the small prebuilt library the Device Manager links.
 
 | file | what it is |
 |---|---|
-| `bootloader.bin` | the bootloader the **CAN Triple Initial Programming Tool** installs over USB |
+| `bootloader.bin` | the CAN Triple's bootloader, which the **CAN Triple Initial Programming Tool** installs over USB |
 | `can-triple-<version>.ctf` | the firmware image the Manager installs via **Online → Update Firmware…** |
 | `can-triple-<version>-<variant>.ctf` | a **variant** of the same firmware with its configuration tables sized differently (the installer carries these in `Firmware\Variants`) — see [Files](../docs/files.md) and [Updating Firmware](../docs/firmware-update.md) |
+| `can-triple-2-<version>.ctf` | the **CAN Triple 2.0**'s firmware, a line of its own numbered from 2.0.0 (the installer carries it in `Firmware\CAN Triple 2.0`, where **Online → Update Firmware…** opens for a CAN Triple 2.0) — see [CAN Triple 2.0](../docs/can-triple-2.md) |
 
 A `.ctf` is a packed, checksummed firmware image. The device validates it
 before committing anything, and a failed or interrupted update cannot brick
