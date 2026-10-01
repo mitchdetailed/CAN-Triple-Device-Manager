@@ -8,6 +8,7 @@ New here? Start with [how the program is organised](overview.md),
 then the first entry below.
 
 - [Getting Started](getting-started.md)
+- [The CAN Triple 2.0](can-triple-2.md)
 - [Communications: Messages & Sections](communications.md)
   - [Channels](channels.md)
   - [Data Types & Decimal Places](datatypes.md)

@@ -48,8 +48,8 @@ Leave it empty for "(never reset)".</td></tr>
 <tr><td>Control</td><td>When reset, set value to :</td><td>The value loaded on
 a reset edge.</td></tr>
 <tr><td>Control</td><td>Preserve value across power cycles</td><td>Retains the
-running total in flash and restores it at the next power-up instead of the
-starting value — see below.</td></tr>
+running total and restores it at the next power-up instead of the starting
+value — see below.</td></tr>
 <tr><td>Limits</td><td>Minimum : / Maximum :</td><td>The value holds at these
 limits — for a count-down integrator the minimum is the floor it stops at — unless
 <b>Roll over at the limits</b> is ticked. A maximum that does not exceed the
@@ -70,7 +70,9 @@ device.</td></tr>
 
 ## Preserve and flash wear
 
-Preserved values live in a small flash store that is flushed about once a minute and holds at most **20** entries, shared with preserved [counters](counters.md). The two are not equal customers of that store: a counter is event-driven and often unchanged for a whole minute, so its flush costs nothing, but a running integrator changes on every step and writes a record at essentially every 60 s flush.
+A CAN Triple 2.0 keeps preserved values in FRAM, memory with no write limit: every counter and integrator can be preserved, values are written every 0.1 s while they change, and nothing below applies to it. Check Channels says nothing about wear for a configuration whose target is a CAN Triple 2.0.
+
+On a CAN Triple, preserved values live in a small flash store that is flushed about once a minute and holds at most **20** entries, shared with preserved [counters](counters.md). The two are not equal customers of that store: a counter is event-driven and often unchanged for a whole minute, so its flush costs nothing, but a running integrator changes on every step and writes a record at essentially every 60 s flush.
 
 > **Warning:** With N preserved values in use, the store's active page (about 254 records) fills in roughly 254/N flushes — expect a flash erase about every **254/N minutes** while an integrator is running. Check Channels reports this estimate whenever a preserved integrator is configured. Prefer **Preserve value across power cycles** only on totals that genuinely must survive a power cycle.
 

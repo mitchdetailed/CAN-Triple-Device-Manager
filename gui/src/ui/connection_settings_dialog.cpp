@@ -14,6 +14,7 @@
 
 #include <cstring>
 
+#include "../protocol/usb_port.h"
 #include "../protocol/wire_structs.h"
 
 namespace ct {
@@ -21,6 +22,9 @@ namespace ct {
 namespace {
 
 const qint32 kBaudRates[] = { 7372800, 3686400, 1843200, 921600, 460800, 230400, 115200 };
+
+// A port's item carries whether it is a CAN Triple 2.0 (usb_port.h).
+constexpr int kUsbUnitRole = Qt::UserRole + 1;
 
 } // namespace
 
@@ -68,6 +72,9 @@ ConnectionSettingsDialog::ConnectionSettingsDialog(DeviceLink *link, QWidget *pa
 
     connect(m_refreshButton, &QPushButton::clicked, this,
             &ConnectionSettingsDialog::refreshPorts);
+    // The baud rate means nothing to a USB unit, so it follows the choice.
+    connect(m_portCombo, &QComboBox::currentIndexChanged, this,
+            &ConnectionSettingsDialog::updateUi);
     connect(m_connectButton, &QPushButton::clicked, this,
             &ConnectionSettingsDialog::onConnectClicked);
     connect(m_testButton, &QPushButton::clicked, this,
@@ -93,17 +100,28 @@ void ConnectionSettingsDialog::refreshPorts()
     // first, though: a Bluetooth serial port is often the highest number on a
     // laptop, and it is never a CAN Triple. No ST-LINK at all, and the highest
     // port stands. The port already chosen still wins on Refresh.
+    //
+    // A CAN Triple 2.0 comes before all of them, and is named: it is its own
+    // USB device, so its port IS the unit, where an ST-LINK's port is only a
+    // way to one. Windows' own driver calls it "USB Serial Device", which says
+    // nothing, so the name comes from its USB IDs (usb_port.h).
     int highestIndex = -1;
     int highestNumber = -1;
     int highestStlinkIndex = -1;
     int highestStlinkNumber = -1;
+    int highestUsbIndex = -1;
+    int highestUsbNumber = -1;
     const auto ports = QSerialPortInfo::availablePorts();
     for (const QSerialPortInfo &info : ports) {
+        const bool usbUnit = isCanTriple2Port(info);
         QString label = info.portName();
-        if (!info.description().isEmpty())
+        if (usbUnit)
+            label += tr(" — CAN Triple 2.0 (USB)");
+        else if (!info.description().isEmpty())
             label += QStringLiteral(" — ") + info.description();
         m_portCombo->addItem(label, info.portName());
         const int idx = m_portCombo->count() - 1;
+        m_portCombo->setItemData(idx, usbUnit, kUsbUnitRole);
         if (info.portName() == previous && preselect < 0)
             preselect = idx;
         const QString name = info.portName();
@@ -123,9 +141,15 @@ void ConnectionSettingsDialog::refreshPorts()
                 highestStlinkNumber = number;
                 highestStlinkIndex = idx;
             }
+            if (ok && usbUnit && number > highestUsbNumber) {
+                highestUsbNumber = number;
+                highestUsbIndex = idx;
+            }
         }
     }
 
+    if (preselect < 0)
+        preselect = highestUsbIndex;
     if (preselect < 0)
         preselect = highestStlinkIndex;
     if (preselect < 0)
@@ -243,13 +267,19 @@ void ConnectionSettingsDialog::updateUi()
     m_connectButton->setText(open ? tr("Disconnect") : tr("Connect"));
     m_testButton->setEnabled(open);
     m_portCombo->setEnabled(!open);
-    m_baudCombo->setEnabled(!open);
+    const bool usbUnit = m_portCombo->currentData(kUsbUnitRole).toBool();
+    m_baudCombo->setEnabled(!open && !usbUnit);
+    m_baudCombo->setToolTip(usbUnit ? tr("The CAN Triple 2.0 is a USB device: no baud rate "
+                                         "applies to it.")
+                                    : QString());
     m_refreshButton->setEnabled(!open);
 
     if (open) {
-        m_statusLabel->setText(tr("Connected to %1 @ %2")
-                                   .arg(m_link->portName())
-                                   .arg(m_link->baudRate()));
+        m_statusLabel->setText(isCanTriple2Port(m_link->portName())
+                                   ? tr("Connected to %1 (USB)").arg(m_link->portName())
+                                   : tr("Connected to %1 @ %2")
+                                         .arg(m_link->portName())
+                                         .arg(m_link->baudRate()));
     } else {
         m_statusLabel->setText(tr("Not connected"));
     }

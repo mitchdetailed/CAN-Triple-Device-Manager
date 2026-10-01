@@ -7,6 +7,9 @@
 #include <QString>
 
 #include "../model/configuration.h"
+#include "../protocol/hardware.h"
+
+#include <optional>
 
 class QComboBox;
 class QLabel;
@@ -27,8 +30,14 @@ public:
     // this session lower a Protect Communication marking — and by spec only a
     // connected device can answer it. Empty is a valid state (the app runs
     // offline by design) and means those two actions are refused with a message.
+    //
+    // `connected` is the connected unit's hardware report, when there is one.
+    // A unit that cannot switch its termination (the CAN Triple 2.0 rev 2.00)
+    // has the Termination Resistor setting greyed out, with the reason: the
+    // setting stays in the configuration for units that can.
     explicit CommunicationsDialog(Configuration *config, QWidget *parent = nullptr,
-                                  ProtectedCommsProver prover = {});
+                                  ProtectedCommsProver prover = {},
+                                  std::optional<DeviceHardware> connected = std::nullopt);
 
 private:
     struct BusTab {
@@ -122,6 +131,7 @@ private:
 
     Configuration *m_config;
     ProtectedCommsProver m_prover; // Protected open/untick only; may be empty
+    std::optional<DeviceHardware> m_connected; // the connected unit's report, if any
     BusConfig m_buses[3]; // working copies, committed on OK
     QTabWidget *m_tabs;
     BusTab m_busTabs[3];

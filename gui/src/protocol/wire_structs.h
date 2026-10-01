@@ -97,6 +97,16 @@ constexpr uint8_t CMD_READ_CAN_SETUP      = 0x30;
 // channels" rather than as a failure.
 constexpr uint8_t CMD_WRITE_DEVICE_CHANNELS = 0x32;
 constexpr uint8_t CMD_READ_DEVICE_CHANNELS  = 0x33;
+// Firmware 1.0.15: the EXTENDED device channels (DEVCH_EXT_BASE onward, the
+// first of them CAN1..3 Tx Dropped), in their own pair so the pair above keeps
+// its 41 entries exactly — Managers up to 1.2.6 discard a longer reply to it,
+// and every device channel mapping with it. A WRITE of more entries than the
+// unit knows is accepted and the extras dropped; a READ answers the unit's own
+// count, of which this build keeps the ones it knows. Send- and Get-gated like
+// the pair above; older firmware NACKs ERR_INVALID_CMD, so both steps are
+// optional. The read is fixed-shape with no echo: in isReadResponse() only.
+constexpr uint8_t CMD_WRITE_DEVICE_CHANNELS_EXT = 0x55;
+constexpr uint8_t CMD_READ_DEVICE_CHANNELS_EXT  = 0x56;
 // The 8x8 lookup table — the 4x4's replacement — carried in the shape v13 gave
 // the 2x16: a definition record plus the grid, split because a combined record
 // would be 73 + 8*32 = 329 bytes. Note WHICH limit forbids that, because it is
@@ -178,6 +188,10 @@ constexpr uint8_t CMD_GET_PROTECTION = 0x4F;
 // (DeviceCapacity::builtIn()).
 constexpr uint8_t CMD_GET_CAPACITY = 0x50;
 constexpr uint8_t CAPACITY_REPORT_FORMAT = 1;
+// The CAN Triple 2.0 line: format 1 followed by a CapacityExtension, which says
+// what the unit holds besides its tables (today: its retained values). The 1.x
+// line, and every image before the 2.0 line, sends format 1.
+constexpr uint8_t CAPACITY_REPORT_FORMAT_EXT = 2;
 // v25 (firmware 1.0.12): channel overrides. SET pins one signal at a value in
 // its physical units (OverridePayload below, 7 bytes) or releases it; LEASE
 // keeps every override alive and CLEAR releases them all; both carry nothing.
@@ -191,6 +205,37 @@ constexpr uint8_t CMD_SET_OVERRIDE = 0x51;
 constexpr uint8_t CMD_OVERRIDE_LEASE = 0x52;
 constexpr uint8_t CMD_CLEAR_OVERRIDES = 0x53;
 constexpr int OVERRIDE_LEASE_MS = 3000;
+// v26 (firmware 1.0.15): the hardware report — which board this unit is. There
+// are two: the CAN Triple (1.x, a 48-pin STM32G473 behind an ST-LINK serial
+// port) and the CAN Triple 2.0 (a 100-pin STM32G474 with native USB), and each
+// takes its own firmware. The reply (HardwareReport below) names the family the
+// running firmware was built for, what the silicon says (package code, flash
+// size, debug ID), the board revision and its hardware options, and the running
+// firmware and bootloader versions. Ungated, empty request, fixed shape, no
+// echo: it belongs in isReadResponse() and NOT in echoesRequestRange(), and is
+// listed there in the same edit. Older firmware NACKs ERR_INVALID_CMD, which
+// reads as a CAN Triple 1.x (DeviceHardware::builtIn()) — every 2.0 ships with
+// firmware that answers. protocol/hardware.h parses it.
+constexpr uint8_t CMD_GET_HARDWARE = 0x54;
+constexpr uint8_t HARDWARE_REPORT_FORMAT = 1;
+constexpr uint8_t HW_FAMILY_CAN_TRIPLE = 1;   // the 1.x board
+constexpr uint8_t HW_FAMILY_CAN_TRIPLE_2 = 2; // CAN Triple 2.0
+constexpr uint8_t HW_REV_SOURCE_NONE = 0;     // not known: a 1.x board records none
+constexpr uint8_t HW_REV_SOURCE_OTP = 1;      // the OTP board descriptor
+constexpr uint8_t HW_REV_SOURCE_DEFAULT = 2;  // the family's first revision, assumed
+// Hardware the unit has AND its firmware drives. A bit a firmware does not know
+// stays clear, so gating on a bit needs no firmware-version check beside it.
+constexpr uint32_t HW_FEAT_TERMINATION = 0x00000001;  // termination switched in software
+constexpr uint32_t HW_FEAT_XCVR_STANDBY = 0x00000002; // transceivers can stand by
+constexpr uint32_t HW_FEAT_USB_LINK = 0x00000004;     // native USB, not an ST-LINK port
+constexpr uint32_t HW_FEAT_QSPI_FLASH = 0x00000008;   // external QSPI flash
+constexpr uint32_t HW_FEAT_FRAM = 0x00000010;         // external FRAM
+constexpr uint32_t HW_FEAT_RGB_LEDS = 0x00000020;     // RGB status LEDs
+constexpr uint32_t HW_FEAT_SUPPLY_SENSE = 0x00000040; // measures its supply voltage
+// The package codes the two boards' parts report, and the debug ID both share.
+constexpr uint8_t HW_PACKAGE_LQFP48 = 0x0B;
+constexpr uint8_t HW_PACKAGE_LQFP100 = 0x02;
+constexpr uint16_t HW_DEV_ID_STM32G47X = 0x469;
 
 constexpr int LICENSE_MANUFACTURER_LEN = 32;
 constexpr int LICENSE_MODEL_LEN        = 32;
@@ -248,6 +293,58 @@ constexpr uint8_t CMD_FW_UPDATE_DATA   = 0x39;
 constexpr uint8_t CMD_FW_UPDATE_END    = 0x3A;
 constexpr uint8_t CMD_FW_UPDATE_STATUS = 0x3B;
 constexpr uint8_t CMD_FW_UPDATE_ABORT  = 0x3C;
+// CAN Triple 2.0 line (firmware 2.0.0 on): keep the running image. An update
+// there starts on trial, and a unit that restarts FW_MAX_TRIAL_BOOTS times
+// before the new image is confirmed goes back to the image it replaced. The
+// Update Firmware window sends this once the unit has come back and answered;
+// the unit also confirms itself after a minute of running. ACK only (so NOT in
+// DeviceLink::isReadResponse), ungated, and ACKed whether or not anything was
+// on trial. 1.x firmware answers ERR_INVALID_CMD and has nothing to confirm.
+constexpr uint8_t CMD_FW_CONFIRM       = 0x57;
+
+// The CAN Triple 2.0's LABEL STORE (its protocol.h, "The label store"): every
+// channel, message and relay NAME kept apart from its record, LABEL_STORE_BYTES
+// each (UTF-8, zero-padded, no terminator when all 32 are used). WRITE only
+// inside a Send: u8 kind, u16 start, u16 count, count x 32 -> ACK. READ: u8
+// kind, u16 start, u16 count -> the same five bytes, then count x 32; a slot
+// never written reads as zeros. A unit whose capacity report states
+// label_bytes takes the message, signal and relay records WITHOUT their label
+// fields (V2_* below); the CAN Triple 1.x answers either command
+// ERR_INVALID_CMD, its names being in the records. A WRITE with count 0 (five
+// bytes, no names) is a probe, ACKed anywhere by a unit that keeps names: a
+// sealed package for one leads with it (package_builder.cpp).
+constexpr uint8_t CMD_WRITE_LABELS     = 0x59;
+constexpr uint8_t CMD_READ_LABELS      = 0x5A;
+constexpr uint8_t LABEL_KIND_MESSAGE   = 0;
+constexpr uint8_t LABEL_KIND_SIGNAL    = 1;
+constexpr uint8_t LABEL_KIND_RELAY     = 2;
+constexpr int LABEL_STORE_BYTES        = 32;
+
+// The CAN Triple 2.0's own settings (its protocol.h, "Device settings"): not
+// configuration, so a Send leaves them alone and a Get does not read them; the
+// unit keeps them across restarts and firmware updates. One so far: every
+// LED's brightness, a percent of what the LEDs have always shown,
+// LED_BRIGHTNESS_MIN..LED_BRIGHTNESS_MAX, bright and dim together. READ
+// (empty) answers DeviceSettings as running. WRITE takes DeviceSettings then a
+// store byte: 1 keeps them, 0 applies them only until the next restart (a
+// preview while a slider moves). ERR_OUT_OF_BOUNDS refuses a value or format
+// the unit does not take; ERR_FLASH_WRITE means applied but not kept. The
+// write is gated by the Send password; the read is not. The CAN Triple 1.x
+// answers either command ERR_INVALID_CMD.
+constexpr uint8_t CMD_READ_DEVICE_SETTINGS  = 0x5B;
+constexpr uint8_t CMD_WRITE_DEVICE_SETTINGS = 0x5C;
+constexpr uint8_t DEVICE_SETTINGS_FORMAT    = 1;
+constexpr int LED_BRIGHTNESS_MIN            = 5;
+constexpr int LED_BRIGHTNESS_MAX            = 100;
+
+#pragma pack(push, 1)
+struct DeviceSettings {
+    uint8_t format;         // DEVICE_SETTINGS_FORMAT
+    uint8_t led_brightness; // percent, LED_BRIGHTNESS_MIN..LED_BRIGHTNESS_MAX
+    uint8_t reserved[6];    // 0
+};
+#pragma pack(pop)
+static_assert(sizeof(DeviceSettings) == 8, "DeviceSettings is 8 bytes on the wire");
 
 // Device scripts. The bytecode rides in the configuration as an ordinary table
 // of 64-byte chunks, so WRITE/READ_SCRIPT are plain range commands and Send,
@@ -331,6 +428,9 @@ constexpr uint8_t ERR_FW_REJECTED   = 0x08;
 // these; the device is the one that acts on them.
 constexpr uint8_t FW_STATE_IDLE    = 0;
 constexpr uint8_t FW_STATE_PENDING = 1;
+// CAN Triple 2.0 line: the running image is new and not yet confirmed
+// (CMD_FW_CONFIRM). A 1.x unit never reports it.
+constexpr uint8_t FW_STATE_TRIAL   = 2;
 
 constexpr uint8_t FW_RESULT_NONE           = 0;
 constexpr uint8_t FW_RESULT_OK             = 1;
@@ -343,6 +443,27 @@ constexpr uint8_t FW_RESULT_ERASE_FAILED   = 7;
 constexpr uint8_t FW_RESULT_PROGRAM_FAILED = 8;
 constexpr uint8_t FW_RESULT_VERIFY_FAILED  = 9;
 constexpr uint8_t FW_RESULT_GAVE_UP        = 10;
+// CAN Triple 2.0 line, reported after the fact like the rest.
+//   ROLLED_BACK  the new image restarted before it was confirmed, and the
+//                bootloader went back to the image before it
+//                (FwUpdateStatus2::failed_version names the one it gave up on);
+//   RECOVERED    the installed firmware was found damaged at start-up and was
+//                written again from the unit's stored copy;
+//   NO_IMAGE     no stored copy could be used. A unit in that state does not
+//                start, so a host can only meet this one in a file's verdict.
+constexpr uint8_t FW_RESULT_ROLLED_BACK    = 11;
+constexpr uint8_t FW_RESULT_RECOVERED      = 12;
+constexpr uint8_t FW_RESULT_NO_IMAGE       = 13;
+
+// CAN Triple 2.0 line: the firmware copies the unit keeps. An update goes into
+// whichever of A and B the running image did not come from, so the one before
+// it is still there to go back to; the factory copy is written at the unit's
+// first start and is the last resort.
+constexpr uint8_t FW_SLOT_A       = 0;
+constexpr uint8_t FW_SLOT_B       = 1;
+constexpr uint8_t FW_SLOT_FACTORY = 2;
+constexpr uint8_t FW_SLOT_NONE    = 3;
+constexpr int     FW_SLOT_COUNT   = 3;
 
 // The image header itself is NOT mirrored here, unlike every other structure
 // in this file. src/protocol/firmware_image.* includes the firmware's real
@@ -590,8 +711,7 @@ constexpr uint8_t INTEGFLAG_ACTIVE      = 0x01;
 constexpr uint8_t INTEGFLAG_CONST_INPUT = 0x02; // accumulate input_const, not a channel
 constexpr uint8_t INTEGFLAG_COUNT_DOWN  = 0x04; // subtract instead of add (a "decrementor")
 constexpr uint8_t INTEGFLAG_PRESERVE    = 0x08; // retain across power cycles (shares the
-                                                // counters' 20-entry ring; works in both
-                                                // of the device's flash modes)
+                                                // counters' retained-value limit)
 constexpr uint8_t INTEGFLAG_ROLL        = 0x10; // v21: wrap at min/max instead of holding
                                                 // there. Same meaning and range convention
                                                 // as COUNTERFLAG_ROLL - the value lands in
@@ -1004,8 +1124,23 @@ constexpr int CRC8_MAX_ELEMENTS = 15;
 
 // elem_type values: what one element feeds into the CRC, in element order.
 constexpr uint8_t CRC8_ELEM_ID   = 0; // elem_value = shift 0..3: (id >> 8*v) & 0xFF
-constexpr uint8_t CRC8_ELEM_DATA = 1; // elem_value = frame byte 0..7 (0 past the DLC)
+constexpr uint8_t CRC8_ELEM_DATA = 1; // elem_value = frame byte, 0 past the DLC: 0..7 on
+                                      // the CAN Triple, 0..63 on the 2.0
 constexpr uint8_t CRC8_ELEM_RAW  = 2; // elem_value fed as-is
+// The CAN Triple 2.0 line's, where its capacity report states them
+// (CAPACITY_CRC8_*). A firmware without them skips the element, feeding
+// nothing, and stamps a different checksum — so they go nowhere else.
+constexpr uint8_t CRC8_ELEM_ID_ALL = 3;        // the whole identifier: elem_value below
+constexpr uint8_t CRC8_IDALL_BYTES_MASK = 0x07; // 1..4 bytes; 0 = by the frame (2 for an
+                                                // 11-bit identifier, 4 for a 29-bit one)
+constexpr uint8_t CRC8_IDALL_LSB_FIRST = 0x80;  // clear: the most significant byte first
+// A RUN of frame bytes in one element: elem_type = CRC8_ELEM_DATA_RUN | first
+// (0..63), elem_value = last (0..63). Fed first to last, rising or falling,
+// with the rule's own byte_location left out.
+constexpr uint8_t CRC8_ELEM_DATA_RUN = 0x40;
+constexpr uint8_t CRC8_ELEM_RUN_MASK = 0xC0;
+constexpr uint8_t CRC8_RUN_FIRST_MASK = 0x3F;
+constexpr uint8_t CRC8_RUN_LAST_MASK = 0x3F;
 
 // v16: the four document-wide message passwords, as they ride in the config
 // header. A slot holding kNoAccessKey (0) is empty.
@@ -1021,7 +1156,7 @@ struct MessagePasswordRecord {
 struct Crc8Config {
     uint16_t msg_idx;          // the message table entry this rule stamps
     uint16_t dest_signal_idx;  // slot the CRC publishes to (SIG_MSG_NONE = none)
-    uint8_t byte_location;     // frame byte receiving the CRC, 0..7
+    uint8_t byte_location;     // frame byte receiving the CRC, 0..7 (0..63 on the 2.0)
     uint8_t polynomial;
     uint8_t init_value;
     uint8_t final_xor;
@@ -1231,6 +1366,27 @@ constexpr int DEVCH_RX_DROPPED_BASE = DEVCH_MCU_TEMP + 5;                 // 36.
 constexpr int DEVCH_CPU_LOAD     = DEVCH_RX_DROPPED_BASE + DEVCH_BUS_COUNT; // 39
 constexpr int DEVCH_LOOP_TIME    = DEVCH_CPU_LOAD + 1;                    // 40
 constexpr int DEVCH_COUNT        = DEVCH_CPU_LOAD + 2;                    // 41
+// Firmware 1.0.15: the extended device channels — ids past the header's list,
+// carried by CMD_WRITE/READ_DEVICE_CHANNELS_EXT and stored in a record of their
+// own, so adding them cost no store bump. First: frames each bus was asked to
+// transmit that never reached the wire (its transmit ring was full, or the
+// peripheral was holding them when the bus was stopped), counted frame by
+// frame since boot.
+constexpr int DEVCH_EXT_BASE        = DEVCH_COUNT;                            // 41
+constexpr int DEVCH_TX_DROPPED_BASE = DEVCH_EXT_BASE;                         // 41..43
+// The supply, measured by the CAN Triple 2.0 (HW_FEAT_SUPPLY_SENSE; a board
+// without it publishes 0): the supply input, averaged over 100 ms; its lowest
+// and highest single 10 ms reading since boot while a supply was connected; and
+// the 5 V the USB port provides the unit.
+constexpr int DEVCH_SUPPLY          = DEVCH_TX_DROPPED_BASE + DEVCH_BUS_COUNT; // 44
+constexpr int DEVCH_SUPPLY_MIN      = DEVCH_SUPPLY + 1;                        // 45
+constexpr int DEVCH_SUPPLY_MAX      = DEVCH_SUPPLY + 2;                        // 46
+constexpr int DEVCH_USB_SUPPLY      = DEVCH_SUPPLY + 3;                        // 47
+constexpr int DEVCH_EXT_END         = DEVCH_SUPPLY + 4;                        // 48
+constexpr int DEVCH_EXT_COUNT       = DEVCH_EXT_END - DEVCH_EXT_BASE;         // 7
+// Every device channel id this build knows, both lists: what a Send allocates
+// a slot for, one each.
+constexpr int DEVCH_TOTAL           = DEVCH_EXT_END;                          // 48
 constexpr int devChBus(int bus0, int field)
 {
     return DEVCH_BUS_BASE + bus0 * DEVCH_PER_BUS + field;
@@ -1270,6 +1426,21 @@ inline DeviceChannelsConfig unusedDeviceChannels()
 {
     DeviceChannelsConfig c;
     for (int i = 0; i < DEVCH_COUNT; ++i)
+        c.signal_idx[i] = SIG_MSG_NONE;
+    return c;
+}
+
+// The extended list's destinations (CMD_WRITE/READ_DEVICE_CHANNELS_EXT), entry
+// i for device channel DEVCH_EXT_BASE + i. The same zero-fill trap as above, so
+// the same factory.
+struct DeviceChannelsExtConfig {
+    uint16_t signal_idx[DEVCH_EXT_COUNT];
+};
+
+inline DeviceChannelsExtConfig unusedDeviceChannelsExt()
+{
+    DeviceChannelsExtConfig c;
+    for (int i = 0; i < DEVCH_EXT_COUNT; ++i)
         c.signal_idx[i] = SIG_MSG_NONE;
     return c;
 }
@@ -1418,7 +1589,8 @@ struct ScriptStatus {
     uint16_t budget;         // the device's SCRIPT_TICK_BUDGET
     // Appended after the first shipping VM — every field above keeps its
     // offset. Budget units bound execution; these say what the bound is worth
-    // in time (170 MHz, so a 10 ms tick is 1,700,000 cycles). cycles_valid is 0
+    // in time (a 10 ms tick is 1,700,000 cycles at the CAN Triple's 170 MHz,
+    // 1,600,000 at the CAN Triple 2.0's 160 MHz). cycles_valid is 0
     // on a part with no usable counter, and the two counts must NOT then be
     // shown as a script that costs nothing.
     //
@@ -1445,6 +1617,20 @@ struct FwUpdateStatus {
     uint8_t  reserved[3];
 };
 
+// CAN Triple 2.0 line: appended to FwUpdateStatus in the STATUS reply, 52 bytes
+// in all. A 1.x unit answers the 32 bytes above alone, so the reply is read
+// with >= on length and a reply without these is a unit without copies.
+// Versions are packed as the 2.0's fw_version_pack() packs them: major, minor
+// and patch in bits 23-16, 15-8 and 7-0 (FirmwareImage::packedVersionText).
+struct FwUpdateStatus2 {
+    uint8_t  running_slot;    // FW_SLOT_*: the copy the running image came from
+    uint8_t  previous_slot;   // where a rollback goes; FW_SLOT_NONE: the factory copy
+    uint8_t  trial_boots;     // > 0: on trial, and started this many times
+    uint8_t  slots_valid;     // bit per copy (A, B, factory): it holds an image
+    uint32_t failed_version;  // the image last rolled back from; 0 = none
+    uint32_t slot_version[3]; // the images in A, B and factory; 0 = none
+};
+
 // CMD_GET_CAPACITY reply: this header, then table_count CapacityEntry records.
 // Self-describing — read table_count entries, never DEVICE_TABLE_COUNT — and
 // parsed with >= on length, like ScriptStatus: a .ctf carries the same bytes
@@ -1457,6 +1643,72 @@ struct CapacityReportHeader {
 struct CapacityEntry {
     uint16_t capacity;      // records the table holds
     uint16_t item_size;     // bytes per record — the wire record size
+};
+
+// Format 2 (the 2.0 line), after the entries. Read with >= on `size`: a later
+// firmware may lengthen it without another format. Not part of the layout
+// identity, which covers the entries alone.
+constexpr int CAPACITY_SCRIPT_OPS = 48; // opcodes 0x00..0x2F
+struct CapacityExtension {
+    uint16_t size;                 // bytes of this block, this field included
+    uint16_t retained_values;      // retained (Preserve) values the unit keeps,
+                                   // counters and integrators together
+    uint16_t retained_interval_ms; // how often they are written while they change
+    uint16_t retained_flags;       // CAPACITY_RETAINED_*
+    // The script cost model: the unit's tick budget, and what opcodes
+    // 0..script_op_count-1 cost. The first 2.0 builds end the block before
+    // these (size 8), and charge as the CAN Triple 1.x does.
+    uint16_t script_budget;
+    uint8_t  script_op_count;
+    uint8_t  reserved;
+    uint8_t  script_op_costs[CAPACITY_SCRIPT_OPS];
+    // Transmit CRC8 beyond the single bytes every firmware takes. The builds
+    // before it end the block at the script model (size 60), and offer none.
+    uint16_t crc8_features;        // CAPACITY_CRC8_*
+    // What the unit's CAN buses do beyond the CAN Triple 1.x's. A reserved 0
+    // before it had a meaning, so the builds before it state none.
+    uint16_t can_features;         // CAPACITY_CAN_*
+    // Where names live: LABEL_STORE_BYTES when they are in the label store and
+    // the message, signal and relay records are the 2.0 ones without them; 0,
+    // or a block that ends before this, when the records carry them.
+    uint8_t  label_bytes;
+    uint8_t  label_flags;
+    uint16_t reserved3;
+};
+// Kept without a write limit (FRAM): writing them often costs nothing.
+constexpr uint16_t CAPACITY_RETAINED_NO_WEAR = 0x0001;
+// CapacityExtension.crc8_features
+constexpr uint16_t CAPACITY_CRC8_WHOLE_ID = 0x0001;  // CRC8_ELEM_ID_ALL
+constexpr uint16_t CAPACITY_CRC8_DATA_RUNS = 0x0002; // CRC8_ELEM_DATA_RUN
+// CapacityExtension.can_features: CAN FD data phases of 4, 5 and 8 Mbit/s (an
+// 80 MHz CAN clock and transmitter delay compensation). Without it a unit
+// runs data phases to 2 Mbit/s.
+constexpr uint16_t CAPACITY_CAN_FAST_DATA = 0x0001;
+
+// CMD_GET_HARDWARE reply. Parsed with >= on length: a later format may use the
+// reserved bytes without moving anything here. See protocol/hardware.h.
+struct HardwareReport {
+    uint8_t  format;             // HARDWARE_REPORT_FORMAT; anything else = cannot read
+    uint8_t  family;             // HW_FAMILY_* the running firmware was built for
+    uint16_t product_id;         // FW_PRODUCT_* in the running image's header
+    uint8_t  board_rev_major;    // 2 for board 2.00; 0 when not known
+    uint8_t  board_rev_minor;
+    uint8_t  board_rev_source;   // HW_REV_SOURCE_*
+    uint8_t  package;            // the package code, PKG[4:0]
+    uint16_t flash_kb;           // the flash-size register
+    uint16_t dev_id;             // debug ID code
+    uint16_t rev_id;             // silicon revision
+    uint16_t reserved0;
+    uint32_t features;           // HW_FEAT_*
+    uint32_t qspi_bytes;
+    uint32_t fram_bytes;
+    uint16_t fw_major;           // the running image
+    uint16_t fw_minor;
+    uint16_t fw_patch;
+    uint16_t store_version;
+    uint32_t build_id;
+    uint8_t  bootloader_version; // 0 = no bootloader
+    uint8_t  reserved[7];
 };
 
 // The FLASH_STORE_VERSION this build of the configurator speaks. Must equal the
@@ -1642,10 +1894,26 @@ static_assert(offsetof(MonitorStreamPayload, data) == MONITOR_HEADER_BYTES,
 static_assert(sizeof(SignalValueEntry) == 6, "must match firmware");
 static_assert(sizeof(CounterConfig) == 32, "must match firmware");
 static_assert(sizeof(DeviceChannelsConfig) == 82, "must match firmware"); // 41 * 2
+static_assert(sizeof(DeviceChannelsExtConfig) == 14, "must match firmware"); // 7 * 2
 static_assert(DEVCH_ONTIME == 0, "Device OnTime must stay at offset 0 — see above");
 static_assert(sizeof(TimerConfig) == 32, "must match firmware");
 static_assert(sizeof(ConstantConfig) == 7, "must match firmware");
 static_assert(sizeof(RelayConfig) == 29, "must match firmware");
+// The CAN Triple 2.0's records, where its names are in the label store: each is
+// the 1.x record above with its label cut out, and these say where the bytes
+// that remain sit in the 1.x struct. The message and relay labels are their
+// records' LAST field and the signal label its FIRST, which is what makes each
+// 2.0 record one contiguous run of the 1.x one.
+constexpr int V2_MESSAGE_AT = 0, V2_MESSAGE_BYTES = 14;
+constexpr int V2_SIGNAL_AT = 32, V2_SIGNAL_BYTES = 32;
+constexpr int V2_RELAY_AT = 0, V2_RELAY_BYTES = 11;
+static_assert(offsetof(CanMessageConfig, label) == V2_MESSAGE_AT + V2_MESSAGE_BYTES,
+              "the 2.0 message record is the 1.x one up to its label");
+static_assert(offsetof(CanSignalConfig, label) == 0 && offsetof(CanSignalConfig, factor) == V2_SIGNAL_AT
+                  && V2_SIGNAL_AT + V2_SIGNAL_BYTES == int(sizeof(CanSignalConfig)),
+              "the 2.0 signal record is the 1.x one after its label");
+static_assert(offsetof(RelayConfig, label) == V2_RELAY_AT + V2_RELAY_BYTES,
+              "the 2.0 relay record is the 1.x one up to its label");
 static_assert(sizeof(Table2x16Def) == 70, "must match firmware");
 static_assert(sizeof(Table2x16Out) == 64, "must match firmware");
 // 6 indices + 3 counts + 8*4 X sites + 8*4 Y sites = 73 (padded slot 80), and
@@ -1657,10 +1925,13 @@ static_assert(sizeof(Crc8Config) == 40, "must match firmware");
 static_assert(sizeof(ControlCanPayload) == 11, "must match firmware");
 static_assert(sizeof(FwUpdateBeginPayload) == 16, "must match firmware");
 static_assert(sizeof(FwUpdateStatus) == 32, "must match firmware");
+static_assert(sizeof(FwUpdateStatus2) == 20, "must match the 2.0 firmware");
 static_assert(sizeof(ScriptChunk) == 64, "must match firmware");
 static_assert(sizeof(ScriptStatus) == 29, "must match firmware");
 static_assert(sizeof(CapacityReportHeader) == 4, "must match firmware");
 static_assert(sizeof(CapacityEntry) == 4, "must match firmware");
+static_assert(sizeof(CapacityExtension) == 68, "must match the 2.0 firmware");
+static_assert(sizeof(HardwareReport) == 48, "must match firmware");
 
 // Host->device wire frame limit. This was 127 for years because the firmware's
 // v1 UART RX DMA mangled bursts of 128 bytes or more (FIRMWARE-NOTES.md #5).

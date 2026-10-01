@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Online: Send, Get &amp; Flash</title>
-<link rel="stylesheet" href="help.css">
+<link rel="stylesheet" type="text/css" href="help.css">
 </head>
 <body>
 <h1>Online: Send, Get &amp; Flash</h1>
@@ -21,7 +21,9 @@ current licence.</p>
 <tr><th>Command</th><th>Shortcut</th><th>What it does</th></tr>
 <tr><td>Connect</td><td></td><td>Opens the serial link. Reuses this session's
 last port; the first connect of a session (or a port that has gone away)
-opens Connection Settings. The status bar's right side shows the result.</td></tr>
+opens Connection Settings. The status bar's right side shows the result, and
+which board answered — CAN Triple or CAN Triple 2.0 — with its firmware
+version.</td></tr>
 <tr><td>Disconnect</td><td></td><td>Closes the serial link. The device keeps
 running its configuration; the live windows simply stop updating.</td></tr>
 <tr><td>Send Configuration</td><td>F5</td><td>Programs the open document onto the device and saves it to flash.</td></tr>
@@ -30,8 +32,9 @@ running its configuration; the live windows simply stop updating.</td></tr>
 <tr><td>Monitor Channels…</td><td>F3</td><td>Live channel values, and per-channel overrides on firmware 1.0.12 — see <a href="monitor.html">Monitoring Live Values</a>.</td></tr>
 <tr><td>CAN Viewer…</td><td>F4</td><td>Raw frame monitor and inject-frame form, with Vector <code>.asc</code>, SocketCAN <code>.log</code> and PEAK <code>.trc</code> export.</td></tr>
 <tr><td>Reset Device</td><td></td><td>Reboots the device; it reloads its saved configuration.</td></tr>
-<tr><td>Device Status…</td><td></td><td>Uptime, bus counters, identity, passwords and fleet information.</td></tr>
+<tr><td>Device Status…</td><td></td><td>Uptime, bus counters, which board it is, identity, passwords and fleet information.</td></tr>
 <tr><td>Get Device Info…</td><td></td><td>The manufacturing record burned into the unit at build: maker, product, hardware version, serial and date, plus the chip's MCU ID.</td></tr>
+<tr><td>LED Brightness…</td><td></td><td>A CAN Triple 2.0's LED brightness, 5 % to 100 % of standard, kept by the unit — see <a href="#brightness">LED Brightness…</a>.</td></tr>
 <tr><td>Set Access Passwords…</td><td></td><td>Device-held function passwords — see <a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 <tr><td>Firmware License Manager…</td><td></td><td>Writes the unit's licence: manufacturer, model, version, Firmware Key and FW Updater Password — see <a href="licensing.html">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 </table>
@@ -65,6 +68,16 @@ are switched <b>Off</b> — not sent, so the gate does not run — a unit with n
 Protected Comms password gets a Yes/No warning instead: it cannot guard what
 those markings promise, and the fix is Online&nbsp;→ Set Access
 Passwords…</li>
+<li><b>The target.</b> A document is checked against its
+<a href="files.html#target">target firmware</a>, the firmware it was made
+for. When the connected unit is not that firmware, the configuration is
+checked again against the unit. Anything the unit cannot run (a CAN Triple
+2.0's CRC8 elements or CAN FD data rates above 2 Mbit/s on a CAN Triple, for
+instance) stops the send with the list, and nothing is sent. Anything that
+comes out differently on the unit, above all names it keeps shorter, is listed
+in the confirmation under <b>On this unit</b>, so you can cancel. To work on
+the configuration for that unit, make it the target (File&nbsp;→ Target
+Firmware…) and use Check Channels.</li>
 <li><b>Confirmation.</b> A dialog summarises what will be sent (messages,
 channels, math, User Conditions, counters, timers), the bus settings that will
 be applied, and any mapper warnings. It asks for a required
@@ -278,6 +291,10 @@ after it came back with no passwords at all.</p>
 <li>Uptime and per-bus receive/transmit frame counters.</li>
 <li>Active table counts (messages, channels, math, User Conditions).</li>
 <li>Firmware protocol version.</li>
+<li>Which board it is — CAN Triple or CAN Triple 2.0, with the board revision
+where the unit records one — its processor, and the firmware and bootloader
+versions it runs. Firmware older than 1.0.15 cannot say, and every unit running
+it is a CAN Triple.</li>
 <li>MCU ID and whether the stored configuration is locked to a different
 unit (which is why an apparently inert device shows 0 active messages).</li>
 <li>Readout protection: whether the flash can be read over the debug port.
@@ -313,6 +330,11 @@ is what makes it worth quoting on a warranty claim, and why this application has
 no way to write it. Burning the record is a manufacturing step performed once by
 a separate tool.</p>
 
+<p>Below the record the dialog names the <b>Board</b> — CAN Triple or CAN Triple
+2.0, with a revision where the unit records one — and its <b>Processor</b>. These
+come from the chip itself rather than from the burned text, so they are right
+even on a unit whose record was never burned (firmware 1.0.15 and newer).</p>
+
 <p>It is a separate dialog from Device Status for that reason. Device Status
 answers <i>what is this device doing</i>, and every line of it can differ between
 two readings a second apart. This answers <i>what is this device</i>, and no line
@@ -337,6 +359,29 @@ being returned as faulty — so a locked-down unit still answers this. On firmwa
 older than the command the dialog says so and points out that the record is in
 the chip either way, so nobody concludes the board was never provisioned and
 burns a second one over the top of it.</p>
+
+<h2 id="brightness">LED Brightness…</h2>
+
+<p>Sets how bright a <a href="can-triple-2.html">CAN Triple 2.0</a>'s lights
+are, from <b>100 %</b>, the standard brightness, down to <b>5 %</b> of it. One
+setting covers every light, and bright and dim change together, so every light
+still reads the same way (a bus pulsing with traffic still pulses).</p>
+
+<ul>
+<li>The unit's lights follow the slider as you drag it, so you can judge the
+brightness where the unit is mounted. The percentage beside <b>OK</b> is the
+level the slider is at; the arrow keys move it one percent at a time.
+<b>OK</b> sends the brightness to the unit, which keeps it; <b>Cancel</b> puts
+back the brightness it had when the window opened.</li>
+<li>The unit keeps the setting itself, across restarts and firmware updates. It
+is not part of the configuration: a Send leaves it alone, and a Get does not
+read it.</li>
+<li>Changing it needs the unit's <b>Send a Configuration</b> password, when one
+is set; the window asks for it first.</li>
+<li>A CAN Triple has no brightness setting, and the command says so.</li>
+<li>While the unit installs a firmware update, its bootloader shows the
+update's colours at the standard brightness.</li>
+</ul>
 
 <h2>After a firmware update</h2>
 

@@ -1,6 +1,7 @@
 // Implementation of the CAN Viewer dialog: live raw-frame monitor fed by
 // the device's CMD_MONITOR_STREAM, plus an inject-frame panel.
 #include "can_viewer_dialog.h"
+#include "theme.h"
 #include "window_memory.h"
 
 #include <QApplication>
@@ -9,6 +10,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialogButtonBox>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -213,7 +215,7 @@ CanViewerDialog::CanViewerDialog(DeviceLink *link, QWidget *parent)
     // would be intolerable.
     m_idFilterNote = new QLabel(this);
     m_idFilterNote->setObjectName(QStringLiteral("idFilterNote"));
-    m_idFilterNote->setStyleSheet(QStringLiteral("color: #d03030;"));
+    m_idFilterNote->setStyleSheet(colorRule(errorColor(palette())));
     modeRow->addWidget(m_idFilterNote);
     modeRow->addStretch(1);
     mainLayout->addLayout(modeRow);
@@ -630,7 +632,7 @@ void CanViewerDialog::appendGapRow(const ct::MonitorStreamPayload &frame)
     QFont f = item->font();
     f.setItalic(true);
     item->setFont(f);
-    item->setForeground(QBrush(QColor(0xB0, 0x50, 0x00)));
+    item->setForeground(QBrush(warningColor(palette())));
     m_table->setItem(gapRow, ColTime,
                      makeItem(QString::number(frame.timestamp_ms / 1000.0, 'f', 3)));
     m_table->setItem(gapRow, ColBus, item);
@@ -901,6 +903,15 @@ void CanViewerDialog::onSaveClicked()
                              tr("Saved %1 frames to %2.")
                                  .arg(QLocale().toString(qulonglong(m_frames.size())))
                                  .arg(QFileInfo(path).fileName()));
+}
+
+void CanViewerDialog::changeEvent(QEvent *event)
+{
+    QDialog::changeEvent(event);
+    // The note's colour is set, not inherited. Rows already in the list keep
+    // the colour they were given; new ones take the theme's.
+    if (event->type() == QEvent::PaletteChange && m_idFilterNote)
+        m_idFilterNote->setStyleSheet(colorRule(errorColor(palette())));
 }
 
 } // namespace ct

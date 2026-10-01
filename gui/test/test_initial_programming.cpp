@@ -137,10 +137,15 @@ struct Run {
     Chip chip;          // the chip afterwards
 };
 
-// One scenario: a fresh kit, a chip in `optr` (plus a failure to play), the
-// tool run with `args` and `input` typed at its prompts.
+// A CAN Triple 2.0's processor, for `chip` below: the 100-pin package, 512 KB.
+const QByteArray kCanTriple2Chip = "package=02\nflashkb=512\n";
+
+// One scenario: a fresh kit, a chip in `optr` (plus a failure to play, and any
+// further key=value lines for fake_openocd in `chip`), the tool run with `args`
+// and `input` typed at its prompts. With no `chip`, the processor is a 1.x's.
 Run runTool(const QString &tool, const QString &fake, quint32 optr, const char *failMode,
-            const QStringList &args, const QByteArray &input)
+            const QStringList &args, const QByteArray &input,
+            const QByteArray &chip = QByteArray())
 {
     Run r;
     QTemporaryDir kit;
@@ -157,9 +162,10 @@ Run runTool(const QString &tool, const QString &fake, quint32 optr, const char *
     const QString state = kit.filePath(QStringLiteral("chip.txt"));
     const QString calls = kit.filePath(QStringLiteral("calls.txt"));
     writeFile(state, QStringLiteral("optr=%1\npending=%1\nerased=0\nprograms=0\nfail=%2\n")
-                         .arg(optr, 8, 16, QLatin1Char('0'))
-                         .arg(QString::fromLatin1(failMode))
-                         .toLatin1());
+                             .arg(optr, 8, 16, QLatin1Char('0'))
+                             .arg(QString::fromLatin1(failMode))
+                             .toLatin1()
+                         + chip);
 
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     env.insert(QStringLiteral("FAKE_OCD_STATE"), QDir::toNativeSeparators(state));
@@ -246,6 +252,50 @@ int main(int argc, char **argv)
               "no erase and no option-byte write");
         CHECK(r.chip.optr == kDualBank && r.chip.erased == 0 && r.chip.programs == 2,
               "option bytes untouched, both images programmed");
+        CHECK(!r.calls.isEmpty()
+                  && r.calls[0].contains(QStringLiteral(
+                      "mdw 0x40022020 | mdw 0xe0042000 | mdw 0x1fff7500 | mdw 0x1fff75e0")),
+              "the probe reads the option register, then which chip this is");
+        CHECK(says(r, "a CAN Triple."), "names the board it found");
+        dumpOnFailure(r, before);
+    }
+
+    before = fails;
+    std::printf("a CAN Triple 2.0 is turned away before anything is erased or written\n");
+    {
+        // Single-bank on purpose: the refusal has to come BEFORE the bank
+        // switch, whose mass erase would otherwise have run on the wrong board.
+        const Run r = runTool(tool, fake, kSingleBank, "", {}, "yes\nyes\n", kCanTriple2Chip);
+        CHECK(r.exitCode == 1, "exit code 1");
+        CHECK(says(r, "This unit is a CAN Triple 2.0"), "names the board");
+        CHECK(says(r, "Action Not Completed."), "and says nothing was done");
+        CHECK(!says(r, "SINGLE-BANK"), "stopped before the bank-mode question");
+        CHECK(r.calls.size() == 1, "only the read-only probe ran");
+        CHECK(r.chip.optr == kSingleBank && r.chip.erased == 0 && r.chip.programs == 0,
+              "chip untouched");
+        dumpOnFailure(r, before);
+    }
+
+    before = fails;
+    std::printf("a processor that cannot be identified stops the tool\n");
+    {
+        const Run r = runTool(tool, fake, kDualBank, "fingerprint", {}, "yes\n");
+        CHECK(r.exitCode == 1, "exit code 1");
+        CHECK(says(r, "could not identify the processor"), "says so");
+        CHECK(r.calls.size() == 1 && r.chip.programs == 0, "only the probe ran");
+        dumpOnFailure(r, before);
+    }
+
+    before = fails;
+    std::printf("a processor that is not a CAN Triple's is refused\n");
+    {
+        // An STM32G431: a G4, so OpenOCD's G4 script talks to it, but not a
+        // part any CAN Triple carries.
+        const Run r = runTool(tool, fake, kDualBank, "", {}, "yes\n", "idcode=10006468\n");
+        CHECK(r.exitCode == 1, "exit code 1");
+        CHECK(says(r, "does not look like a CAN Triple") && says(r, "0x468"),
+              "says so, with the device ID it read");
+        CHECK(r.calls.size() == 1 && r.chip.programs == 0, "nothing written");
         dumpOnFailure(r, before);
     }
 
@@ -358,6 +408,19 @@ int main(int argc, char **argv)
               "explains the switch but does not ask again");
         CHECK(r.chip.optr == kDualBank && r.chip.programs == 2,
               "level 0, dual-bank, both images programmed");
+        dumpOnFailure(r, before);
+    }
+
+    before = fails;
+    std::printf("--unlock on a locked CAN Triple 2.0: the erase asked for, and nothing more\n");
+    {
+        // Until the unlock has run the chip cannot be read, so the board is
+        // known only afterwards. What must not follow is 1.x firmware.
+        const Run r = runTool(tool, fake, kDualLocked, "", {QStringLiteral("--unlock")},
+                              "yes\n", kCanTriple2Chip);
+        CHECK(r.exitCode == 1, "exit code 1");
+        CHECK(says(r, "This unit is a CAN Triple 2.0"), "names the board once it can be read");
+        CHECK(r.chip.programs == 0, "no 1.x firmware was programmed onto it");
         dumpOnFailure(r, before);
     }
 

@@ -207,7 +207,10 @@ bool commsTemplatePasswordsFit(const Configuration &config, const CommsTemplate 
 // after commsTemplatePasswordsFit() has said yes and the merge has succeeded.
 void adoptCommsTemplatePasswords(Configuration &config, const CommsTemplate &tmpl);
 
+// `nameLimit`: the longest channel name the target keeps whole (a CAN Triple
+// 2.0 keeps 32 bytes; the default is the CAN Triple 1.x's 31).
 bool mergeCommsTemplate(ChannelCatalog &catalog, int busIndex, const CommsTemplate &tmpl,
-                        CommsTemplateMerge *out, QString *error = nullptr);
+                        CommsTemplateMerge *out, QString *error = nullptr,
+                        int nameLimit = 31 /* the CAN Triple 1.x's MAX_CHANNEL_NAME_BYTES */);
 
 } // namespace ct

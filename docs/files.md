@@ -92,6 +92,8 @@ The target is saved with the document and restored when it is opened. It sets th
 
 > **Note:** A target smaller than the document is allowed — it is how a configuration is brought down to a smaller firmware — but it is never silent: the dialog says how many rows no longer fit, and Check Channels names them. And a target is a sizing assumption, not a lock: before **Send Configuration** the program reads what the connected unit actually holds and refuses, by table, a configuration it cannot take — with the unit untouched — whatever the document's target says. A secure package records the table sizes it writes for the same check at install time.
 
+When the connected unit is not the document's target, Send Configuration checks the configuration again with the unit as its target. What the unit cannot run stops the send, listed, with nothing sent; what comes out differently on it (a CAN Triple keeps 31 bytes of a channel's name and 17 of a message's where a CAN Triple 2.0 keeps 32, for instance) is listed in the confirmation, where you can still cancel. The configuration goes to the unit in the form that unit takes it.
+
 ## What the file carries besides the configuration
 - The **target firmware** — the capacities the document is sized against and where they came from — once one has been chosen (see above). A document sized against the built-in numbers records nothing, and opens in an older version of the program exactly as it always did.
 - For a `.ct3s`, the **install policy** — which devices the package may be sent to and which passwords it sets when it arrives. A plain `.ct3` carries none. See [Firmware Licensing &amp; Access Keys](licensing.md).

@@ -37,6 +37,7 @@
 #include "../src/protocol/device_link.h"
 #include "../src/protocol/device_session.h"
 #include "../src/protocol/framer.h"
+#include "../src/protocol/usb_port.h"
 
 // Firmware side (global namespace; its macros collide with ct:: constant
 // NAMES, so undef everything after including)
@@ -116,6 +117,11 @@ constexpr unsigned kCounterFlagRateDown = COUNTERFLAG_RATE_DOWN;
 constexpr int kCounterMaxHz = COUNTER_MAX_HZ;
 constexpr unsigned kCmdWriteDeviceChannels = CMD_WRITE_DEVICE_CHANNELS;
 constexpr unsigned kCmdReadDeviceChannels = CMD_READ_DEVICE_CHANNELS;
+// The extended device channels (firmware 1.0.15): a pair of their own, because
+// the header's list is full and Manager 1.2.6 discards a longer reply to the
+// pair above.
+constexpr unsigned kCmdWriteDeviceChannelsExt = CMD_WRITE_DEVICE_CHANNELS_EXT;
+constexpr unsigned kCmdReadDeviceChannelsExt = CMD_READ_DEVICE_CHANNELS_EXT;
 // The table capacities. These have never been snapshotted before because
 // nothing compared them; the capacity expansion makes that a real hazard â€”
 // every one of them sizes a flash region on the device AND a "will it fit"
@@ -207,6 +213,11 @@ constexpr unsigned kAllCommandIds[] = {
     CMD_READ_LICENSE, CMD_WRITE_LICENSE, CMD_LICENSE_CHALLENGE, CMD_LICENSE_RESPONSE,
     CMD_LICENSE_KEY_PROVE, CMD_SEAL_BEGIN, CMD_SEAL_FRAME, CMD_SEAL_END,
     CMD_GET_PROTECTION, CMD_GET_CAPACITY,
+    // The overrides, which shipped in 1.0.12 without joining this list, and
+    // the hardware report (1.0.15), which joined it in its own edit.
+    CMD_SET_OVERRIDE, CMD_OVERRIDE_LEASE, CMD_CLEAR_OVERRIDES, CMD_GET_HARDWARE,
+    // The extended device channels (1.0.15), likewise.
+    CMD_WRITE_DEVICE_CHANNELS_EXT, CMD_READ_DEVICE_CHANNELS_EXT,
     // The RETIRED ids, in the set for the same reason the live ones are: each
     // is a number some shipped host still speaks, and it must keep answering
     // ERR_INVALID_CMD — 0x40 most of all, which 2.2.x Managers send before
@@ -240,6 +251,27 @@ constexpr unsigned kCmdGetProtection = CMD_GET_PROTECTION;
 // wire bytes against the list the flash layout is built from — not against a
 // second copy of the numbers.
 constexpr unsigned kCmdGetCapacity = CMD_GET_CAPACITY;
+// v26: the hardware report (firmware 1.0.15). Every number a host decides a
+// board by is spelled on both sides — the command, the format, the families,
+// the feature bits, the package codes — and a pair that drifted would name the
+// wrong board, which is the one mistake the report exists to prevent.
+constexpr unsigned kCmdGetHardware = CMD_GET_HARDWARE;
+constexpr unsigned kHardwareReportFormat = HARDWARE_REPORT_FORMAT;
+constexpr unsigned kHwFamilyCanTriple = HW_FAMILY_CAN_TRIPLE;
+constexpr unsigned kHwFamilyCanTriple2 = HW_FAMILY_CAN_TRIPLE_2;
+constexpr unsigned kHwRevSourceNone = HW_REV_SOURCE_NONE;
+constexpr unsigned kHwRevSourceOtp = HW_REV_SOURCE_OTP;
+constexpr unsigned kHwRevSourceDefault = HW_REV_SOURCE_DEFAULT;
+constexpr unsigned kHwFeatTermination = HW_FEAT_TERMINATION;
+constexpr unsigned kHwFeatXcvrStandby = HW_FEAT_XCVR_STANDBY;
+constexpr unsigned kHwFeatUsbLink = HW_FEAT_USB_LINK;
+constexpr unsigned kHwFeatQspiFlash = HW_FEAT_QSPI_FLASH;
+constexpr unsigned kHwFeatFram = HW_FEAT_FRAM;
+constexpr unsigned kHwFeatRgbLeds = HW_FEAT_RGB_LEDS;
+constexpr unsigned kHwFeatSupplySense = HW_FEAT_SUPPLY_SENSE;
+constexpr unsigned kHwPackageLqfp48 = HW_PACKAGE_LQFP48;
+constexpr unsigned kHwPackageLqfp100 = HW_PACKAGE_LQFP100;
+constexpr unsigned kHwDevIdStm32g47x = HW_DEV_ID_STM32G47X;
 // v25: channel overrides (firmware 1.0.12).
 constexpr unsigned kCmdSetOverride = CMD_SET_OVERRIDE;
 constexpr unsigned kCmdOverrideLease = CMD_OVERRIDE_LEASE;
@@ -351,6 +383,23 @@ constexpr unsigned kLicenseKeyClear = LICENSE_KEY_CLEAR;
 #undef CMD_GET_DEVICE_INFO
 #undef CMD_GET_PROTECTION
 #undef CMD_GET_CAPACITY
+#undef CMD_GET_HARDWARE
+#undef HARDWARE_REPORT_FORMAT
+#undef HW_FAMILY_CAN_TRIPLE
+#undef HW_FAMILY_CAN_TRIPLE_2
+#undef HW_REV_SOURCE_NONE
+#undef HW_REV_SOURCE_OTP
+#undef HW_REV_SOURCE_DEFAULT
+#undef HW_FEAT_TERMINATION
+#undef HW_FEAT_XCVR_STANDBY
+#undef HW_FEAT_USB_LINK
+#undef HW_FEAT_QSPI_FLASH
+#undef HW_FEAT_FRAM
+#undef HW_FEAT_RGB_LEDS
+#undef HW_FEAT_SUPPLY_SENSE
+#undef HW_PACKAGE_LQFP48
+#undef HW_PACKAGE_LQFP100
+#undef HW_DEV_ID_STM32G47X
 #undef CMD_SET_OVERRIDE
 #undef CMD_OVERRIDE_LEASE
 #undef CMD_CLEAR_OVERRIDES
@@ -498,6 +547,8 @@ constexpr unsigned kLicenseKeyClear = LICENSE_KEY_CLEAR;
 #undef COUNTER_SRC_AT
 #undef CMD_WRITE_DEVICE_CHANNELS
 #undef CMD_READ_DEVICE_CHANNELS
+#undef CMD_WRITE_DEVICE_CHANNELS_EXT
+#undef CMD_READ_DEVICE_CHANNELS_EXT
 // Firmware update. These MUST be swept like the rest: wire_structs.h declares
 // ct::CMD_FW_UPDATE_* as constexpr under the same names, and a surviving macro
 // both mangles that declaration and rewrites every `ct::CMD_FW_UPDATE_BEGIN`
@@ -6606,6 +6657,329 @@ static void testLoadDeviceChannels(const SerialProtoCallbacks *restore)
     serial_proto_init(restore);
 }
 
+// The Tx Dropped device channels (firmware 1.0.15): the first EXTENDED device
+// channels. The header's DeviceChannelsConfig is full: store v20 fixed its
+// size, and Manager 1.2.6 discards a CMD_READ_DEVICE_CHANNELS reply longer than
+// the 82 bytes it knows. So these ride a list of their own, with a command pair
+// of their own and a stored record of their own, outside the image CRC.
+//
+// The ENGINE half: the totals reach the slots the list names, saturate, and
+// survive a clear, while the destinations do not. The WIRE half: the list's
+// length rules (a prefix is fine, and so is a longer list, whose extras belong
+// to channels this firmware does not publish, but half an entry is not), the
+// gates, the reply's exact size, and the header's pair left exactly as it was.
+// The FLASH half: saved with the configuration, read back at boot, and an
+// image without the record (earlier firmware, or a damaged record) loads with
+// the list empty rather than failing.
+// Firmware gates are per board (DeviceHardware::firmwareHas): the 1.x line counts
+// 1.0.x and the 2.0 line counts from 2.0.0, so the same number is a different
+// firmware on each, and a board this build does not know has no gated feature.
+static void testFirmwareGatesPerBoard()
+{
+    const ct::FirmwareSince gate{{1, 0, 15}, {2, 1, 0}};
+    ct::DeviceHardware v1 = ct::DeviceHardware::builtIn();
+    CHECK(!v1.firmwareHas(gate)); // not reported: older than the report itself
+    v1.reported = true;
+    v1.fwMajor = 1;
+    v1.fwMinor = 0;
+    v1.fwPatch = 14;
+    CHECK(!v1.firmwareHas(gate));
+    v1.fwPatch = 15;
+    CHECK(v1.firmwareHas(gate));
+
+    ct::DeviceHardware v2 = v1;
+    v2.family = ct::BoardFamily::CanTriple2;
+    CHECK(!v2.firmwareHas(gate)); // 1.0.15 on the 2.0 line is not 2.1.0
+    v2.fwMajor = 2;
+    v2.fwMinor = 0;
+    v2.fwPatch = 9;
+    CHECK(!v2.firmwareHas(gate));
+    v2.fwMinor = 1;
+    v2.fwPatch = 0;
+    CHECK(v2.firmwareHas(gate));
+
+    // "Every firmware on the line" and "none on it".
+    CHECK(v2.firmwareHas({{1, 0, 15}, ct::kFirmwareAlways}));
+    CHECK(!v2.firmwareHas({{1, 0, 15}, ct::kFirmwareNever}));
+    CHECK(!v1.firmwareHas({ct::kFirmwareNever, ct::kFirmwareAlways}));
+
+    // A board this build does not know, however new its firmware.
+    ct::DeviceHardware other = v2;
+    other.family = static_cast<ct::BoardFamily>(9);
+    other.fwMajor = 9;
+    CHECK(!other.firmwareHas({ct::kFirmwareAlways, ct::kFirmwareAlways}));
+
+    // The shipped gate: the extended device channels.
+    ct::DeviceHardware early2 = v2;
+    early2.fwMajor = 1; // the 2.0 firmware numbered 1.0.15 before the lines split
+    early2.fwMinor = 0;
+    early2.fwPatch = 15;
+    CHECK(early2.firmwareHas(ct::firmware_since::kExtendedDeviceChannels));
+    std::printf("  firmware gates per board line      : checked\n");
+}
+
+// Which device channels a unit publishes (DeviceHardware::publishesDeviceChannel)
+// — what Monitor Channels shows and what the Send summary warns about — and
+// which serial ports are CAN Triple 2.0 candidates (usb_port.h).
+static void testUnitChannelsAndPorts()
+{
+    // A 1.x unit on firmware older than the hardware report: builtIn().
+    const ct::DeviceHardware old = ct::DeviceHardware::builtIn();
+    CHECK(old.publishesDeviceChannel(ct::DEVCH_ONTIME));
+    CHECK(old.publishesDeviceChannel(ct::DEVCH_MCU_VDDA));
+    CHECK(old.publishesDeviceChannel(ct::DEVCH_LOOP_TIME));
+    CHECK(!old.publishesDeviceChannel(ct::DEVCH_TX_DROPPED_BASE));
+    CHECK(!old.publishesDeviceChannel(ct::DEVCH_SUPPLY));
+    // A 1.x unit on 1.0.15: the Tx Dropped counts, and still no supply.
+    ct::DeviceHardware v1 = old;
+    v1.reported = true;
+    v1.fwMajor = 1;
+    v1.fwMinor = 0;
+    v1.fwPatch = 15;
+    for (int bus0 = 0; bus0 < ct::DEVCH_BUS_COUNT; ++bus0)
+        CHECK(v1.publishesDeviceChannel(ct::DEVCH_TX_DROPPED_BASE + bus0));
+    for (int id = ct::DEVCH_SUPPLY; id <= ct::DEVCH_USB_SUPPLY; ++id)
+        CHECK(!v1.publishesDeviceChannel(id));
+    // A CAN Triple 2.0 that measures its supply: every one of them, on the 2.0
+    // line's own numbering as on the 1.0.15 it carried before the lines split.
+    ct::DeviceHardware v2 = v1;
+    v2.family = ct::BoardFamily::CanTriple2;
+    v2.features = ct::HW_FEAT_USB_LINK | ct::HW_FEAT_SUPPLY_SENSE;
+    for (int id = 0; id < ct::DEVCH_TOTAL; ++id)
+        CHECK(v2.publishesDeviceChannel(id));
+    v2.fwMajor = 2;
+    v2.fwMinor = 0;
+    v2.fwPatch = 0;
+    for (int id = 0; id < ct::DEVCH_TOTAL; ++id)
+        CHECK(v2.publishesDeviceChannel(id));
+
+    // The ports. ST's shared VCP IDs with a 24-digit chip-ID serial number;
+    // not an ST-LINK, not ST's example VCP firmware, not a stranger's device.
+    CHECK(ct::isCanTriple2Usb(0x0483, 0x5740, QStringLiteral("20353447463250120049002B")));
+    CHECK(ct::isCanTriple2Usb(0x0483, 0x5740, QStringLiteral("20353447463250120049002b")));
+    CHECK(!ct::isCanTriple2Usb(0x0483, 0x374E, QStringLiteral("20353447463250120049002B")));
+    CHECK(!ct::isCanTriple2Usb(0x0483, 0x5740, QStringLiteral("00000000001A")));
+    CHECK(!ct::isCanTriple2Usb(0x0483, 0x5740, QStringLiteral("2035344746325012004900ZZ")));
+    CHECK(!ct::isCanTriple2Usb(0x1234, 0x5740, QStringLiteral("20353447463250120049002B")));
+    std::printf("  unit channels and 2.0 ports        : checked\n");
+}
+
+static void testTxDroppedDeviceChannels(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+    serial_proto_init(restore);
+
+    // ---- the ids continue the header's; nothing that shipped moved ----
+    // The supply block (CAN Triple 2.0) follows the Tx Dropped counts.
+    CHECK(DEVCH_COUNT == 41);
+    CHECK(DEVCH_EXT_BASE == DEVCH_COUNT);
+    CHECK(DEVCH_TX_DROPPED_BASE == 41);
+    CHECK(DEVCH_SUPPLY == 44 && DEVCH_SUPPLY_MIN == 45 && DEVCH_SUPPLY_MAX == 46
+          && DEVCH_USB_SUPPLY == 47);
+    CHECK(DEVCH_EXT_END == 48);
+    CHECK(DEVCH_EXT_COUNT == 7);
+    CHECK(sizeof(::DeviceChannelsExtConfig) == 14);
+    // The catalogue's rows, typed like Rx Dropped.
+    for (int bus0 = 0; bus0 < 3; ++bus0) {
+        const ct::Channel c = ct::ChannelCatalog::deviceChannelById(DEVCH_TX_DROPPED_BASE + bus0);
+        CHECK(c.name == QStringLiteral("Device CAN%1 Tx Dropped").arg(bus0 + 1));
+        CHECK(c.dataType == QStringLiteral("u32") && c.decimalPlaces == 0);
+    }
+
+    const auto extPayload = [](int count, quint16 firstSlot) {
+        QByteArray p(count * 2, '\0');
+        for (int i = 0; i < count; ++i)
+            qToLittleEndian<quint16>(quint16(firstSlot + i), reinterpret_cast<uchar *>(p.data()) + i * 2);
+        return p;
+    };
+    // The list as the device reports it; empty when the reply is not exactly
+    // one list.
+    const auto readExt = []() {
+        QVector<quint16> out;
+        const QList<ct::Packet> reply = exchange(ct::CMD_READ_DEVICE_CHANNELS_EXT, QByteArray());
+        if (reply.size() != 1 || reply[0].cmd != ct::CMD_READ_DEVICE_CHANNELS_EXT
+            || reply[0].payload.size() != DEVCH_EXT_COUNT * 2)
+            return out;
+        const auto *p = reinterpret_cast<const uchar *>(reply[0].payload.constData());
+        for (int i = 0; i < DEVCH_EXT_COUNT; ++i)
+            out.append(qFromLittleEndian<quint16>(p + i * 2));
+        return out;
+    };
+    const quint16 kNone = quint16(ct::SIG_MSG_NONE);
+    const QVector<quint16> none(DEVCH_EXT_COUNT, kNone);
+    // The list as a run of slots from `first`: all of it, or its first `count`
+    // entries and none after. Built rather than spelled out, so the checks
+    // below follow the list as it grows.
+    const auto run = [kNone](quint16 first, int count = DEVCH_EXT_COUNT) {
+        QVector<quint16> v(DEVCH_EXT_COUNT, kNone);
+        for (int i = 0; i < count && i < DEVCH_EXT_COUNT; ++i)
+            v[i] = quint16(first + i);
+        return v;
+    };
+
+    // ---- a cleared unit publishes none of them ----
+    CHECK(engine_clear_config());
+    CHECK(readExt() == none);
+
+    // ---- published into the slots the list names ----
+    CHECK(expectAck(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, extPayload(DEVCH_EXT_COUNT, 150)));
+    CHECK(readExt() == run(150));
+    // ...and the header's pair is untouched: the same 82-byte reply every
+    // older Manager reads, with none of the three in it.
+    {
+        const QList<ct::Packet> reply = exchange(ct::CMD_READ_DEVICE_CHANNELS, QByteArray());
+        CHECK(reply.size() == 1 && reply[0].payload.size() == DEVCH_COUNT * 2);
+        if (reply.size() == 1 && reply[0].payload.size() == DEVCH_COUNT * 2) {
+            const auto *p = reinterpret_cast<const uchar *>(reply[0].payload.constData());
+            for (int id = 0; id < DEVCH_COUNT; ++id)
+                CHECK(qFromLittleEndian<quint16>(p + id * 2) == kNone);
+        }
+    }
+    CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {}));
+    const auto slot = [](int bus0) { return engine_signal_value(uint16_t(150 + bus0)); };
+    engine_tick_calc(10); // publish once, so `before` is the total and not an empty slot
+    const float before[3] = {slot(0), slot(1), slot(2)};
+    engine_note_tx_dropped(1, 5);
+    engine_note_tx_dropped(3, 70000);
+    engine_note_tx_dropped(3, 1);
+    engine_note_tx_dropped(0, 99); // no such bus: ignored, not written past the array
+    engine_note_tx_dropped(4, 99);
+    engine_tick_calc(10);
+    CHECK(slot(0) == before[0] + 5.0f);
+    CHECK(slot(1) == before[1]);
+    CHECK(slot(2) == before[2] + 70001.0f);
+    std::printf("  CAN1/CAN3 tx dropped              : %g / %g\n", double(slot(0)),
+                double(slot(2)));
+
+    // ---- the total saturates; it never wraps back to "nothing was lost" ----
+    engine_note_tx_dropped(2, 0xFFFFFFF0u);
+    engine_note_tx_dropped(2, 0x100u);
+    engine_tick_calc(10);
+    CHECK(slot(1) == float(0xFFFFFFFFu));
+
+    // ---- the supply block: whatever the glue last measured, in the slots
+    // after the Tx Dropped ones ----
+    const auto supplySlot = [](int id) {
+        return engine_signal_value(uint16_t(150 + id - DEVCH_EXT_BASE));
+    };
+    engine_set_supply(13.62f, 11.05f, 14.4f, 5.31f);
+    engine_tick_calc(10);
+    CHECK(supplySlot(DEVCH_SUPPLY) == 13.62f);
+    CHECK(supplySlot(DEVCH_SUPPLY_MIN) == 11.05f);
+    CHECK(supplySlot(DEVCH_SUPPLY_MAX) == 14.4f);
+    CHECK(supplySlot(DEVCH_USB_SUPPLY) == 5.31f);
+    std::printf("  supply / min / max / USB           : %g / %g / %g / %g\n",
+                double(supplySlot(DEVCH_SUPPLY)), double(supplySlot(DEVCH_SUPPLY_MIN)),
+                double(supplySlot(DEVCH_SUPPLY_MAX)), double(supplySlot(DEVCH_USB_SUPPLY)));
+
+    // ---- the totals are the DEVICE's and survive a clear; the destinations
+    // are the configuration's and do not ----
+    const float can1 = slot(0);
+    CHECK(engine_clear_config());
+    CHECK(readExt() == none);
+    CHECK(expectAck(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, extPayload(DEVCH_EXT_COUNT, 250)));
+    CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {}));
+    engine_tick_calc(10);
+    CHECK(engine_signal_value(250) == can1);
+
+    // ---- the length rules ----
+    CHECK(engine_clear_config());
+    // A prefix: a host that knows fewer of these channels than this firmware.
+    CHECK(expectAck(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, extPayload(1, 300)));
+    CHECK(readExt() == run(300, 1));
+    // Longer: a host that knows channels this firmware does not publish. The
+    // extras are dropped rather than refused, so it can still Send.
+    CHECK(expectAck(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, extPayload(DEVCH_EXT_COUNT + 4, 310)));
+    CHECK(readExt() == run(310));
+    // Empty: none of them.
+    CHECK(expectAck(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, QByteArray()));
+    CHECK(readExt() == none);
+    // Half a destination is malformed, and changes nothing.
+    CHECK(expectAck(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, extPayload(DEVCH_EXT_COUNT, 320)));
+    CHECK(expectNack(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, QByteArray(5, '\0'), ct::ERR_INVALID_LEN));
+    CHECK(readExt() == run(320));
+    // A destination past the value table is stored as unused, once.
+    {
+        QByteArray p = extPayload(DEVCH_EXT_COUNT, 330);
+        qToLittleEndian<quint16>(quint16(ct::MAX_SIGNALS), reinterpret_cast<uchar *>(p.data()) + 2);
+        CHECK(expectAck(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, p));
+        QVector<quint16> holed = run(330);
+        holed[1] = kNone;
+        CHECK(readExt() == holed);
+    }
+    // The read takes no payload.
+    CHECK(expectNack(ct::CMD_READ_DEVICE_CHANNELS_EXT, QByteArray(1, '\0'), ct::ERR_INVALID_LEN));
+
+    // ---- the gates: the write is a Send's, the read a Get's, and each only
+    // that one's, so the pair is locked one password at a time ----
+    {
+        const auto lockOnly = [restore](unsigned mask) {
+            AccessKeyRecord locked{};
+            locked.set_mask = uint8_t(mask);
+            for (int fn = 0; fn < ct::ACCESS_FN_COUNT; ++fn)
+                for (int b = 0; b < ct::ACCESS_KEY_LEN; ++b)
+                    locked.keys[fn][b] = uint8_t(0x70 + b);
+            engine_set_access_keys(&locked);
+            serial_proto_init(restore); // a fresh session has proved nothing
+        };
+        lockOnly(fw::kAccessMaskSend);
+        CHECK(expectNack(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, extPayload(DEVCH_EXT_COUNT, 340),
+                         ct::ERR_LOCKED));
+        QVector<quint16> holed = run(330);
+        holed[1] = kNone;
+        CHECK(readExt() == holed); // read open; the write changed nothing
+        lockOnly(fw::kAccessMaskGet);
+        CHECK(expectNack(ct::CMD_READ_DEVICE_CHANNELS_EXT, QByteArray(), ct::ERR_LOCKED));
+        CHECK(expectAck(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, extPayload(DEVCH_EXT_COUNT, 330)));
+        engine_set_access_keys(nullptr);
+        serial_proto_init(restore);
+        CHECK(readExt() == run(330));
+    }
+
+    // ---- saved with the configuration, read back at boot ----
+    CHECK(engine_clear_config());
+    CHECK(expectAck(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, extPayload(DEVCH_EXT_COUNT, 400)));
+    CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {}));
+    // A retransmitted SAVE (its ACK lost) is a no-op, the record included.
+    CHECK(expectAck(ct::CMD_SAVE_TO_FLASH, {}));
+    engine_init(&cb);
+    engine_set_device_channels_ext(nullptr);
+    CHECK(readExt() == none);
+    {
+        ControlCanPayload setup[3];
+        CHECK(engine_load_config(setup));
+    }
+    CHECK(readExt() == run(400));
+
+    // ---- a damaged record is an image without one: loads, publishes none ----
+    g_flash[FLASH_DEVCH_EXT_OFFSET + 6] ^= 0x01; // inside signal_idx[0], under the CRC
+    CHECK(engine_load_config(nullptr));
+    CHECK(readExt() == none);
+
+    // ---- and so is an image from earlier firmware, which wrote no record ----
+    CHECK(engine_clear_config());
+    {
+        uint16_t counts[FLASH_NUM_TABLES] = {0};
+        CHECK(flash_store_commit(counts, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr,
+                                 nullptr));
+    }
+    {
+        ::DeviceChannelsExtConfig stale;
+        for (int i = 0; i < DEVCH_EXT_COUNT; ++i)
+            stale.signal_idx[i] = uint16_t(500 + i);
+        engine_set_device_channels_ext(&stale);
+    }
+    CHECK(engine_load_config(nullptr));
+    CHECK(readExt() == none);
+
+    engine_init(&cb);
+    engine_set_device_channels_ext(nullptr);
+    serial_proto_init(restore);
+}
+
 // The host link's receive buffer (firmware 1.0.13). The UART receives into a
 // circular DMA buffer and the HAL reports progress as a position; the handler
 // has to turn positions into "these bytes are new". It got one case wrong for
@@ -7439,7 +7813,9 @@ static QByteArray makeFirmwareImage(quint32 size, quint16 major, quint16 minor,
     hdr.fw_version_minor = minor;
     hdr.fw_version_patch = patch;
     hdr.flash_store_version = FLASH_STORE_VERSION;
-    hdr.min_bootloader_version = 1;
+    // What every image of its board's line asks for: a 2.0 file asking for
+    // less is from before the 2.0 line, and the Manager refuses it.
+    hdr.min_bootloader_version = productId == FW_PRODUCT_CAN_TRIPLE_2 ? 3 : 1;
     std::memcpy(img.data() + FW_IMAGE_HEADER_OFFSET, &hdr, sizeof(hdr));
 
     const quint32 crcOff = FW_IMAGE_CRC_OFFSET;
@@ -7738,7 +8114,7 @@ static void testFirmwareImageCapacityBlock()
     // than half-read: the image still loads, it just cannot say.
     {
         QByteArray newer = block;
-        newer[4] = char(2); // format
+        newer[4] = char(3); // a format this build does not know (2 is the 2.0 line's)
         QString err;
         const auto img = ct::FirmwareImage::load(
             write("newer.ctf", makeFirmwareImage(8192, 1, 0, 10, FW_PRODUCT_CAN_TRIPLE, newer)),
@@ -7755,6 +8131,89 @@ static void testFirmwareImageCapacityBlock()
         QString err;
         CHECK(!ct::FirmwareImage::load(write("tampered.ctf", img), &err).has_value());
         CHECK(err.contains(QStringLiteral("checksum")));
+    }
+}
+
+// A .ctf names the board it is for, and a file for another board is refused
+// by that name before anything else is said about it: a user holding a CAN
+// Triple 2.0 file is told that, not that it is too large or corrupt.
+static void testFirmwareImageNamesItsBoard()
+{
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const auto write = [&dir](const char *name, const QByteArray &bytes) {
+        const QString path = dir.filePath(QString::fromLatin1(name));
+        QFile f(path);
+        CHECK(f.open(QIODevice::WriteOnly));
+        f.write(bytes);
+        f.close();
+        return path;
+    };
+    {
+        QString err;
+        const auto img =
+            ct::FirmwareImage::load(write("one.ctf", makeFirmwareImage(8192, 1, 0, 15)), &err);
+        CHECK(img.has_value());
+        CHECK(img->productId() == FW_PRODUCT_CAN_TRIPLE);
+        CHECK(img->family() == ct::BoardFamily::CanTriple);
+    }
+    // A CAN Triple 2.0 image loads too, validated by the checks the 2.0's own
+    // bootloader runs (fw_image_validate_product), and says which board it is
+    // for: the update dialog holds it to a 2.0 unit.
+    {
+        QString err;
+        const auto img = ct::FirmwareImage::load(
+            write("two.ctf", makeFirmwareImage(8192, 1, 0, 15, FW_PRODUCT_CAN_TRIPLE_2)), &err);
+        CHECK(img.has_value());
+        CHECK(img && img->productId() == FW_PRODUCT_CAN_TRIPLE_2);
+        CHECK(img && img->family() == ct::BoardFamily::CanTriple2);
+    }
+    // Damage is still damage, whichever board the file is for.
+    {
+        QByteArray bad = makeFirmwareImage(8192, 1, 0, 15, FW_PRODUCT_CAN_TRIPLE_2);
+        bad[4096] = char(bad[4096] ^ 0x01);
+        QString err;
+        CHECK(!ct::FirmwareImage::load(write("two-bad.ctf", bad), &err).has_value());
+        CHECK(err.contains(QStringLiteral("rejected")));
+    }
+    // Larger than a CAN Triple's slot and inside the 2.0's: fine for a 2.0.
+    {
+        QString err;
+        CHECK(ct::FirmwareImage::load(write("two-200k.ctf",
+                                            makeFirmwareImage(200u * 1024u, 1, 0, 15,
+                                                              FW_PRODUCT_CAN_TRIPLE_2)),
+                                      &err)
+                  .has_value());
+    }
+    // Larger than its board's slot: named, not dismissed as "not a CAN Triple
+    // firmware image".
+    {
+        QString err;
+        CHECK(!ct::FirmwareImage::load(write("two-big.ctf",
+                                             makeFirmwareImage(232u * 1024u, 1, 0, 15,
+                                                               FW_PRODUCT_CAN_TRIPLE_2)),
+                                       &err)
+                   .has_value());
+        CHECK(err.contains(QStringLiteral("firmware for the CAN Triple 2.0")));
+        CHECK(err.contains(QStringLiteral("larger than that board's")));
+        CHECK(!err.contains(QStringLiteral("not a CAN Triple firmware image")));
+    }
+    {
+        QString err;
+        CHECK(!ct::FirmwareImage::load(
+                   write("other.ctf", makeFirmwareImage(8192, 1, 0, 15, 0x1234)), &err)
+                   .has_value());
+        CHECK(err.contains(QStringLiteral("does not know"))
+              && err.contains(QStringLiteral("0x1234")));
+    }
+    // A 1.x image too big for its slot keeps the refusal it always had.
+    {
+        QString err;
+        CHECK(!ct::FirmwareImage::load(write("one-big.ctf",
+                                             makeFirmwareImage(FW_APP_MAX_SIZE + 8u, 1, 0, 15)),
+                                       &err)
+                   .has_value());
+        CHECK(err.contains(QStringLiteral("larger than")));
     }
 }
 
@@ -7789,6 +8248,9 @@ struct TransferOutcome {
     QString error;
     ct::DeviceTables tables;
     bool gotTables = false;
+    QStringList skipped; // ConfigTransfer::skippedStages(), read as it finished
+    bool lackedExtWrite = false; // deviceLacked(), likewise
+    bool lackedExtRead = false;
 };
 
 static void runTransfer(ct::ConfigTransfer *t, TransferOutcome *out)
@@ -7800,10 +8262,13 @@ static void runTransfer(ct::ConfigTransfer *t, TransferOutcome *out)
                          out->gotTables = true;
                      });
     QObject::connect(t, &ct::ConfigTransfer::finished, &loop,
-                     [out, &loop](bool ok, const QString &error) {
+                     [out, &loop, t](bool ok, const QString &error) {
                          out->done = true;
                          out->ok = ok;
                          out->error = error;
+                         out->skipped = t->skippedStages();
+                         out->lackedExtWrite = t->deviceLacked(ct::CMD_WRITE_DEVICE_CHANNELS_EXT);
+                         out->lackedExtRead = t->deviceLacked(ct::CMD_READ_DEVICE_CHANNELS_EXT);
                          loop.quit();
                      });
     // A transfer that never finishes must fail the test rather than hang it.
@@ -7927,6 +8392,63 @@ static void testConfigTransferSendAndGetAgainstTheDevice(const SerialProtoCallba
     }
 }
 
+// A document whose target keeps its names apart (a CAN Triple 2.0), sent to
+// this unit, which keeps them in its records. In the document's own form this
+// firmware refuses the first record, and only after the CLEAR, which here
+// erases the configuration in place; so every Send goes through tablesForUnit,
+// which sends the UNIT's form: whole records, each name clipped to its field.
+static void testNamesApartDocumentToARecordsUnit(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+    serial_proto_init(restore);
+    flashErase();
+
+    ct::Configuration cfg;
+    fillTransferFixture(cfg);
+    ct::DeviceCapacity cap20 = ct::DeviceCapacity::builtIn();
+    cap20.labelBytes = ct::LABEL_STORE_BYTES;
+    cap20.reported = true;
+    cfg.setCapacity(cap20);
+    cfg.bus[0].sections[0].name = QStringLiteral("Engine Broadcast Frame Alpha"); // 28 bytes
+    const ct::MappingResult mapped = ct::mapToDevice(cfg);
+    CHECK(mapped.ok());
+    CHECK(mapped.tables.messageLabels.value(0) == QByteArray("Engine Broadcast Frame Alpha"));
+
+    // The document's form: refused at the messages, the CLEAR already done.
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        TransferOutcome sent;
+        runTransfer(ct::ConfigTransfer::send(&link, mapped.tables, /*verify=*/true), &sent);
+        CHECK(sent.done && !sent.ok);
+        CHECK(sent.error.contains(QStringLiteral("Sending messages")));
+    }
+    // The unit's form: taken and verified, no name write sent, and a Get
+    // returns each name as far as this unit keeps it (17 bytes of a message's).
+    ct::FakeDeviceLink link(firmwareReply);
+    TransferOutcome sent;
+    runTransfer(ct::ConfigTransfer::send(
+                    &link, ct::tablesForUnit(mapped.tables, ct::DeviceCapacity::builtIn()),
+                    /*verify=*/true),
+                &sent);
+    CHECK(sent.done && sent.ok);
+    if (!sent.ok)
+        std::printf("      send error: %s\n", qPrintable(sent.error));
+    CHECK(!link.sentAny(ct::CMD_WRITE_LABELS));
+    ct::FakeDeviceLink getLink(firmwareReply);
+    TransferOutcome got;
+    runTransfer(ct::ConfigTransfer::get(&getLink), &got);
+    CHECK(got.done && got.ok && got.gotTables);
+    ct::Configuration back;
+    ct::mapFromDevice(got.tables, back);
+    bool clipped = false;
+    for (const ct::CommsSection &s : back.bus[0].sections)
+        clipped = clipped || s.name == QStringLiteral("Engine Broadcast");
+    CHECK(clipped);
+}
+
 // A LOAD-BEARING STEP THAT FAILS MUST ABORT THE TRANSFER, not be swallowed.
 // Several steps in the plan are deliberately `optional` so an older device can
 // decline them; the risk that buys is a step becoming optional that should not
@@ -8035,6 +8557,16 @@ static void testChannelOverrides(const SerialProtoCallbacks *restore)
     CHECK(!ct::device_session::setChannelOverride(&link, 1, true, 1.0f, &err));
     dc.signal_idx[0] = ct::SIG_MSG_NONE;
     engine_set_device_channels(&dc);
+    // The extended list's slots as well (firmware 1.0.15): Tx Dropped is the
+    // hardware's as much as anything in the header's list.
+    ::DeviceChannelsExtConfig ext;
+    for (int i = 0; i < ct::DEVCH_EXT_COUNT; ++i)
+        ext.signal_idx[i] = ct::SIG_MSG_NONE;
+    ext.signal_idx[1] = 1;
+    engine_set_device_channels_ext(&ext);
+    CHECK(!ct::device_session::setChannelOverride(&link, 1, true, 1.0f, &err));
+    ext.signal_idx[1] = ct::SIG_MSG_NONE;
+    engine_set_device_channels_ext(&ext);
     CHECK(ct::device_session::setChannelOverride(&link, 1, true, 7.0f, &err));
     CHECK(engine_override_count() == 2);
     // A wrong-sized payload is refused before the engine sees it.
@@ -8100,6 +8632,120 @@ static void testChannelOverrides(const SerialProtoCallbacks *restore)
     CHECK(err.isEmpty());
     CHECK(!ct::device_session::setChannelOverride(&older, 0, true, 1.0f, &err));
 
+    serial_proto_init(restore);
+}
+
+// The extended device channels through the Manager's own Send and Get, against
+// the real firmware: the list a document maps is the list the unit holds, and
+// the list a Get reads is the one the next Send writes. Then the same two
+// against a unit whose firmware predates the pair (1.0.14 and earlier), which
+// answers both with ERR_INVALID_CMD: the Send completes and names the skipped
+// step, and the Get completes with the list empty, which is what that unit
+// publishes.
+static void testExtendedDeviceChannelsTransfer(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+    serial_proto_init(restore);
+    flashErase();
+
+    ct::Configuration cfg;
+    fillTransferFixture(cfg);
+    ct::MathRow copy;
+    copy.op = ct::MATH_OP_ADD;
+    copy.aIsChannel = true;
+    copy.aChannel = QStringLiteral("Device CAN1 Tx Dropped");
+    copy.bIsChannel = false;
+    copy.bConst = 0.0;
+    copy.destChannel = QStringLiteral("Tx Drop Copy");
+    cfg.mathRows.append(copy);
+    const ct::MappingResult mapped = ct::mapToDevice(cfg);
+    CHECK(mapped.ok());
+    CHECK(mapped.readsExtendedDeviceChannels);
+
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        TransferOutcome sent;
+        runTransfer(ct::ConfigTransfer::send(&link, mapped.tables, /*verify=*/true, {},
+                                             /*saveToFlash=*/true),
+                    &sent);
+        CHECK(sent.done && sent.ok);
+        CHECK(sent.skipped.isEmpty());
+        CHECK(!sent.lackedExtWrite);
+        CHECK(link.countOf(ct::CMD_WRITE_DEVICE_CHANNELS_EXT) == 1);
+    }
+    CHECK(std::memcmp(engine_device_channels_ext(), &mapped.tables.deviceChannelsExt,
+                      sizeof(::DeviceChannelsExtConfig))
+          == 0);
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        TransferOutcome got;
+        runTransfer(ct::ConfigTransfer::get(&link), &got);
+        CHECK(got.done && got.ok && got.gotTables);
+        CHECK(std::memcmp(&got.tables.deviceChannelsExt, &mapped.tables.deviceChannelsExt,
+                          sizeof(ct::DeviceChannelsExtConfig))
+              == 0);
+        // The document a Get rebuilds reads the channel again, from the same slot.
+        ct::Configuration back;
+        ct::mapFromDevice(got.tables, back, nullptr);
+        const ct::MappingResult again = ct::mapToDevice(back);
+        CHECK(again.ok() && again.readsExtendedDeviceChannels);
+        CHECK(std::memcmp(&again.tables.deviceChannelsExt, &mapped.tables.deviceChannelsExt,
+                          sizeof(ct::DeviceChannelsExtConfig))
+              == 0);
+    }
+
+    // ---- a unit that predates the pair ----
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        link.nackCommand(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, ct::ERR_INVALID_CMD);
+        TransferOutcome sent;
+        runTransfer(ct::ConfigTransfer::send(&link, mapped.tables, /*verify=*/true, {},
+                                             /*saveToFlash=*/true),
+                    &sent);
+        CHECK(sent.done && sent.ok);
+        // QUIETLY: every unit before 1.0.15 answers this way, so it is not a
+        // skipped step worth listing on every Send. The caller can still ask.
+        CHECK(sent.skipped.isEmpty());
+        CHECK(sent.lackedExtWrite);
+        // ...and everything else still went in and was committed.
+        CHECK(link.sentAny(ct::CMD_SAVE_TO_FLASH));
+    }
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        link.nackCommand(ct::CMD_READ_DEVICE_CHANNELS_EXT, ct::ERR_INVALID_CMD);
+        TransferOutcome got;
+        runTransfer(ct::ConfigTransfer::get(&link), &got);
+        CHECK(got.done && got.ok && got.gotTables);
+        CHECK(got.skipped.isEmpty() && got.lackedExtRead);
+        const ct::DeviceChannelsExtConfig unused = ct::unusedDeviceChannelsExt();
+        CHECK(std::memcmp(&got.tables.deviceChannelsExt, &unused, sizeof(unused)) == 0);
+        // The header's list still came back, so the rest of the device
+        // channels are recovered as before.
+        CHECK(std::memcmp(&got.tables.deviceChannels, &mapped.tables.deviceChannels,
+                          sizeof(ct::DeviceChannelsConfig))
+              == 0);
+    }
+
+    // Quiet only about "unknown command". Any other refusal of the same step
+    // is news and is listed like any optional step's.
+    {
+        ct::FakeDeviceLink link(firmwareReply);
+        link.nackCommand(ct::CMD_WRITE_DEVICE_CHANNELS_EXT, ct::ERR_INVALID_LEN);
+        TransferOutcome sent;
+        runTransfer(ct::ConfigTransfer::send(&link, mapped.tables, /*verify=*/true, {},
+                                             /*saveToFlash=*/true),
+                    &sent);
+        CHECK(sent.done && sent.ok);
+        CHECK(!sent.lackedExtWrite);
+        CHECK(sent.skipped.size() == 1
+              && sent.skipped[0].startsWith(QStringLiteral("Sending extended device channels (")));
+    }
+
+    engine_init(&cb);
+    engine_set_device_channels_ext(nullptr);
     serial_proto_init(restore);
 }
 
@@ -8369,7 +9015,8 @@ static void testBuilderPackageEndToEnd(const SerialProtoCallbacks *restore)
     facts.version = QStringLiteral("1.05");
     facts.identityKnown = true;
     facts.mcuId = QStringLiteral("3E0023000C5032394B353620");
-    facts.viewerPasswordSupported = true; // the firmware under test is 1.0.14
+    facts.viewerPasswordSupported = true; // the firmware under test is 1.0.15
+    facts.extendedDeviceChannelsSupported = true;
     // Read for install, judged, relayed. False at the first step that refuses.
     const auto install = [&](const QString &path) {
         ct::SecureFileInfo info;
@@ -8496,6 +9143,258 @@ static void testBuilderPackageEndToEnd(const SerialProtoCallbacks *restore)
         const auto keys = exchange(ct::CMD_READ_ACCESS_KEYS, QByteArray());
         CHECK(keys.size() == 1 && keys[0].payload.size() >= 4
               && (quint8(keys[0].payload[3]) & ct::ACCESS_MASK_CAN_VIEWER) == 0); // not open
+    }
+
+    // ---- 5. a configuration that reads Tx Dropped (firmware 1.0.15) --------
+    // Only then does the stream carry the extended device-channel list, and it
+    // then LEADS with an empty write of it, so firmware without the command
+    // refuses the first frame and nothing on the unit changes. Every package
+    // above reads none, and their streams do not carry the command at all.
+    //
+    // The frames are opened here with the fleet key, which only a test (or a
+    // unit) holds: the stream says nothing about its contents to anyone else.
+    const auto innerFrames = [&fleetKey](const QByteArray &stream) {
+        QList<QByteArray> out;
+        QByteArray salt;
+        QList<ct::SealedFrame> frames;
+        QString e;
+        if (!ct::parseSealedStream(stream, &salt, &frames, &e))
+            return out;
+        SealKeys keys{};
+        seal_derive(reinterpret_cast<const uint8_t *>(fleetKey.constData()),
+                    uint32_t(fleetKey.size()), reinterpret_cast<const uint8_t *>(salt.constData()),
+                    &keys);
+        for (int i = 0; i < frames.size(); ++i) {
+            QByteArray plain(frames[i].bytes.size(), '\0');
+            uint32_t n = 0;
+            if (!seal_open(&keys, uint32_t(i),
+                           reinterpret_cast<const uint8_t *>(frames[i].bytes.constData()),
+                           uint32_t(frames[i].bytes.size()),
+                           reinterpret_cast<uint8_t *>(plain.data()), &n)
+                || n == 0)
+                break;
+            out.append(plain.left(int(n)));
+        }
+        seal_wipe(&keys);
+        return out;
+    };
+    {
+        ct::SecureFileInfo info;
+        CHECK(ct::readSecureInstall(installOnly, &info, &err));
+        CHECK(!info.policy.needsExtendedDeviceChannels);
+        const QList<QByteArray> inner = innerFrames(info.installStream);
+        CHECK(inner.size() > 3);
+        for (const QByteArray &f : inner)
+            CHECK(quint8(f[0]) != ct::CMD_WRITE_DEVICE_CHANNELS_EXT);
+    }
+    {
+        ct::Configuration reads;
+        fillTransferFixture(reads);
+        reads.setConfigTitle(QStringLiteral("Reads Tx Dropped"));
+        ct::MathRow copy;
+        copy.op = ct::MATH_OP_ADD;
+        copy.aIsChannel = true;
+        copy.aChannel = QStringLiteral("Device CAN2 Tx Dropped");
+        copy.bIsChannel = false;
+        copy.bConst = 0.0;
+        copy.destChannel = QStringLiteral("Tx Drop Copy");
+        reads.mathRows.append(copy);
+        const QString readsPath = dir.filePath(QStringLiteral("reads-tx-dropped.ct3"));
+        CHECK(reads.saveToFile(readsPath, &err));
+        const ct::MappingResult mapped = ct::mapWithScript(reads);
+        CHECK(mapped.ok() && mapped.readsExtendedDeviceChannels);
+
+        ct::PackageBuildRequest req;
+        req.sourcePath = readsPath;
+        req.outputPath = dir.filePath(QStringLiteral("reads-tx-dropped.ct3s"));
+        req.fleetPassphrase = passphrase;
+        req.includeEditable = false;
+        const ct::PackageBuildResult built = ct::buildSecurePackage(req);
+        CHECK(built.ok);
+        ct::SecureFileInfo info;
+        CHECK(ct::readSecureInstall(req.outputPath, &info, &err));
+        CHECK(info.policy.needsExtendedDeviceChannels);
+
+        const QList<QByteArray> inner = innerFrames(info.installStream);
+        CHECK(inner.size() == built.frameCount);
+        CHECK(!inner.isEmpty()
+              && inner[0] == QByteArray(1, char(ct::CMD_WRITE_DEVICE_CHANNELS_EXT)));
+        int clearAt = -1;
+        int writeAt = -1;
+        for (int i = 1; i < inner.size(); ++i) {
+            const quint8 c = quint8(inner[i][0]);
+            if (c == ct::CMD_CLEAR_CONFIG && clearAt < 0)
+                clearAt = i;
+            if (c == ct::CMD_WRITE_DEVICE_CHANNELS_EXT)
+                writeAt = i;
+        }
+        CHECK(clearAt > 0 && writeAt > clearAt);
+        CHECK(writeAt > 0
+              && inner[writeAt].mid(1)
+                     == QByteArray(reinterpret_cast<const char *>(&mapped.tables.deviceChannelsExt),
+                                   int(sizeof(ct::DeviceChannelsExtConfig))));
+        CHECK(!inner.isEmpty() && quint8(inner.last()[0]) == ct::CMD_SAVE_TO_FLASH);
+
+        // Refused by the verdict on a unit that predates the list...
+        ct::DeviceMatchFacts older = facts;
+        older.extendedDeviceChannelsSupported = false;
+        const ct::InstallVerdict v = ct::packageInstallVerdict(info.policy, older);
+        CHECK(!v.ok() && v.extendedDeviceChannelsUnsupported);
+
+        // ...and by the unit itself when a Manager without that check relays
+        // it: the firmware below is this one with the command missing, which
+        // is what a 1.0.14 unit is to this stream. The first frame is refused
+        // and the unit keeps what it had.
+        freshUnit();
+        CHECK(install(editable)); // something to keep
+        {
+            SealKeys keys{};
+            uint32_t next = 0;
+            const QByteArray fk = fleetKey;
+            ct::FakeDeviceLink link([&keys, &next, fk](quint8 cmd, const QByteArray &payload) {
+                if (cmd == ct::CMD_SEAL_BEGIN && payload.size() == int(SEAL_SALT_LEN)) {
+                    seal_derive(reinterpret_cast<const uint8_t *>(fk.constData()),
+                                uint32_t(fk.size()),
+                                reinterpret_cast<const uint8_t *>(payload.constData()), &keys);
+                    next = 0;
+                } else if (cmd == ct::CMD_SEAL_FRAME) {
+                    QByteArray plain(payload.size(), '\0');
+                    uint32_t n = 0;
+                    if (seal_open(&keys, next, reinterpret_cast<const uint8_t *>(payload.constData()),
+                                  uint32_t(payload.size()),
+                                  reinterpret_cast<uint8_t *>(plain.data()), &n)
+                        && n > 0 && quint8(plain[0]) == ct::CMD_WRITE_DEVICE_CHANNELS_EXT)
+                        return ct::FakeDeviceLink::Reply::nack(ct::ERR_INVALID_CMD);
+                    ++next;
+                }
+                return firmwareReply(cmd, payload);
+            });
+            RelayOutcome out;
+            runRelay(ct::SealedInstall::run(&link, info.installStream), &out);
+            CHECK(out.done && !out.ok);
+            CHECK(out.error.contains(QStringLiteral("(frame 1 of")));
+            CHECK(out.error.contains(QStringLiteral("Nothing on the unit was changed")));
+            seal_wipe(&keys);
+        }
+        CHECK(expectAck(ct::CMD_SEAL_END, QByteArray()));
+        {
+            ct::DeviceTables got;
+            CHECK(readBack(&got));
+            CHECK(sameTables(got, reference)); // untouched
+        }
+        // The wording, past the first frame: the unit has been written to by
+        // then, so the sentence must not claim otherwise.
+        CHECK(!ct::SealedInstall::describeFailure(ct::CMD_SEAL_FRAME, ct::ERR_INVALID_CMD, {}, 5, 40)
+                   .contains(QStringLiteral("Nothing on the unit")));
+
+        // Installed where the list exists: it is on the unit, and committed.
+        freshUnit();
+        CHECK(install(req.outputPath));
+        CHECK(std::memcmp(engine_device_channels_ext(), &mapped.tables.deviceChannelsExt,
+                          sizeof(::DeviceChannelsExtConfig))
+              == 0);
+        engine_set_device_channels_ext(nullptr);
+        CHECK(engine_load_config(nullptr));
+        CHECK(std::memcmp(engine_device_channels_ext(), &mapped.tables.deviceChannelsExt,
+                          sizeof(::DeviceChannelsExtConfig))
+              == 0);
+    }
+
+    // ---- 6. a package for a CAN Triple 2.0 that keeps its names apart --------
+    // Its stream writes the message, signal and relay records without their
+    // names, which a unit keeping names in its records (this firmware) refuses,
+    // but only after the CLEAR has erased it. So the stream LEADS with the label
+    // store's probe, an empty name write this firmware does not know: relayed
+    // here by any Manager, the first frame is refused and the unit keeps what
+    // it had. The verdict refuses it before that, and holds the other kind of
+    // package off the other kind of unit.
+    {
+        ct::Configuration named;
+        fillTransferFixture(named);
+        named.setConfigTitle(QStringLiteral("Names apart"));
+        ct::DeviceCapacity cap20 = ct::DeviceCapacity::builtIn();
+        cap20.labelBytes = ct::LABEL_STORE_BYTES;
+        cap20.reported = true;
+        named.setCapacity(cap20);
+        const QString namedPath = dir.filePath(QStringLiteral("names-apart.ct3"));
+        CHECK(named.saveToFile(namedPath, &err));
+        ct::PackageBuildRequest req;
+        req.sourcePath = namedPath;
+        req.outputPath = dir.filePath(QStringLiteral("names-apart.ct3s"));
+        req.fleetPassphrase = passphrase;
+        req.includeEditable = false;
+        const ct::PackageBuildResult built = ct::buildSecurePackage(req);
+        CHECK(built.ok);
+        ct::SecureFileInfo info;
+        CHECK(ct::readSecureInstall(req.outputPath, &info, &err));
+        CHECK(info.policy.needsLabelStore);
+
+        const QList<QByteArray> inner = innerFrames(info.installStream);
+        CHECK(inner.size() == built.frameCount);
+        CHECK(!inner.isEmpty()
+              && inner[0] == QByteArray(1, char(ct::CMD_WRITE_LABELS)) + QByteArray(5, '\0'));
+        int clearAt = -1;
+        int namesAt = -1;
+        bool recordsSliced = true;
+        for (int i = 1; i < inner.size(); ++i) {
+            const QByteArray &f = inner[i];
+            const quint8 c = quint8(f[0]);
+            if (c == ct::CMD_CLEAR_CONFIG && clearAt < 0)
+                clearAt = i;
+            if (c == ct::CMD_WRITE_LABELS && namesAt < 0)
+                namesAt = i;
+            if (c == ct::CMD_WRITE_SIG_CFG || c == ct::CMD_WRITE_MSG_CFG) {
+                const int count = quint8(f[3]) | quint8(f[4]) << 8;
+                const int bytes = c == ct::CMD_WRITE_SIG_CFG ? ct::V2_SIGNAL_BYTES
+                                                             : ct::V2_MESSAGE_BYTES;
+                recordsSliced = recordsSliced && f.size() == 1 + 4 + count * bytes;
+            }
+        }
+        CHECK(clearAt > 0 && namesAt > clearAt);
+        CHECK(recordsSliced);
+
+        // The verdict: refused on a unit that keeps names in its records...
+        ct::DeviceMatchFacts x1 = facts;
+        x1.capacityKnown = true;
+        x1.capacity = ct::DeviceCapacity::builtIn();
+        ct::InstallVerdict v = ct::packageInstallVerdict(info.policy, x1);
+        CHECK(!v.ok() && v.labelStoreMissing && !v.labelStoreUnexpected);
+        // ...and on one that could not say where it keeps them...
+        ct::DeviceMatchFacts unknown = facts;
+        unknown.capacityKnown = false;
+        v = ct::packageInstallVerdict(info.policy, unknown);
+        CHECK(!v.ok() && v.labelStoreMissing);
+        // ...taken by a CAN Triple 2.0 that keeps them apart...
+        ct::DeviceMatchFacts x2 = facts;
+        x2.capacityKnown = true;
+        x2.capacity = cap20;
+        v = ct::packageInstallVerdict(info.policy, x2);
+        CHECK(v.ok());
+        // ...which refuses a package built for names in the records.
+        ct::SecureFileInfo recordsPackage;
+        CHECK(ct::readSecureInstall(installOnly, &recordsPackage, &err));
+        CHECK(!recordsPackage.policy.needsLabelStore);
+        v = ct::packageInstallVerdict(recordsPackage.policy, x2);
+        CHECK(!v.ok() && v.labelStoreUnexpected && !v.labelStoreMissing);
+        CHECK(ct::packageInstallVerdict(recordsPackage.policy, x1).ok());
+
+        // Relayed to this unit by a Manager without the verdict's check: the
+        // firmware refuses the probe as a command it does not know, the relay
+        // stops at frame 1, and nothing on the unit changed.
+        freshUnit();
+        CHECK(install(editable)); // something to keep
+        {
+            ct::FakeDeviceLink link(firmwareReply);
+            RelayOutcome out;
+            runRelay(ct::SealedInstall::run(&link, info.installStream), &out);
+            CHECK(out.done && !out.ok);
+            CHECK(out.error.contains(QStringLiteral("(frame 1 of")));
+            CHECK(out.error.contains(QStringLiteral("Nothing on the unit was changed")));
+        }
+        CHECK(expectAck(ct::CMD_SEAL_END, QByteArray()));
+        ct::DeviceTables got;
+        CHECK(readBack(&got));
+        CHECK(sameTables(got, reference)); // untouched
     }
 
     // ---- refusals ------------------------------------------------------------
@@ -8758,6 +9657,337 @@ static void testCapacityReport(const SerialProtoCallbacks *restore)
     serial_proto_init(restore);
 }
 
+// ---------------------------------------------------- hardware report
+
+// What the fake glue reads off its "part" for one case. Static for the same
+// reason g_fakeOtp is: the real callback reads fixed addresses and takes no
+// context.
+static HardwareFacts g_fakeFacts;
+
+static void fakeHardwareFacts(HardwareFacts *out)
+{
+    *out = g_fakeFacts;
+}
+
+// A 1.x board exactly as user_code.c describes one, with virgin OTP.
+static void factsForCanTriple()
+{
+    g_fakeFacts = HardwareFacts{};
+    g_fakeFacts.family = uint8_t(fw::kHwFamilyCanTriple);
+    g_fakeFacts.default_features = fw::kHwFeatTermination;
+    g_fakeFacts.firmware_features = fw::kHwFeatTermination;
+    g_fakeFacts.package = uint8_t(fw::kHwPackageLqfp48);
+    g_fakeFacts.flash_kb = 128;
+    g_fakeFacts.dev_id = uint16_t(fw::kHwDevIdStm32g47x);
+    g_fakeFacts.rev_id = 0x2003;
+    g_fakeFacts.descriptor_read = true;
+    std::memset(g_fakeFacts.descriptor, 0xFF, sizeof(g_fakeFacts.descriptor));
+}
+
+// A 2.0 board as its own glue is expected to describe one: revision 2.00 by
+// default, whose termination switches cannot turn on, so the default features
+// leave termination out while the firmware can drive it.
+static void factsForCanTriple2()
+{
+    g_fakeFacts = HardwareFacts{};
+    g_fakeFacts.family = uint8_t(fw::kHwFamilyCanTriple2);
+    g_fakeFacts.default_rev_major = 2;
+    g_fakeFacts.default_rev_minor = 0;
+    g_fakeFacts.default_features = fw::kHwFeatXcvrStandby | fw::kHwFeatUsbLink
+                                   | fw::kHwFeatQspiFlash | fw::kHwFeatFram
+                                   | fw::kHwFeatRgbLeds | fw::kHwFeatSupplySense;
+    g_fakeFacts.firmware_features = g_fakeFacts.default_features | fw::kHwFeatTermination;
+    g_fakeFacts.package = uint8_t(fw::kHwPackageLqfp100);
+    g_fakeFacts.flash_kb = 512;
+    g_fakeFacts.dev_id = uint16_t(fw::kHwDevIdStm32g47x);
+    g_fakeFacts.rev_id = 0x2003;
+    g_fakeFacts.qspi_bytes = 16u * 1024u * 1024u;
+    g_fakeFacts.fram_bytes = 8192;
+    g_fakeFacts.descriptor_read = true;
+    std::memset(g_fakeFacts.descriptor, 0xFF, sizeof(g_fakeFacts.descriptor));
+}
+
+// Burn a board descriptor into the fake OTP the way the manufacturing tool
+// will: the CRC over everything before it.
+static void burnDescriptor(unsigned family, uint8_t major, uint8_t minor, uint32_t features)
+{
+    OtpBoardDescriptor d{};
+    d.magic = OTP_BOARD_DESC_MAGIC;
+    d.format = OTP_BOARD_DESC_FORMAT;
+    d.family = uint8_t(family);
+    d.rev_major = major;
+    d.rev_minor = minor;
+    d.features = features;
+    d.crc32 = fw_crc32(&d, uint32_t(offsetof(OtpBoardDescriptor, crc32)));
+    std::memcpy(g_fakeFacts.descriptor, &d, sizeof(d));
+}
+
+// Ask the real firmware and parse with the real parser, through the same
+// DeviceLink path the Manager uses on connecting.
+static bool readHardwareFromDevice(ct::DeviceHardware *out, QString *error = nullptr)
+{
+    ct::FakeDeviceLink link(firmwareReply);
+    QString err;
+    const bool ok = ct::device_session::readHardware(&link, out, &err);
+    if (error)
+        *error = err;
+    return ok;
+}
+
+static void testHardwareReport(const SerialProtoCallbacks *restore)
+{
+    // The two headers, pinned before anything leans on them.
+    CHECK(ct::CMD_GET_HARDWARE == fw::kCmdGetHardware);
+    CHECK(ct::HARDWARE_REPORT_FORMAT == fw::kHardwareReportFormat);
+    CHECK(ct::HW_FAMILY_CAN_TRIPLE == fw::kHwFamilyCanTriple);
+    CHECK(ct::HW_FAMILY_CAN_TRIPLE_2 == fw::kHwFamilyCanTriple2);
+    CHECK(ct::HW_REV_SOURCE_NONE == fw::kHwRevSourceNone);
+    CHECK(ct::HW_REV_SOURCE_OTP == fw::kHwRevSourceOtp);
+    CHECK(ct::HW_REV_SOURCE_DEFAULT == fw::kHwRevSourceDefault);
+    CHECK(ct::HW_FEAT_TERMINATION == fw::kHwFeatTermination);
+    CHECK(ct::HW_FEAT_XCVR_STANDBY == fw::kHwFeatXcvrStandby);
+    CHECK(ct::HW_FEAT_USB_LINK == fw::kHwFeatUsbLink);
+    CHECK(ct::HW_FEAT_QSPI_FLASH == fw::kHwFeatQspiFlash);
+    CHECK(ct::HW_FEAT_FRAM == fw::kHwFeatFram);
+    CHECK(ct::HW_FEAT_RGB_LEDS == fw::kHwFeatRgbLeds);
+    CHECK(ct::HW_FEAT_SUPPLY_SENSE == fw::kHwFeatSupplySense);
+    CHECK(ct::HW_PACKAGE_LQFP48 == fw::kHwPackageLqfp48);
+    CHECK(ct::HW_PACKAGE_LQFP100 == fw::kHwPackageLqfp100);
+    CHECK(ct::HW_DEV_ID_STM32G47X == fw::kHwDevIdStm32g47x);
+    static_assert(sizeof(ct::HardwareReport) == sizeof(::HardwareReport),
+                  "GUI and firmware hardware reports differ in size");
+    // Every offset, on both sides. Equal sizes prove nothing about where the
+    // fields sit, and the parser reads by offset.
+#define HW_OFFSET_AGREES(field)                                                                    \
+    static_assert(offsetof(ct::HardwareReport, field) == offsetof(::HardwareReport, field),        \
+                  "HardwareReport." #field " sits at a different offset in the two headers")
+    HW_OFFSET_AGREES(format);
+    HW_OFFSET_AGREES(family);
+    HW_OFFSET_AGREES(product_id);
+    HW_OFFSET_AGREES(board_rev_major);
+    HW_OFFSET_AGREES(board_rev_minor);
+    HW_OFFSET_AGREES(board_rev_source);
+    HW_OFFSET_AGREES(package);
+    HW_OFFSET_AGREES(flash_kb);
+    HW_OFFSET_AGREES(dev_id);
+    HW_OFFSET_AGREES(rev_id);
+    HW_OFFSET_AGREES(features);
+    HW_OFFSET_AGREES(qspi_bytes);
+    HW_OFFSET_AGREES(fram_bytes);
+    HW_OFFSET_AGREES(fw_major);
+    HW_OFFSET_AGREES(fw_minor);
+    HW_OFFSET_AGREES(fw_patch);
+    HW_OFFSET_AGREES(store_version);
+    HW_OFFSET_AGREES(build_id);
+    HW_OFFSET_AGREES(bootloader_version);
+#undef HW_OFFSET_AGREES
+    // Which image each family takes is fw_image.h's product ID, both ways.
+    CHECK(ct::familyForProduct(FW_PRODUCT_CAN_TRIPLE) == ct::BoardFamily::CanTriple);
+    CHECK(ct::familyForProduct(FW_PRODUCT_CAN_TRIPLE_2) == ct::BoardFamily::CanTriple2);
+    CHECK(ct::familyForProduct(0x1234) == ct::BoardFamily::Unknown);
+    CHECK(ct::productForFamily(ct::BoardFamily::CanTriple) == FW_PRODUCT_CAN_TRIPLE);
+    CHECK(ct::productForFamily(ct::BoardFamily::CanTriple2) == FW_PRODUCT_CAN_TRIPLE_2);
+    CHECK(FW_PRODUCT_CAN_TRIPLE != FW_PRODUCT_CAN_TRIPLE_2);
+    // A read with a fixed reply that echoes nothing.
+    CHECK(ct::DeviceLink::isReadResponse(ct::CMD_GET_HARDWARE));
+    CHECK(!ct::DeviceLink::echoesRequestRange(ct::CMD_GET_HARDWARE));
+
+    // ---- firmware without the command. That is every unit before 1.0.15, and
+    // every one of them is a 1.x board, so it reads as one — not as unknown.
+    SerialProtoCallbacks cb = *restore;
+    cb.hardware_facts = nullptr;
+    serial_proto_init(&cb);
+    CHECK(expectNack(ct::CMD_GET_HARDWARE, QByteArray(), ct::ERR_INVALID_CMD));
+    {
+        ct::DeviceHardware hw;
+        QString err;
+        CHECK(readHardwareFromDevice(&hw, &err));
+        CHECK(err.isEmpty());
+        CHECK(!hw.reported && hw.family == ct::BoardFamily::CanTriple);
+        CHECK(hw.hasFeature(ct::HW_FEAT_TERMINATION));
+        CHECK(!hw.siliconMismatch()); // nothing read, nothing to disagree with
+        CHECK(hw.summary() == QStringLiteral("CAN Triple"));
+    }
+
+    cb.hardware_facts = fakeHardwareFacts;
+    serial_proto_init(&cb);
+
+    // ---- a 1.x unit, as user_code.c describes it, with virgin OTP
+    factsForCanTriple();
+    {
+        const auto p = exchange(ct::CMD_GET_HARDWARE, QByteArray());
+        CHECK(p.size() == 1 && p[0].cmd == ct::CMD_GET_HARDWARE
+              && p[0].payload.size() == int(sizeof(ct::HardwareReport)));
+        ct::DeviceHardware hw;
+        CHECK(readHardwareFromDevice(&hw));
+        CHECK(hw.reported && hw.family == ct::BoardFamily::CanTriple);
+        CHECK(hw.productId == FW_PRODUCT_CAN_TRIPLE); // the running image's header
+        CHECK(hw.boardRevSource == ct::HW_REV_SOURCE_NONE && hw.boardRevMajor == 0);
+        CHECK(hw.boardRevisionText().isEmpty());
+        CHECK(hw.package == ct::HW_PACKAGE_LQFP48 && hw.flashKb == 128);
+        CHECK(hw.devId == ct::HW_DEV_ID_STM32G47X && hw.revId == 0x2003);
+        CHECK(hw.features == ct::HW_FEAT_TERMINATION);
+        CHECK(hw.qspiBytes == 0 && hw.framBytes == 0);
+        CHECK(!hw.siliconMismatch());
+        // The running image and bootloader, from their own headers: the host
+        // stub's image says 2.0.0, and a host build reports the current
+        // bootloader.
+        CHECK(hw.fwMajor == 2 && hw.fwMinor == 0 && hw.fwPatch == 0);
+        CHECK(hw.storeVersion == FLASH_STORE_VERSION);
+        CHECK(hw.bootloaderVersion == FW_BOOTLOADER_VERSION);
+        CHECK(hw.summary() == QStringLiteral("CAN Triple, firmware 2.0.0"));
+        CHECK(hw.processorText() == QStringLiteral("STM32G47x, 48-pin package"));
+    }
+    // ---- ungated: a unit guarding Send and Get still says what it is
+    {
+        AccessKeyRecord keys{};
+        keys.set_mask = uint8_t(fw::kAccessMaskGet | fw::kAccessMaskSend);
+        engine_set_access_keys(&keys);
+        ct::DeviceHardware hw;
+        CHECK(readHardwareFromDevice(&hw));
+        CHECK(hw.reported && hw.family == ct::BoardFamily::CanTriple);
+        AccessKeyRecord none{};
+        engine_set_access_keys(&none);
+    }
+    // ---- a request carrying anything has confused the command with another
+    CHECK(expectNack(ct::CMD_GET_HARDWARE, QByteArray(1, '\0'), ct::ERR_INVALID_LEN));
+
+    // ---- a 2.0 with no descriptor: revision 2.00 assumed, no termination
+    factsForCanTriple2();
+    {
+        ct::DeviceHardware hw;
+        CHECK(readHardwareFromDevice(&hw));
+        CHECK(hw.reported && hw.family == ct::BoardFamily::CanTriple2);
+        CHECK(hw.boardRevSource == ct::HW_REV_SOURCE_DEFAULT);
+        CHECK(hw.boardRevisionText() == QStringLiteral("2.00"));
+        CHECK(!hw.hasFeature(ct::HW_FEAT_TERMINATION)); // the 2.00 boards' switches cannot close
+        CHECK(hw.hasFeature(ct::HW_FEAT_USB_LINK) && hw.hasFeature(ct::HW_FEAT_QSPI_FLASH)
+              && hw.hasFeature(ct::HW_FEAT_FRAM));
+        CHECK(hw.qspiBytes == 16u * 1024u * 1024u && hw.framBytes == 8192);
+        CHECK(!hw.siliconMismatch());
+        CHECK(hw.summary() == QStringLiteral("CAN Triple 2.0 rev 2.00, firmware 2.0.0"));
+        CHECK(hw.processorText() == QStringLiteral("STM32G47x, 100-pin package"));
+    }
+    // ---- a 2.01 board's descriptor turns termination on, with the same image
+    burnDescriptor(fw::kHwFamilyCanTriple2, 2, 1,
+                   g_fakeFacts.default_features | fw::kHwFeatTermination);
+    {
+        ct::DeviceHardware hw;
+        CHECK(readHardwareFromDevice(&hw));
+        CHECK(hw.boardRevSource == ct::HW_REV_SOURCE_OTP);
+        CHECK(hw.boardRevisionText() == QStringLiteral("2.01"));
+        CHECK(hw.hasFeature(ct::HW_FEAT_TERMINATION));
+    }
+    // ---- a descriptor promising hardware this firmware does not drive: the
+    // bit stays clear, and so does the size behind it
+    factsForCanTriple2();
+    g_fakeFacts.firmware_features &= ~fw::kHwFeatQspiFlash;
+    burnDescriptor(fw::kHwFamilyCanTriple2, 2, 1,
+                   g_fakeFacts.default_features | fw::kHwFeatTermination);
+    {
+        ct::DeviceHardware hw;
+        CHECK(readHardwareFromDevice(&hw));
+        CHECK(!hw.hasFeature(ct::HW_FEAT_QSPI_FLASH) && hw.qspiBytes == 0);
+        CHECK(hw.hasFeature(ct::HW_FEAT_TERMINATION));
+    }
+    // ---- descriptors that must NOT be believed, each reading as "none": the
+    // family's default revision comes back, and termination stays off
+    const auto defaultsStand = []() {
+        ct::DeviceHardware hw;
+        return readHardwareFromDevice(&hw) && hw.boardRevSource == ct::HW_REV_SOURCE_DEFAULT
+               && hw.boardRevisionText() == QStringLiteral("2.00")
+               && !hw.hasFeature(ct::HW_FEAT_TERMINATION);
+    };
+    factsForCanTriple2();
+    burnDescriptor(fw::kHwFamilyCanTriple, 1, 5, fw::kHwFeatTermination); // another board's
+    CHECK(defaultsStand());
+    factsForCanTriple2();
+    burnDescriptor(fw::kHwFamilyCanTriple2, 2, 1, fw::kHwFeatTermination);
+    g_fakeFacts.descriptor[9] ^= 0x01; // a bit that did not take
+    CHECK(defaultsStand());
+    factsForCanTriple2();
+    burnDescriptor(fw::kHwFamilyCanTriple2, 2, 1, fw::kHwFeatTermination);
+    std::memset(g_fakeFacts.descriptor + 8, 0xFF, 8); // second double-word never burned
+    CHECK(defaultsStand());
+    factsForCanTriple2();
+    burnDescriptor(fw::kHwFamilyCanTriple2, 2, 1, fw::kHwFeatTermination);
+    g_fakeFacts.descriptor_read = false; // the read raised an ECC fault
+    CHECK(defaultsStand());
+    // ---- a 1.x image on a 100-pin part: the silicon says it is on the wrong
+    // board, and the host can say so
+    factsForCanTriple();
+    g_fakeFacts.package = uint8_t(fw::kHwPackageLqfp100);
+    {
+        ct::DeviceHardware hw;
+        CHECK(readHardwareFromDevice(&hw));
+        CHECK(hw.family == ct::BoardFamily::CanTriple && hw.siliconMismatch());
+    }
+    // ---- a family this build has never heard of is named by its number, and
+    // is not mistaken for a 1.x
+    factsForCanTriple();
+    g_fakeFacts.family = 7;
+    {
+        ct::DeviceHardware hw;
+        CHECK(readHardwareFromDevice(&hw));
+        CHECK(hw.family != ct::BoardFamily::CanTriple);
+        CHECK(hw.familyName() == QStringLiteral("board family 7"));
+    }
+
+    // ---- the parser alone: a later format is refused, and the reader says to
+    // update the Manager rather than guessing a board
+    factsForCanTriple();
+    {
+        const auto p = exchange(ct::CMD_GET_HARDWARE, QByteArray());
+        CHECK(p.size() == 1);
+        const QByteArray good = p.isEmpty() ? QByteArray() : p[0].payload;
+        ct::DeviceHardware hw;
+        CHECK(ct::parseHardwareReport(good + QByteArray(4, '\x5A'), &hw)); // appended bytes
+        CHECK(hw.reported);
+        CHECK(!ct::parseHardwareReport(good.left(good.size() - 1), &hw)); // one short
+        CHECK(!hw.reported);
+        QByteArray newer = good;
+        if (!newer.isEmpty())
+            newer[0] = char(ct::HARDWARE_REPORT_FORMAT + 1);
+        CHECK(!ct::parseHardwareReport(newer, &hw));
+
+        ct::FakeDeviceLink link([newer](quint8 cmd, const QByteArray &payload) {
+            if (cmd == ct::CMD_GET_HARDWARE)
+                return ct::FakeDeviceLink::Reply::ack(newer);
+            return firmwareReply(cmd, payload);
+        });
+        QString err;
+        CHECK(!ct::device_session::readHardware(&link, &hw, &err));
+        CHECK(err.contains(QStringLiteral("Update the Device Manager")));
+        CHECK(!hw.reported && hw.family == ct::BoardFamily::CanTriple);
+    }
+    // ---- "is it at least x.y.z?", which a package's install verdict asks ----
+    {
+        ct::DeviceHardware hw;
+        CHECK(readHardwareFromDevice(&hw));
+        CHECK(hw.firmwareAtLeast(hw.fwMajor, hw.fwMinor, hw.fwPatch)); // itself
+        CHECK(hw.firmwareAtLeast(1, 0, 15));
+        CHECK(hw.firmwareAtLeast(0, 99, 99));
+        CHECK(!hw.firmwareAtLeast(hw.fwMajor, hw.fwMinor, hw.fwPatch + 1));
+        CHECK(!hw.firmwareAtLeast(hw.fwMajor, hw.fwMinor + 1, 0));
+        CHECK(!hw.firmwareAtLeast(hw.fwMajor + 1, 0, 0));
+        hw.fwMajor = 1;
+        hw.fwMinor = 1;
+        hw.fwPatch = 0;
+        CHECK(hw.firmwareAtLeast(1, 0, 15)); // the minor decides before the patch
+        hw.fwMinor = 0;
+        hw.fwPatch = 14;
+        CHECK(!hw.firmwareAtLeast(1, 0, 15));
+        // Firmware that cannot report predates the report, so it is never
+        // "at least" anything the report's own release is.
+        CHECK(!ct::DeviceHardware::builtIn().firmwareAtLeast(1, 0, 15));
+        CHECK(!ct::DeviceHardware::builtIn().firmwareAtLeast(0, 0, 0));
+    }
+
+    std::printf("  hardware report             : 1.x and 2.0 boards, descriptors believed and "
+                "refused, 1.0.14 reads as a 1.x\n");
+    serial_proto_init(restore);
+}
+
 static void testConfigTransferRefusesToSwallowAFatalStep(const SerialProtoCallbacks *restore)
 {
     EngineCallbacks cb{};
@@ -8897,7 +10127,29 @@ static void testFirmwareUpdaterUploadsAndCancels(const SerialProtoCallbacks *res
         CHECK(error.contains(QStringLiteral("Initial Programming Tool")));
         CHECK(!link.sentAny(ct::CMD_FW_UPDATE_DATA)); // nothing sent past the refusal
     }
+
+    {
+        // The CAN Triple 2.0's FW_CONFIRM is not a 1.x command: this firmware
+        // answers it ERR_INVALID_CMD, and the Manager's confirm() takes that as
+        // nothing to confirm rather than a failed update. Its status is the 32
+        // bytes alone, which the Manager reads as a unit with no copies.
+        CHECK(expectNack(ct::CMD_FW_CONFIRM, QByteArray(), ct::ERR_INVALID_CMD));
+        ct::FakeDeviceLink link(firmwareReply);
+        ct::FirmwareUpdater updater(&link);
+        QString error;
+        CHECK(updater.confirm(&error));
+        CHECK(link.countOf(ct::CMD_FW_CONFIRM) == 1);
+        ct::FwUpdateStatus st{};
+        std::optional<ct::FwUpdateStatus2> copies = ct::FwUpdateStatus2{};
+        CHECK(updater.readStatus(&st, &error, &copies));
+        CHECK(!copies.has_value());
+    }
 }
+
+// A unit that does not state its retained values (every 1.x) keeps the 1.x
+// ring's PRESERVE_MAX: the Manager's default limit is that number.
+static_assert(ct::kRetainedValuesBuiltIn == PRESERVE_MAX,
+              "DeviceCapacity's retained-value default must be the 1.x ring's size");
 
 int main(int argc, char *argv[])
 {
@@ -9284,6 +10536,17 @@ int main(int argc, char *argv[])
         CHECK(ct::CMD_READ_DEVICE_CHANNELS == fw::kCmdReadDeviceChannels);
         CHECK(ct::CMD_WRITE_DEVICE_CHANNELS == 0x32);
         CHECK(ct::CMD_READ_DEVICE_CHANNELS == 0x33);
+        // The extended list's pair and layout, by the same two rules.
+        CHECK(ct::CMD_WRITE_DEVICE_CHANNELS_EXT == fw::kCmdWriteDeviceChannelsExt);
+        CHECK(ct::CMD_READ_DEVICE_CHANNELS_EXT == fw::kCmdReadDeviceChannelsExt);
+        CHECK(ct::CMD_WRITE_DEVICE_CHANNELS_EXT == 0x55);
+        CHECK(ct::CMD_READ_DEVICE_CHANNELS_EXT == 0x56);
+        static_assert(sizeof(ct::DeviceChannelsExtConfig) == sizeof(::DeviceChannelsExtConfig),
+                      "GUI and firmware extended device-channel records differ in size");
+        CHECK(ct::DEVCH_EXT_BASE == DEVCH_EXT_BASE);
+        CHECK(ct::DEVCH_TX_DROPPED_BASE == DEVCH_TX_DROPPED_BASE);
+        CHECK(ct::DEVCH_EXT_END == DEVCH_EXT_END);
+        CHECK(ct::DEVCH_EXT_COUNT == DEVCH_EXT_COUNT);
         // And on the protocol version itself: the GUI advertises what it speaks,
         // so a table added to one side without bumping both would go unnoticed.
         CHECK(ct::PROTOCOL_VERSION_CURRENT == fw::kProtocolVersion);
@@ -10439,7 +11702,7 @@ int main(int argc, char *argv[])
         CHECK(cm.tables.messages.size() == 1);
         // Two from the document, then the device channels every Send carries.
         // They are allocated last, so the two below keep indices 0 and 1.
-        CHECK(cm.tables.signalConfigs.size() == 2 + ct::DEVCH_COUNT);
+        CHECK(cm.tables.signalConfigs.size() == 2 + ct::DEVCH_TOTAL);
 
         CHECK(expectAck(ct::CMD_CLEAR_CONFIG, {}));
         CHECK(sendTable(ct::CMD_WRITE_MSG_CFG, cm.tables.messages, ct::WRITE_CHUNK_MESSAGES));
@@ -11823,8 +13086,10 @@ int main(int argc, char *argv[])
     testReadoutProtection(&protoCb);
     testChannelOverrides(&protoCb);
     testCapacityReport(&protoCb);
+    testHardwareReport(&protoCb);
     testFirmwareLicense(&protoCb);
     testConfigVersion(&protoCb);
+    testExtendedDeviceChannelsTransfer(&protoCb);
     testSealedInstallAgainstTheDevice(&protoCb);
     testBuilderPackageEndToEnd(&protoCb);
     testBusSetupReadback(&protoCb);
@@ -11867,6 +13132,7 @@ int main(int argc, char *argv[])
     testMessagePasswordSlotSurvivesTheDevice(&protoCb);
     testMessagePasswordRecordRoundTrip(&protoCb);
     testConfigTransferSendAndGetAgainstTheDevice(&protoCb);
+    testNamesApartDocumentToARecordsUnit(&protoCb);
     testConfigTransferRefusesToSwallowAFatalStep(&protoCb);
     testFirmwareUpdaterUploadsAndCancels(&protoCb);
     testMessageProtectionIsHostOnly(&protoCb);
@@ -11878,11 +13144,15 @@ int main(int argc, char *argv[])
     testIncrementalEqualsFull(&protoCb);
     testStreamsStartWithTheHost(&protoCb);
     testLoadDeviceChannels(&protoCb);
+    testTxDroppedDeviceChannels(&protoCb);
+    testFirmwareGatesPerBoard();
+    testUnitChannelsAndPorts();
     testMessageRowLists(&protoCb);
     testSerialRxWrap();
     testRetransmitSafety();
     testFirmwareUpdate();
     testFirmwareImageCapacityBlock();
+    testFirmwareImageNamesItsBoard();
 
     if (failures == 0)
         std::printf("ALL FIRMWARE-LINK TESTS PASSED\n");

@@ -1,6 +1,11 @@
 #include "device_session.h"
 
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QRandomGenerator>
+#include <QSerialPortInfo>
+#include <QTimer>
 #include <QtEndian>
 
 #include <cstring>
@@ -403,6 +408,82 @@ bool readCapacity(DeviceLink *link, DeviceCapacity *out, QString *error)
     return true;
 }
 
+bool reopenAfterRestart(DeviceLink *link, const QString &port, qint32 baud, int timeoutMs,
+                        const std::function<void(int secondsWaited)> &progress,
+                        QString *error)
+{
+    const auto present = [&port]() {
+        for (const QSerialPortInfo &info : QSerialPortInfo::availablePorts())
+            if (info.portName().compare(port, Qt::CaseInsensitive) == 0)
+                return true;
+        return false;
+    };
+    const auto pause = [](int ms) {
+        QEventLoop loop;
+        QTimer::singleShot(ms, &loop, &QEventLoop::quit);
+        loop.exec();
+    };
+    QElapsedTimer clock;
+    clock.start();
+    while (present() && clock.elapsed() < 2000)
+        pause(100);
+    link->close(); // gone with the port already, most likely; certain now
+    while (clock.elapsed() < timeoutMs) {
+        pause(250);
+        if (progress)
+            progress(int(clock.elapsed() / 1000));
+        if (!present() || !link->open(port, baud, nullptr))
+            continue;
+        // Open is not enough: a port can open while the unit behind it is
+        // still starting. It has to answer.
+        QByteArray reply;
+        if (link->requestSync(CMD_GET_STATUS, QByteArray(), &reply, nullptr,
+                              /*timeoutMs=*/500, /*retries=*/1))
+            return true;
+        link->close();
+    }
+    if (error)
+        *error = QCoreApplication::translate(
+                     "DeviceSession",
+                     "The unit did not come back on %1 within %2 seconds. Reconnect from "
+                     "the Online menu once it is running.")
+                     .arg(port)
+                     .arg(timeoutMs / 1000);
+    return false;
+}
+
+bool readHardware(DeviceLink *link, DeviceHardware *out, QString *error, int timeoutMs,
+                  int retries)
+{
+    if (!link || !out)
+        return false;
+    *out = DeviceHardware::builtIn();
+    QByteArray resp;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_GET_HARDWARE, QByteArray(), &resp, error, timeoutMs, retries,
+                           &code)) {
+        if (unsupported(code)) {
+            if (error)
+                error->clear();
+            return true; // firmware before 1.0.15: a CAN Triple 1.x, which it is
+        }
+        return false;
+    }
+    if (!parseHardwareReport(resp, out)) {
+        const bool newerFormat = !resp.isEmpty() && quint8(resp[0]) != HARDWARE_REPORT_FORMAT;
+        if (error)
+            *error = newerFormat
+                         ? QStringLiteral("The device describes its hardware in a format (%1) "
+                                          "this version of the Device Manager cannot read. "
+                                          "Update the Device Manager.")
+                               .arg(quint8(resp[0]))
+                         : QStringLiteral("The device returned a malformed hardware report.");
+        *out = DeviceHardware::builtIn();
+        return false;
+    }
+    return true;
+}
+
 bool readAccessState(DeviceLink *link, AccessState *out, QString *error)
 {
     if (!link || !out)
@@ -780,6 +861,60 @@ bool clearAccessKey(DeviceLink *link, AccessFunction fn, QString *error, int slo
 // it moves as the optional payload of CMD_SAVE_TO_FLASH, so it commits with the
 // tables it describes and can never name a revision the unit is not running.
 // See ConfigTransfer::send and its configVersion parameter.
+
+bool parseDeviceSettings(const QByteArray &payload, DeviceSettings *out)
+{
+    if (payload.size() != int(sizeof(DeviceSettings)))
+        return false;
+    DeviceSettings s{};
+    std::memcpy(&s, payload.constData(), sizeof(s));
+    if (s.format != DEVICE_SETTINGS_FORMAT)
+        return false;
+    *out = s;
+    return true;
+}
+
+bool readDeviceSettings(DeviceLink *link, DeviceSettingsState *out, QString *error)
+{
+    if (!link || !out)
+        return false;
+    *out = DeviceSettingsState{};
+    QByteArray resp;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_READ_DEVICE_SETTINGS, QByteArray(), &resp, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        if (unsupported(code)) {
+            if (error)
+                error->clear();
+            return true; // a unit without settings: not an error
+        }
+        return false;
+    }
+    if (!parseDeviceSettings(resp, &out->settings)) {
+        if (error)
+            *error = QStringLiteral("The device's settings are in a form this Device Manager "
+                                    "does not read. A newer Device Manager is needed.");
+        return false;
+    }
+    out->supported = true;
+    return true;
+}
+
+bool writeDeviceSettings(DeviceLink *link, const DeviceSettings &settings, bool store,
+                         QString *error, quint8 *errCode)
+{
+    if (!link)
+        return false;
+    QByteArray payload(reinterpret_cast<const char *>(&settings), int(sizeof(settings)));
+    payload.append(char(store ? 1 : 0));
+    quint8 code = 0;
+    const bool ok = link->requestSync(CMD_WRITE_DEVICE_SETTINGS, payload, nullptr, error,
+                                      DeviceLink::kDefaultTimeoutMs,
+                                      DeviceLink::kDefaultRetries, &code);
+    if (errCode)
+        *errCode = ok ? quint8(ERR_OK) : code;
+    return ok;
+}
 
 bool writeBinding(DeviceLink *link, const QByteArray &uid, QString *error)
 {

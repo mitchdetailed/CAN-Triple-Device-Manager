@@ -429,6 +429,9 @@ Type: files; Name: "{app}\Firmware\can-triple-*.ctf"
 ; why not beside the standard one); the same argument applies, so the folder
 ; is emptied before this release's variants are laid down.
 Type: files; Name: "{app}\Firmware\Variants\can-triple-*.ctf"
+; The CAN Triple 2.0's image, likewise one folder down (a 2.x version beside
+; the 1.x image would outrank it), and likewise emptied first.
+Type: files; Name: "{app}\Firmware\CAN Triple 2.0\can-triple-2-*.ctf"
 ; The SWD tool as it was named before 2026-08-15, and its Start Menu entry.
 ; The rename laid down CANTripleInitialProgramming.exe and deleted nothing, so
 ; every install upgraded across it still carries the old exe beside the new one
@@ -551,6 +554,12 @@ Name: "{app}\Settings"; Permissions: users-modify
 ;                              known place Online -> Update Firmware browses
 ;                              to, and what lets a bench machine restore a
 ;                              unit with nothing but this install.
+;   Firmware\Variants\, Firmware\CAN Triple 2.0\
+;                           -- the 1.x variants, and the CAN Triple 2.0's
+;                              image (can-triple-2-<version>.ctf), each one
+;                              folder down so the initial-programming kit
+;                              beside them never picks one up. Update
+;                              Firmware opens in the 2.0 folder for a 2.0.
 ;   Firmware\CANTripleInitialProgramming.exe, bootloader.bin, openocd\
 ;                           -- the initial-programming kit: programs the
 ;                              bootloader and application over the board's

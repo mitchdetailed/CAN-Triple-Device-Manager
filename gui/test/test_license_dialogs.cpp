@@ -360,11 +360,15 @@ static void testTargetFirmwareDialog()
         CHECK(table != nullptr);
         if (!table)
             return;
-        CHECK(table->rowCount() == 13);
+        CHECK(table->rowCount() == 14);
         // The first row is messages: holds the built-in number, uses nothing.
         CHECK(table->item(0, 0)->text() == QStringLiteral("messages"));
         CHECK(table->item(0, 1)->text() == QString::number(MAX_MESSAGES));
         CHECK(table->item(0, 2)->text() == QStringLiteral("0"));
+        // The last is the retained values: the CAN Triple's 20 when nothing says otherwise.
+        CHECK(table->item(13, 0)->text() == QStringLiteral("values kept across power cycles"));
+        CHECK(table->item(13, 1)->text() == QStringLiteral("20"));
+        CHECK(table->item(13, 1)->toolTip().contains(QStringLiteral("minute to a flash store")));
         // No device: that route is off, the file route is live.
         for (QPushButton *b : dlg.findChildren<QPushButton *>()) {
             if (b->text() == QStringLiteral("Use Connected Device"))

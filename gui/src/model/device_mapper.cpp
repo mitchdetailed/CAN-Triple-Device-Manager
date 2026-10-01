@@ -294,11 +294,25 @@ static QByteArray clipToLabel(const QString &name, int budget = MAX_CHANNEL_NAME
 // the struct rather than off a literal, so the field growing is a one-line
 // change in wire_structs.h and not a hunt through here — and the memset is what
 // keeps the tail of a reused stack record out of the frame.
-static void fillLabel(CanSignalConfig &sig, const QString &name)
+//
+// The full name also goes into `labels` at the record's index, clipped to
+// `budget`: what the target keeps whole. On a CAN Triple 2.0 whose names are in
+// its label store that list is what is sent (32 bytes a name) and the field is
+// not; on a 1.x the field is sent and the list rides along.
+static void keepLabel(QVector<QByteArray> &labels, int idx, const QByteArray &utf8)
+{
+    if (labels.size() <= idx)
+        labels.resize(idx + 1);
+    labels[idx] = utf8;
+}
+
+static void fillLabel(CanSignalConfig &sig, const QString &name, QVector<QByteArray> &labels,
+                      int idx, int budget)
 {
     const QByteArray utf8 = clipToLabel(name);
     std::memset(sig.label, 0, sizeof(sig.label));
     std::memcpy(sig.label, utf8.constData(), size_t(utf8.size()));
+    keepLabel(labels, idx, clipToLabel(name, budget));
 }
 
 // The same for a MESSAGE's name, into the narrower field (store v18). Written
@@ -311,11 +325,13 @@ static void fillLabel(CanSignalConfig &sig, const QString &name)
 // "Receive 0x640", so that mapFromDevice can tell "no name" from "a name that
 // happens to look generated" and fall through to its own naming rules — which
 // include the concealing-name rule that must not print an id.
-static void fillMessageLabel(CanMessageConfig &msg, const QString &name)
+static void fillMessageLabel(CanMessageConfig &msg, const QString &name,
+                             QVector<QByteArray> &labels, int idx, int budget)
 {
     const QByteArray utf8 = clipToLabel(name.trimmed(), MAX_MESSAGE_NAME_BYTES);
     std::memset(msg.label, 0, sizeof(msg.label));
     std::memcpy(msg.label, utf8.constData(), size_t(utf8.size()));
+    keepLabel(labels, idx, clipToLabel(name.trimmed(), budget));
 }
 
 // And back. The field is NUL-PADDED rather than NUL-terminated — a name that
@@ -330,11 +346,13 @@ static void fillMessageLabel(CanMessageConfig &msg, const QString &name)
 // The relay table's copy. A separate overload rather than a template because
 // the two records share nothing but the field, and one line of duplication is
 // cheaper to read than a template over two unrelated structs.
-static void fillRelayLabel(RelayConfig &rl, const QString &name)
+static void fillRelayLabel(RelayConfig &rl, const QString &name, QVector<QByteArray> &labels,
+                           int idx, int budget)
 {
     const QByteArray utf8 = clipToLabel(name.trimmed(), MAX_MESSAGE_NAME_BYTES);
     std::memset(rl.label, 0, sizeof(rl.label));
     std::memcpy(rl.label, utf8.constData(), size_t(utf8.size()));
+    keepLabel(labels, idx, clipToLabel(name.trimmed(), budget));
 }
 
 static QString nameFromLabel(const char *field, int size)
@@ -343,6 +361,16 @@ static QString nameFromLabel(const char *field, int size)
     while (len < size && field[len] != '\0')
         ++len;
     return QString::fromUtf8(field, len).trimmed();
+}
+
+// A record's stored name: the label store's, when a Get read one (a CAN Triple
+// 2.0 keeps its names apart, and its records' fields then come back empty),
+// else the record's own field.
+static QString storedName(const QVector<QByteArray> &labels, int idx, const char *field, int size)
+{
+    if (idx >= 0 && idx < labels.size() && !labels[idx].isEmpty())
+        return QString::fromUtf8(labels[idx]).trimmed();
+    return nameFromLabel(field, size);
 }
 
 // The document's handle for a message: its bus and its name, lower-cased. Used
@@ -359,10 +387,10 @@ QString messageRefKey(int bus, const QString &name)
 // different name than the one on screen, and nothing ever mentioned it. The
 // channel budget has warned about exactly this for as long as it has had a
 // label; this is the same warning for the field that just gained one.
-static void noteIfNameClipped(MappingResult &r, int busIdx, const QString &name)
+static void noteIfNameClipped(MappingResult &r, int busIdx, const QString &name, int budget)
 {
     const QString trimmed = name.trimmed();
-    const QByteArray clipped = clipToLabel(trimmed, MAX_MESSAGE_NAME_BYTES);
+    const QByteArray clipped = clipToLabel(trimmed, budget);
     if (clipped.size() == trimmed.toUtf8().size())
         return;
     r.warnings.append(QStringLiteral(
@@ -370,8 +398,29 @@ static void noteIfNameClipped(MappingResult &r, int busIdx, const QString &name)
         "stores as '%4' - a Get returns the shorter name")
                           .arg(busIdx + 1)
                           .arg(trimmed)
-                          .arg(MAX_MESSAGE_NAME_BYTES)
+                          .arg(budget)
                           .arg(QString::fromUtf8(clipped)));
+}
+
+// What of a Transmit CRC8 recipe `cap` cannot run, in words, or empty when it
+// can run all of it: the CAN Triple 2.0's elements (the whole identifier, runs
+// of frame bytes) and byte positions past 7 go only to a target that states
+// them. A firmware without them skips an element it does not know and stamps a
+// different checksum, silently, so the mapper refuses rather than sends it.
+// Validation says the same at Check Channels, as an error per element.
+static QString crc8Unsupported(const CommsSection &section, const DeviceCapacity &cap)
+{
+    if (section.crcByteLocation > cap.crc8MaxByte())
+        return QStringLiteral("CRC byte location %1").arg(section.crcByteLocation);
+    for (const CommsSection::CrcElement &el : section.crcElements) {
+        if (el.type == CommsSection::CrcElement::IdAll && !cap.crc8WholeId())
+            return QStringLiteral("the whole-identifier CRC element");
+        if (el.type == CommsSection::CrcElement::DataRun && !cap.crc8DataRuns())
+            return QStringLiteral("a run of frame bytes in the CRC");
+        if (el.type == CommsSection::CrcElement::Data && el.value > cap.crc8MaxByte())
+            return QStringLiteral("CRC element frame byte %1").arg(el.value);
+    }
+    return QString();
 }
 
 MappingResult mapToDevice(const Configuration &config)
@@ -387,6 +436,10 @@ MappingResult mapToDevice(const Configuration &config)
     // a report holds.
     const DeviceCapacity &cap = config.capacity();
     r.tables.capacity = cap;
+    // The longest names the target keeps whole: 32 bytes on a CAN Triple 2.0
+    // whose names are in its label store, the 1.x fields' 31 and 17 otherwise.
+    const int sigLabelBudget = cap.channelNameBytes();
+    const int msgLabelBudget = cap.messageNameBytes();
     const int maxMessages = cap.capacityOf(DeviceTable::Messages);
     const int maxSignals = cap.capacityOf(DeviceTable::Signals);
     const int maxMath = cap.capacityOf(DeviceTable::Math);
@@ -443,12 +496,12 @@ MappingResult mapToDevice(const Configuration &config)
 
     QHash<QByteArray, QString> truncatedLabels;
     auto checkLabelCollision = [&](const QString &channelName) {
-        const QByteArray label = clipToLabel(channelName);
+        const QByteArray label = clipToLabel(channelName, sigLabelBudget);
         if (label.size() != channelName.toUtf8().size())
             r.warnings.append(QStringLiteral(
                 "channel '%1' is longer than the %2-byte device label and stores as '%3' — "
                 "rename it to keep the name through a read-back")
-                .arg(channelName).arg(MAX_CHANNEL_NAME_BYTES).arg(QString::fromUtf8(label)));
+                .arg(channelName).arg(sigLabelBudget).arg(QString::fromUtf8(label)));
         const QByteArray key = label.toLower();
         const QString existing = truncatedLabels.value(key);
         if (existing.isEmpty())
@@ -457,7 +510,7 @@ MappingResult mapToDevice(const Configuration &config)
             r.warnings.append(QStringLiteral(
                 "channels '%1' and '%2' share the same %3-byte device label — rename one "
                 "or read-back will merge them")
-                .arg(existing, channelName).arg(MAX_CHANNEL_NAME_BYTES));
+                .arg(existing, channelName).arg(sigLabelBudget));
     };
 
     // channel name (lower) -> allocated signal index
@@ -479,7 +532,7 @@ MappingResult mapToDevice(const Configuration &config)
         const Channel ch = catalog.findByName(channelName);
         sig.min_val = float(ch.isValid() ? ch.minValue : -1e9);
         sig.max_val = float(ch.isValid() ? ch.maxValue : 1e9);
-        fillLabel(sig, channelName);
+        fillLabel(sig, channelName, r.tables.signalLabels, idx, sigLabelBudget);
         r.tables.signalConfigs.append(sig);
         r.channelToSignal.insert(key, idx);
         r.signalToChannel.insert(idx, channelName);
@@ -534,8 +587,9 @@ MappingResult mapToDevice(const Configuration &config)
                 // and the honest wire value is "no password" rather than a made-up one.
                 msg.password_slot =
                     quint8(config.commsPasswordSlotFor(section.messageKey));
-                noteIfNameClipped(r, busIdx, section.name);
-                fillMessageLabel(msg, section.name);
+                noteIfNameClipped(r, busIdx, section.name, msgLabelBudget);
+                fillMessageLabel(msg, section.name, r.tables.messageLabels,
+                                 int(r.tables.messages.size()), msgLabelBudget);
                 // Cyclic until the resolve pass below says otherwise. Naming the
                 // sentinel rather than leaning on the zero-init matters: 0 is a
                 // perfectly good condition index, and a message that ended up
@@ -595,6 +649,10 @@ MappingResult mapToDevice(const Configuration &config)
                         r.errors.append(QStringLiteral(
                             "%1: no CRC channel — the checksum needs a channel to publish to")
                                             .arg(where));
+                    } else if (const QString what = crc8Unsupported(section, cap);
+                               !what.isEmpty()) {
+                        r.errors.append(QStringLiteral("%1: %2 needs a CAN Triple 2.0")
+                                            .arg(where, what));
                     } else {
                         // The CRC channel's value slot. The DEVICE writes it (the
                         // composer publishes each stamped frame's checksum there),
@@ -610,7 +668,7 @@ MappingResult mapToDevice(const Configuration &config)
                             Crc8Config cc{};
                             cc.msg_idx = quint16(msgIdx);
                             cc.dest_signal_idx = quint16(destIdx);
-                            cc.byte_location = quint8(qBound(0, section.crcByteLocation, 7));
+                            cc.byte_location = quint8(qBound(0, section.crcByteLocation, 63));
                             cc.polynomial = quint8(section.crcPolynomial & 0xFF);
                             cc.init_value = quint8(section.crcInitValue & 0xFF);
                             cc.final_xor = quint8(section.crcFinalXor & 0xFF);
@@ -639,8 +697,19 @@ MappingResult mapToDevice(const Configuration &config)
                             // recipe's leftovers into a Verify comparison.
                             for (int e = 0; e < n; ++e) {
                                 const CommsSection::CrcElement el = section.crcElements.value(e);
-                                cc.elem_type[e] = quint8(el.type);
-                                cc.elem_value[e] = quint8(el.value & 0xFF);
+                                if (el.type == CommsSection::CrcElement::DataRun) {
+                                    cc.elem_type[e] = quint8(CRC8_ELEM_DATA_RUN
+                                                             | (el.value & CRC8_RUN_FIRST_MASK));
+                                    cc.elem_value[e] = quint8(el.last & CRC8_RUN_LAST_MASK);
+                                } else if (el.type == CommsSection::CrcElement::IdAll) {
+                                    cc.elem_type[e] = CRC8_ELEM_ID_ALL;
+                                    cc.elem_value[e] =
+                                        quint8((qBound(0, el.value, 4) & CRC8_IDALL_BYTES_MASK)
+                                               | (el.lsbFirst ? CRC8_IDALL_LSB_FIRST : 0));
+                                } else {
+                                    cc.elem_type[e] = quint8(el.type);
+                                    cc.elem_value[e] = quint8(el.value & 0xFF);
+                                }
                             }
                             r.tables.crc8.append(cc);
                         }
@@ -692,7 +761,8 @@ MappingResult mapToDevice(const Configuration &config)
                     // The value slot the composer reads to pack this field
                     // ("source index + 1"; 0 would mean this signal's own slot).
                     sig.tx_source = quint16(sourceIdx + 1);
-                    fillLabel(sig, row.channelName);
+                    fillLabel(sig, row.channelName, r.tables.signalLabels,
+                              int(r.tables.signalConfigs.size()), sigLabelBudget);
                     r.tables.signalConfigs.append(sig);
                 };
 
@@ -828,8 +898,9 @@ MappingResult mapToDevice(const Configuration &config)
                 rl.forward_bus_mask = quint8(section.routeBusMask & 0x7 & ~(1 << busIdx));
                 // store v18: a relay is a section in the list like any other,
                 // and its name travels on the same terms as a message's.
-                noteIfNameClipped(r, busIdx, section.name);
-                fillRelayLabel(rl, section.name);
+                noteIfNameClipped(r, busIdx, section.name, msgLabelBudget);
+                fillRelayLabel(rl, section.name, r.tables.relayLabels, int(r.tables.relays.size()),
+                               msgLabelBudget);
                 r.tables.relays.append(rl);
                 continue;
             }
@@ -859,8 +930,9 @@ MappingResult mapToDevice(const Configuration &config)
             // and the honest wire value is "no password" rather than a made-up one.
             msg.password_slot =
                 quint8(config.commsPasswordSlotFor(section.messageKey));
-            noteIfNameClipped(r, busIdx, section.name);
-            fillMessageLabel(msg, section.name);
+            noteIfNameClipped(r, busIdx, section.name, msgLabelBudget);
+            fillMessageLabel(msg, section.name, r.tables.messageLabels,
+                             int(r.tables.messages.size()), msgLabelBudget);
             // A receive message has no trigger, and says so rather than leaving
             // the sentinel to the zero-init — see the transmit branch.
             msg.tx_trigger_cond = TX_TRIGGER_COND_NONE;
@@ -940,7 +1012,7 @@ MappingResult mapToDevice(const Configuration &config)
                 sig.default_value = float(row.defaultValue);
                 sig.mux_id = muxId;
                 sig.mux_mask = muxMask;
-                fillLabel(sig, row.channelName);
+                fillLabel(sig, row.channelName, r.tables.signalLabels, sigIdx, sigLabelBudget);
                 if (!ch.isValid())
                     r.warnings.append(QStringLiteral(
                         "%1 · %2: channel not found in the catalogue; using base resolution 1")
@@ -1813,7 +1885,7 @@ MappingResult mapToDevice(const Configuration &config)
     // moment anyone wants them. They are a baseline, so they are allocated like
     // one.
     //
-    // The cost is bounded and paid once: DEVCH_COUNT slots out of the channel
+    // The cost is bounded and paid once: DEVCH_TOTAL slots out of the channel
     // capacity, taken at the END of the table so no document channel's index
     // moves, and
     // 6 bytes per channel per tick on the value stream — and only while a
@@ -1825,15 +1897,27 @@ MappingResult mapToDevice(const Configuration &config)
     // wire index it publishes into, so adding one is a catalogue row and
     // nothing here changes.
     for (const Channel &dev : ChannelCatalog::deviceChannels()) {
-        if (dev.deviceChannelId < 0 || dev.deviceChannelId >= DEVCH_COUNT)
+        // Two lists, one id space: the header's first DEVCH_COUNT, then the
+        // extended ones (firmware 1.0.15) — see DEVCH_EXT_BASE.
+        const int id = dev.deviceChannelId;
+        if (id < 0 || id >= DEVCH_TOTAL)
             continue;
+        // Asked before signalFor() below gives every channel a slot: a slot
+        // that already exists is one the document itself allocated.
+        if (id >= DEVCH_EXT_BASE && r.channelToSignal.contains(dev.name.toLower())) {
+            r.readsExtendedDeviceChannels = true;
+            r.extendedDeviceChannelsRead.append(id);
+        }
         // signalFor() returns the EXISTING slot when the document already reads
         // this channel, so a referenced device channel is unaffected by the
         // change above — it does not get a second slot.
         const int idx = signalFor(dev.name);
         if (idx >= maxSignals)
             continue;
-        r.tables.deviceChannels.signal_idx[dev.deviceChannelId] = quint16(idx);
+        if (id < DEVCH_COUNT)
+            r.tables.deviceChannels.signal_idx[id] = quint16(idx);
+        else
+            r.tables.deviceChannelsExt.signal_idx[id - DEVCH_EXT_BASE] = quint16(idx);
         // Type the slot from the built-in definition, exactly as a constant or
         // a table output types the slot it owns, so a later Get can rebuild the
         // channel. Only if nothing else has claimed it: a document whose own
@@ -1854,6 +1938,11 @@ MappingResult mapToDevice(const Configuration &config)
         r.errors.append(QStringLiteral("Configuration needs %1 signals; the device supports %2")
                             .arg(r.tables.signalConfigs.size()).arg(maxSignals));
 
+    // One name per record, empty where none was given: the lists are indexed
+    // with the tables, and a record past the last named one still has a slot.
+    r.tables.messageLabels.resize(r.tables.messages.size());
+    r.tables.signalLabels.resize(r.tables.signalConfigs.size());
+    r.tables.relayLabels.resize(r.tables.relays.size());
     return r;
 }
 
@@ -1881,7 +1970,33 @@ QVector<int> tableCountsOf(const DeviceTables &tables)
 
 QStringList tablesExceeding(const DeviceTables &tables, const DeviceCapacity &device)
 {
-    return countsExceeding(tableCountsOf(tables), device);
+    QStringList out = countsExceeding(tableCountsOf(tables), device);
+    // Retained values are not a table, but a unit keeps only so many. Past its
+    // limit it keeps the counters and drops integrators, which then start from
+    // their start value at every power-up: refused here, not found out after a
+    // power cut.
+    int preserved = 0;
+    for (const CounterConfig &c : tables.counters)
+        if ((c.flags & COUNTERFLAG_ACTIVE) && (c.flags & COUNTERFLAG_PRESERVE))
+            ++preserved;
+    for (const IntegratorConfig &g : tables.integrators)
+        if ((g.flags & INTEGFLAG_ACTIVE) && (g.flags & INTEGFLAG_PRESERVE))
+            ++preserved;
+    if (preserved > device.retainedLimit())
+        out.append(QStringLiteral("%1 counters and integrators set to Preserve their value, but "
+                                  "this device keeps %2")
+                       .arg(preserved)
+                       .arg(device.retainedLimit()));
+    return out;
+}
+
+DeviceTables tablesForUnit(const DeviceTables &tables, const DeviceCapacity &device)
+{
+    // The form is ConfigTransfer's to apply (sliceFor, settleLabels); all it
+    // reads of the capacity is where the names go.
+    DeviceTables out = tables;
+    out.capacity.labelBytes = device.labelBytes;
+    return out;
 }
 
 namespace {
@@ -2288,9 +2403,10 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         // is what covers everything this does not: a section whose name was
         // never stored (an older store version, or a message nobody named),
         // where the document's memory is the only record there is.
-        const QString storedName = nameFromLabel(msg.label, int(sizeof(msg.label)));
-        if (!storedName.isEmpty()) {
-            s.name = storedName;
+        const QString storedMsgName =
+            storedName(tables.messageLabels, m, msg.label, int(sizeof(msg.label)));
+        if (!storedMsgName.isEmpty()) {
+            s.name = storedMsgName;
             deviceNamed.insert({busIdx, config.bus[busIdx].sections.size()});
         }
         config.bus[busIdx].sections.append(s);
@@ -2305,6 +2421,11 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
     QSet<int> devicePublishedSlots;
     for (int id = 0; id < DEVCH_COUNT; ++id) {
         const quint16 slot = tables.deviceChannels.signal_idx[id];
+        if (slot < maxSignals)
+            devicePublishedSlots.insert(int(slot));
+    }
+    for (int i = 0; i < DEVCH_EXT_COUNT; ++i) {
+        const quint16 slot = tables.deviceChannelsExt.signal_idx[i];
         if (slot < maxSignals)
             devicePublishedSlots.insert(int(slot));
     }
@@ -2324,7 +2445,7 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         const bool selectorOnly = sigSelectorOnly(sig);
         QString name;
         if (!selectorOnly) {
-            name = QString::fromUtf8(sig.label, qstrnlen(sig.label, sizeof(sig.label))).trimmed();
+            name = storedName(tables.signalLabels, i, sig.label, int(sizeof(sig.label)));
             if (name.isEmpty())
                 name = QStringLiteral("Signal %1").arg(i);
             signalNames.insert(i, name);
@@ -2517,7 +2638,7 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
             continue;
         }
         s.device = SectionDevice::TransmitCrc8;
-        s.crcByteLocation = qBound(0, int(cc.byte_location), 7);
+        s.crcByteLocation = qBound(0, int(cc.byte_location), 63);
         s.crcPolynomial = cc.polynomial;
         s.crcInitValue = cc.init_value;
         s.crcFinalXor = cc.final_xor;
@@ -2529,10 +2650,21 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         const int n = qBound(0, int(cc.element_count), CRC8_MAX_ELEMENTS);
         for (int e = 0; e < n; ++e) {
             CommsSection::CrcElement el;
-            el.type = cc.elem_type[e] == CRC8_ELEM_ID    ? CommsSection::CrcElement::Id
-                      : cc.elem_type[e] == CRC8_ELEM_RAW ? CommsSection::CrcElement::Raw
-                                                         : CommsSection::CrcElement::Data;
-            el.value = cc.elem_value[e];
+            const quint8 t = cc.elem_type[e], v = cc.elem_value[e];
+            if ((t & CRC8_ELEM_RUN_MASK) == CRC8_ELEM_DATA_RUN) {
+                el.type = CommsSection::CrcElement::DataRun;
+                el.value = t & CRC8_RUN_FIRST_MASK;
+                el.last = v & CRC8_RUN_LAST_MASK;
+            } else if (t == CRC8_ELEM_ID_ALL) {
+                el.type = CommsSection::CrcElement::IdAll;
+                el.value = qMin(int(v & CRC8_IDALL_BYTES_MASK), 4);
+                el.lsbFirst = (v & CRC8_IDALL_LSB_FIRST) != 0;
+            } else {
+                el.type = t == CRC8_ELEM_ID    ? CommsSection::CrcElement::Id
+                          : t == CRC8_ELEM_RAW ? CommsSection::CrcElement::Raw
+                                               : CommsSection::CrcElement::Data;
+                el.value = v;
+            }
             s.crcElements.append(el);
         }
         // SIG_MSG_NONE means "stamp only, publish nowhere". The mapper refuses
@@ -2888,7 +3020,9 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         s.routeBusMask = rl.forward_bus_mask & 0x7;
         s.name = QStringLiteral("Relay 0x%1").arg(QString::number(rl.address, 16).toUpper());
         // store v18, same rule as a message's.
-        const QString storedRelayName = nameFromLabel(rl.label, int(sizeof(rl.label)));
+        const QString storedRelayName =
+            storedName(tables.relayLabels, int(&rl - tables.relays.constData()), rl.label,
+                       int(sizeof(rl.label)));
         if (!storedRelayName.isEmpty()) {
             s.name = storedRelayName;
             deviceNamed.insert({busIdx, config.bus[busIdx].sections.size()});

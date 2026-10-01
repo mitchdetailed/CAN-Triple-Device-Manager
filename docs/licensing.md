@@ -91,6 +91,10 @@ Seven more options, one per access password: Send, Get, the four Protected Comms
 
 The CAN Viewer password needs device firmware 1.0.14 or newer. The Manager will not install a package that sets or removes it on an older unit: it stops before anything is sent and says to update the unit's firmware first.
 
+The same applies to a configuration that reads one of the **Device CAN*n* Tx Dropped** channels, which need device firmware 1.0.15 or newer. The package records that, and the Manager will not install it on an older unit. If an older Manager installs it anyway, the unit refuses the first frame of the stream and nothing on it changes. A package whose configuration does not read those channels installs on older firmware as before.
+
+A package built for a [CAN Triple 2.0](can-triple-2.md#names) installs only on a CAN Triple 2.0, because the 2.0 keeps the names of its channels, messages and relays apart and takes the configuration in a different form; a package built for a CAN Triple installs only on a CAN Triple. The Manager checks the connected unit and stops before anything is sent. If an older Manager installs a CAN Triple 2.0 package on a CAN Triple anyway, the unit refuses the first frame of the stream and nothing on it changes.
+
 The password writes ride inside the sealed install stream, ahead of the configuration, so the device applies them because the stream is sealed under its own Firmware Key — the master key described above. Without that, a package could only ever provision a blank unit. The policy records *which* passwords the package sets; the keys themselves are in the stream, where only the device can reach them.
 
 ### Package contents

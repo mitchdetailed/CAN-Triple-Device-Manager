@@ -1,4 +1,5 @@
 #include "lua_console_dialog.h"
+#include "theme.h"
 #include "window_memory.h"
 
 #include <QCloseEvent>
@@ -10,6 +11,7 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QFontDatabase>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -49,15 +51,18 @@ void LuaHighlighter::highlightBlock(const QString &text)
         QStringLiteral("\"[^\"]*\"|'[^']*'"));
     static const QRegularExpression kComment(QStringLiteral("--[^\n]*"));
 
+    // Against the theme the editor is drawn in (Tools → Theme): the light
+    // colours are the ones this has always used, the dark ones their match.
+    const bool dark = isDarkPalette(QGuiApplication::palette());
     QTextCharFormat keyword;
-    keyword.setForeground(QColor(0x56, 0x6d, 0xd6));
+    keyword.setForeground(dark ? QColor(0x82, 0xAA, 0xFF) : QColor(0x56, 0x6d, 0xd6));
     keyword.setFontWeight(QFont::Bold);
     QTextCharFormat number;
-    number.setForeground(QColor(0xb0, 0x5c, 0x1a));
+    number.setForeground(dark ? QColor(0xF7, 0x8C, 0x6C) : QColor(0xb0, 0x5c, 0x1a));
     QTextCharFormat str;
-    str.setForeground(QColor(0x2e, 0x7d, 0x32));
+    str.setForeground(dark ? QColor(0xC3, 0xE8, 0x8D) : QColor(0x2e, 0x7d, 0x32));
     QTextCharFormat comment;
-    comment.setForeground(QColor(0x8a, 0x8a, 0x8a));
+    comment.setForeground(dark ? QColor(0x8A, 0x8F, 0x98) : QColor(0x8a, 0x8a, 0x8a));
     comment.setFontItalic(true);
 
     auto apply = [&](const QRegularExpression &re, const QTextCharFormat &fmt) {
@@ -114,7 +119,7 @@ void LuaConsoleDialog::buildUi()
     const QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     m_editor->setFont(mono);
     m_editor->setTabStopDistance(4 * QFontMetricsF(mono).horizontalAdvance(u' '));
-    new LuaHighlighter(m_editor->document());
+    m_highlighter = new LuaHighlighter(m_editor->document());
 
     m_output = new QPlainTextEdit(splitter);
     m_output->setReadOnly(true);
@@ -181,9 +186,10 @@ void LuaConsoleDialog::updateTitle()
 void LuaConsoleDialog::appendOutput(const QString &line, bool isError)
 {
     if (isError) {
-        m_output->appendHtml(QStringLiteral("<span style='color:#c0392b'>%1</span>")
-                                 .arg(line.toHtmlEscaped().replace(
-                                     QStringLiteral("\n"), QStringLiteral("<br>"))));
+        m_output->appendHtml(themedHtml(QStringLiteral("<span style='color:#c0392b'>%1</span>")
+                                            .arg(line.toHtmlEscaped().replace(
+                                                QStringLiteral("\n"), QStringLiteral("<br>"))),
+                                        palette()));
     } else {
         m_output->appendPlainText(line);
     }
@@ -377,6 +383,13 @@ void LuaConsoleDialog::closeEvent(QCloseEvent *event)
     } else {
         event->ignore();
     }
+}
+
+void LuaConsoleDialog::changeEvent(QEvent *event)
+{
+    QDialog::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange && m_highlighter)
+        m_highlighter->rehighlight();
 }
 
 } // namespace ct

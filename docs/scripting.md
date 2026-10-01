@@ -46,7 +46,8 @@ Run with **Ctrl+Return**. `print()` goes to the output pane. Scripts save as `.l
 <tr><td><code>ct.channel(name)</code></td><td>One channel, or <code>nil</code>.</td></tr>
 <tr><td><code>ct.channelCount()</code></td><td>How many user channels exist.</td></tr>
 <tr><td><code>ct.addChannel{...}</code></td>
-<td>Creates a channel. <code>name</code> required (31 bytes max); optional
+<td>Creates a channel. <code>name</code> required (31 bytes max, 32 when the
+document targets a CAN Triple 2.0); optional
 <code>quantity</code>, <code>unit</code>, <code>dataType</code>
 (u8/u16/u32/s8/s16/s32/float/boolean), <code>baseResolution</code>,
 <code>decimalPlaces</code>, <code>minValue</code>, <code>maxValue</code>,

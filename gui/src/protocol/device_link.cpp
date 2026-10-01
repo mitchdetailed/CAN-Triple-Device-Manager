@@ -63,7 +63,7 @@ bool DeviceLink::isReadResponse(quint8 cmd)
     // after the symptom appeared — the four entries above learned it the other
     // way round, and each cost a debugging session in which a device answering
     // instantly looked like a device answering not at all.
-    case CMD_FW_UPDATE_STATUS:     // FwUpdateStatus; fixed shape, no echo
+    case CMD_FW_UPDATE_STATUS:     // FwUpdateStatus (+ FwUpdateStatus2 on a 2.0); no echo
     case CMD_SCRIPT_STATUS:        // ScriptStatus; fixed shape, no echo
     // The script BYTECODE is a range read like any other table, so it goes in
     // the echoesRequestRange list below rather than here alongside the
@@ -90,6 +90,19 @@ bool DeviceLink::isReadResponse(quint8 cmd)
     // too, so this is the first read command in the family not to earn its
     // entry on a bench.
     case CMD_GET_CAPACITY:
+    // v26: the hardware report, which board this is. Listed with the command,
+    // in both classification lists in test_roundtrip too.
+    case CMD_GET_HARDWARE:
+    // Firmware 1.0.15: the extended device channels' destinations. Fixed
+    // shape, no echo — listed with the command, like the one above.
+    case CMD_READ_DEVICE_CHANNELS_EXT:
+    // The CAN Triple 2.0's label store: the names, a range read whose reply
+    // echoes kind, start and count, so it is in echoesRequestRange too. Listed
+    // with the command, in both lists here and both in the tests.
+    case CMD_READ_LABELS:
+    // The CAN Triple 2.0's own settings: a fixed-shape reply, no echo. Listed
+    // with the command, here and in test_roundtrip's lists.
+    case CMD_READ_DEVICE_SETTINGS:
         return true;
     default:
         return false;
@@ -132,6 +145,9 @@ bool DeviceLink::echoesRequestRange(quint8 cmd)
     case CMD_READ_SCRIPT:   // bytecode chunks, a range read like any other table
     case CMD_READ_CRC8_CFG: // a range read like any other table — see the
                             // sixth-time note in isReadResponse above
+    // Echoes u8 kind, u16 start, u16 count: the four bytes compared are kind,
+    // start and count's low byte, which tell one label read from another.
+    case CMD_READ_LABELS:
         return true;
     default:
         return false;

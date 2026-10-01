@@ -15,10 +15,13 @@
 #include <QDate>
 #include <QString>
 
+#include <functional>
+
 #include "../model/access_keys.h"
 #include "access_state.h"
 #include "capacity.h"
 #include "device_link.h"
+#include "hardware.h"
 
 namespace ct {
 namespace device_session {
@@ -172,6 +175,31 @@ bool readReadoutProtection(DeviceLink *link, ReadoutProtection *out, QString *er
 // has just said are wrong.
 bool readCapacity(DeviceLink *link, DeviceCapacity *out, QString *error);
 
+// The hardware report (CMD_GET_HARDWARE, firmware 1.0.15): which board this is
+// — CAN Triple or CAN Triple 2.0 — from its silicon and OTP, and the running
+// firmware's version without needing the Get password. On firmware without the
+// command *out is DeviceHardware::builtIn(), a CAN Triple 1.x, which every such
+// unit is, and the call succeeds. A report in a format this build cannot read
+// is an ERROR naming the Manager update, as the capacity report's is: guessing
+// which board it is would be the wrong kind of help. The timeout and retries
+// let the read made on connecting give up quickly on a port with nothing
+// behind it.
+bool readHardware(DeviceLink *link, DeviceHardware *out, QString *error,
+                  int timeoutMs = DeviceLink::kDefaultTimeoutMs,
+                  int retries = DeviceLink::kDefaultRetries);
+
+// Reconnect to a unit that is restarting and takes its port with it: the CAN
+// Triple 2.0 is its own USB device, so its COM port goes when it restarts and
+// comes back, under the same name, when it is running again. First the port
+// has to GO (up to two seconds): until then it still leads to the unit as it
+// was before the restart, which would answer. Then, until `timeoutMs` has
+// passed, reopen it and require an answer to GET_STATUS. `progress` is told the
+// seconds waited as it goes. False, with *error set, when the unit does not
+// come back.
+bool reopenAfterRestart(DeviceLink *link, const QString &port, qint32 baud, int timeoutMs,
+                        const std::function<void(int secondsWaited)> &progress,
+                        QString *error);
+
 // Channel overrides (CMD_SET_OVERRIDE / OVERRIDE_LEASE / CLEAR_OVERRIDES,
 // firmware 1.0.12). setChannelOverride pins `signalIdx` at `value` (physical
 // units; the device clamps to the signal's range) or releases it. The device
@@ -263,6 +291,23 @@ bool checkLicenseKeyProof(DeviceLink *link, const QByteArray &nonce,
 // Bind the configuration to a chip. An empty or all-zero uid clears the
 // binding, so the configuration runs anywhere again.
 bool writeBinding(DeviceLink *link, const QByteArray &uid, QString *error);
+
+// The unit's own settings (CMD_READ/WRITE_DEVICE_SETTINGS, the CAN Triple
+// 2.0): every LED's brightness so far. `supported` is false on firmware
+// without them, every CAN Triple 1.x among it, and the read still succeeds.
+struct DeviceSettingsState {
+    bool supported = false;
+    DeviceSettings settings{};
+};
+// Exactly sizeof(DeviceSettings), in a format this build knows.
+bool parseDeviceSettings(const QByteArray &payload, DeviceSettings *out);
+bool readDeviceSettings(DeviceLink *link, DeviceSettingsState *out, QString *error);
+// Apply `settings` at once and, with `store`, have the unit keep them; without
+// it they last until the unit restarts (a preview). False with *error on a
+// refusal, and *errCode, when given, says which: ERR_LOCKED wants the Send
+// password; ERR_FLASH_WRITE applied them but could not keep them.
+bool writeDeviceSettings(DeviceLink *link, const DeviceSettings &settings, bool store,
+                         QString *error, quint8 *errCode = nullptr);
 
 // There is deliberately no writeDeviceInfo(). OTP has no erase: a double-word
 // spent is spent for the life of the part, so a wire command able to write one

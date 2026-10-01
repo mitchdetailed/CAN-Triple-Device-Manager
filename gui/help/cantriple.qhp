@@ -13,6 +13,7 @@
         <toc>
             <section title="CAN Triple Device Manager" ref="pages/index.html">
                 <section title="Getting Started" ref="pages/getting-started.html"/>
+                <section title="The CAN Triple 2.0" ref="pages/can-triple-2.html"/>
                 <section title="Communications: Messages &amp; Sections" ref="pages/communications.html">
                     <section title="Channels" ref="pages/channels.html"/>
                     <section title="Data Types &amp; Decimal Places" ref="pages/datatypes.html"/>
@@ -44,6 +45,11 @@
         <keywords>
             <!-- Orientation -->
             <keyword name="Getting Started" ref="pages/getting-started.html"/>
+            <keyword name="CAN Triple 2.0" ref="pages/can-triple-2.html"/>
+            <keyword name="LEDs" ref="pages/can-triple-2.html"/>
+            <keyword name="lights" ref="pages/can-triple-2.html"/>
+            <keyword name="USB" ref="pages/can-triple-2.html"/>
+            <keyword name="supply voltage" ref="pages/can-triple-2.html"/>
             <keyword name="workflow" ref="pages/getting-started.html"/>
             <keyword name="first configuration" ref="pages/getting-started.html"/>
 
@@ -356,6 +362,7 @@
             <file>pages/help.css</file>
             <file>pages/index.html</file>
             <file>pages/getting-started.html</file>
+            <file>pages/can-triple-2.html</file>
             <file>pages/files.html</file>
             <file>pages/troubleshooting.html</file>
             <file>pages/communications.html</file>

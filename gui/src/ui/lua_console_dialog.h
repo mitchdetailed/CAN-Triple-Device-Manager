@@ -49,6 +49,9 @@ signals:
 protected:
     void keyPressEvent(QKeyEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
+    // A theme chosen while the console is open (Tools → Theme): the script
+    // is coloured again for it.
+    void changeEvent(QEvent *event) override;
 
 private:
     void buildUi();
@@ -64,6 +67,7 @@ private:
     Configuration &m_config;
     QString m_scriptPath;      // empty = unsaved buffer
     QPlainTextEdit *m_editor = nullptr;
+    LuaHighlighter *m_highlighter = nullptr;
     QPlainTextEdit *m_output = nullptr;
     QPushButton *m_runButton = nullptr;
     QLabel *m_status = nullptr;

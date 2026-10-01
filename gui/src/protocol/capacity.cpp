@@ -1,5 +1,9 @@
 #include "capacity.h"
 
+#include <cstddef> // offsetof, for the extension's fields
+
+#include <QCoreApplication>
+
 #include <QJsonArray>
 #include <QtEndian>
 
@@ -79,6 +83,28 @@ QJsonObject DeviceCapacity::toJson() const
     for (const TableCapacity &t : tables)
         entries.append(QJsonArray{t.capacity, t.itemSize});
     o[QStringLiteral("tables")] = entries;
+    if (retainedValues > 0) {
+        o[QStringLiteral("retained")] = QJsonObject{
+            {QStringLiteral("values"), retainedValues},
+            {QStringLiteral("intervalMs"), retainedIntervalMs},
+            {QStringLiteral("noWear"), retainedNoWear},
+        };
+    }
+    if (scriptBudget > 0 || !scriptCosts.isEmpty()) {
+        QJsonArray costs;
+        for (const char c : scriptCosts)
+            costs.append(int(quint8(c)));
+        o[QStringLiteral("script")] = QJsonObject{
+            {QStringLiteral("budget"), scriptBudget},
+            {QStringLiteral("costs"), costs},
+        };
+    }
+    if (crc8Features != 0)
+        o[QStringLiteral("crc8")] = QJsonObject{{QStringLiteral("features"), crc8Features}};
+    if (canFeatures != 0)
+        o[QStringLiteral("can")] = QJsonObject{{QStringLiteral("features"), canFeatures}};
+    if (labelBytes != 0)
+        o[QStringLiteral("labels")] = QJsonObject{{QStringLiteral("bytes"), labelBytes}};
     return o;
 }
 
@@ -97,6 +123,20 @@ bool DeviceCapacity::fromJson(const QJsonObject &object, DeviceCapacity *out)
             return false;
         out->tables.append(TableCapacity{pair[0].toInt(), pair[1].toInt()});
     }
+    const QJsonObject retained = object[QStringLiteral("retained")].toObject();
+    out->retainedValues = qMax(0, retained[QStringLiteral("values")].toInt());
+    out->retainedIntervalMs = qMax(0, retained[QStringLiteral("intervalMs")].toInt());
+    out->retainedNoWear = retained[QStringLiteral("noWear")].toBool();
+    const QJsonObject script = object[QStringLiteral("script")].toObject();
+    out->scriptBudget = qMax(0, script[QStringLiteral("budget")].toInt());
+    for (const QJsonValue &v : script[QStringLiteral("costs")].toArray())
+        out->scriptCosts.append(char(quint8(qBound(0, v.toInt(), 255))));
+    out->crc8Features = qBound(
+        0, object[QStringLiteral("crc8")].toObject()[QStringLiteral("features")].toInt(), 0xFFFF);
+    out->canFeatures = qBound(
+        0, object[QStringLiteral("can")].toObject()[QStringLiteral("features")].toInt(), 0xFFFF);
+    out->labelBytes = qBound(
+        0, object[QStringLiteral("labels")].toObject()[QStringLiteral("bytes")].toInt(), 255);
     out->reported = true;
     return true;
 }
@@ -171,11 +211,43 @@ bool parseCapacityReport(const QByteArray &bytes, DeviceCapacity *out)
     if (bytes.size() < kHeader)
         return false;
     const auto *p = reinterpret_cast<const quint8 *>(bytes.constData());
-    if (p[0] != CAPACITY_REPORT_FORMAT)
+    if (p[0] != CAPACITY_REPORT_FORMAT && p[0] != CAPACITY_REPORT_FORMAT_EXT)
         return false; // entries laid out in a way this build does not know
     const int count = p[1];
     if (bytes.size() < kHeader + count * kEntry)
         return false;
+    // Format 2: the extension after the entries, all of it there, and at least
+    // the retained fields every 2.0 build sends. The first builds end it there;
+    // later ones add the script cost model, then the CRC8 features, and a
+    // longer block still carries fields this build does not know yet.
+    if (p[0] == CAPACITY_REPORT_FORMAT_EXT) {
+        const int at = kHeader + count * kEntry;
+        constexpr int kRetainedEnd = int(offsetof(CapacityExtension, script_budget));
+        constexpr int kScriptCosts = int(offsetof(CapacityExtension, script_op_costs));
+        if (bytes.size() < at + 2)
+            return false;
+        const int size = qFromLittleEndian<quint16>(p + at);
+        if (size < kRetainedEnd || bytes.size() < at + size)
+            return false;
+        out->retainedValues = qFromLittleEndian<quint16>(p + at + 2);
+        out->retainedIntervalMs = qFromLittleEndian<quint16>(p + at + 4);
+        out->retainedNoWear =
+            (qFromLittleEndian<quint16>(p + at + 6) & CAPACITY_RETAINED_NO_WEAR) != 0;
+        if (size >= kScriptCosts) {
+            out->scriptBudget = qFromLittleEndian<quint16>(p + at + kRetainedEnd);
+            const int ops = qMin(int(p[at + kRetainedEnd + 2]), size - kScriptCosts);
+            out->scriptCosts = bytes.mid(at + kScriptCosts, ops);
+        }
+        constexpr int kCrc8At = int(offsetof(CapacityExtension, crc8_features));
+        if (size >= kCrc8At + 2)
+            out->crc8Features = qFromLittleEndian<quint16>(p + at + kCrc8At);
+        constexpr int kCanAt = int(offsetof(CapacityExtension, can_features));
+        if (size >= kCanAt + 2)
+            out->canFeatures = qFromLittleEndian<quint16>(p + at + kCanAt);
+        constexpr int kLabelsAt = int(offsetof(CapacityExtension, label_bytes));
+        if (size >= kLabelsAt + 1)
+            out->labelBytes = p[at + kLabelsAt];
+    }
     out->storeVersion = qFromLittleEndian<quint16>(p + 2);
     out->tables.reserve(count);
     for (int i = 0; i < count; ++i) {
@@ -185,6 +257,17 @@ bool parseCapacityReport(const QByteArray &bytes, DeviceCapacity *out)
     }
     out->reported = true;
     return true;
+}
+
+QString retainedIntervalText(int ms)
+{
+    if (ms >= 60000 && ms % 60000 == 0) {
+        const int minutes = ms / 60000;
+        return minutes == 1 ? QCoreApplication::translate("DeviceCapacity", "minute")
+                            : QCoreApplication::translate("DeviceCapacity", "%1 minutes").arg(minutes);
+    }
+    return QCoreApplication::translate("DeviceCapacity", "%1 s")
+        .arg(QString::number(ms / 1000.0, 'g', 3));
 }
 
 } // namespace ct

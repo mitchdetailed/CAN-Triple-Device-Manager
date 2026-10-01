@@ -11,6 +11,8 @@
 #include <QObject>
 #include <QString>
 
+#include <optional>
+
 #include "device_link.h"
 #include "firmware_image.h"
 #include "wire_structs.h"
@@ -35,8 +37,18 @@ public:
 
     // Read the device's update status. Also the way to find out whether a unit
     // has a bootloader at all: bootloader_version == 0 means it does not, and
-    // no update can be installed on it.
-    bool readStatus(FwUpdateStatus *out, QString *error);
+    // no update can be installed on it. A CAN Triple 2.0 appends its firmware
+    // copies (FwUpdateStatus2); *copies gets them when the reply carries them
+    // and is reset when it does not, which is how a caller tells the two lines
+    // apart.
+    bool readStatus(FwUpdateStatus *out, QString *error,
+                    std::optional<FwUpdateStatus2> *copies = nullptr);
+
+    // CAN Triple 2.0: keep the running image, ending its trial. Sent once the
+    // unit has come back from an update and answered. True when the unit
+    // accepted it, and on firmware that has no trial to end: the 1.x line
+    // answers ERR_INVALID_CMD.
+    bool confirm(QString *error);
 
     // BEGIN, then every chunk, then END. On success the device is armed and
     // needs a reset to install. Returns false with *error set otherwise; the

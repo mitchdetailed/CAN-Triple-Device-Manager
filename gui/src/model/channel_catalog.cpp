@@ -254,6 +254,38 @@ const QList<Channel> &ChannelCatalog::deviceChannels()
         // 8,000 ms at which the watchdog ends one.
         mcuChannel("Device Loop Time", "Time", "ms", "u32", 2, 0.01, 0.0, 10000.0,
                    DEVCH_LOOP_TIME);
+
+        // The first EXTENDED device channels (firmware 1.0.15, DEVCH_EXT_BASE):
+        // the transmit side of Rx Dropped. Frames each bus was asked to send —
+        // by a transmit message, a relay or an injected frame — that never
+        // reached the wire: its transmit ring was full (the bus carrying less
+        // than the configuration asks of it, or nothing acknowledging), or the
+        // peripheral was still holding them when the bus was stopped. Counted
+        // frame by frame since boot, so unlike Rx Dropped it is not a floor.
+        // Earlier firmware does not publish them; they read 0 there.
+        for (int bus0 = 0; bus0 < DEVCH_BUS_COUNT; ++bus0) {
+            const QByteArray name =
+                QStringLiteral("Device CAN%1 Tx Dropped").arg(bus0 + 1).toLatin1();
+            mcuChannel(name.constData(), "Unitless", "", "u32", 0, 1.0, 0.0,
+                       4294967295.0, DEVCH_TX_DROPPED_BASE + bus0);
+        }
+
+        // The supply (extended ids 44..47): measured by the CAN Triple 2.0,
+        // which reports HW_FEAT_SUPPLY_SENSE; a 1.x unit publishes 0. The
+        // supply input averaged over 100 ms; its lowest and highest single
+        // 10 ms reading since boot, counted only while a supply is connected,
+        // so a cranking dip shows in the minimum though the average hides it;
+        // and the 5 V the USB port provides, about 5.3 V with a computer
+        // attached. u16 at two decimals reaches 655.35 V, far past the input's
+        // 36.3 V full scale.
+        mcuChannel("Device Supply Voltage", "Voltage", "V", "u16", 2, 0.01, 0.0, 40.0,
+                   DEVCH_SUPPLY);
+        mcuChannel("Device Supply Voltage Minimum", "Voltage", "V", "u16", 2, 0.01, 0.0,
+                   40.0, DEVCH_SUPPLY_MIN);
+        mcuChannel("Device Supply Voltage Maximum", "Voltage", "V", "u16", 2, 0.01, 0.0,
+                   40.0, DEVCH_SUPPLY_MAX);
+        mcuChannel("Device USB Supply Voltage", "Voltage", "V", "u16", 2, 0.01, 0.0, 10.0,
+                   DEVCH_USB_SUPPLY);
         return list;
     }();
     return channels;

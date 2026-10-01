@@ -21,6 +21,9 @@
 #include "../model/channel.h"
 #include "../model/configuration.h"
 #include "../protocol/device_link.h"
+#include "../protocol/hardware.h"
+
+#include <optional>
 
 class QCloseEvent;
 class QLabel;
@@ -45,6 +48,13 @@ public:
     // How many channels this dialog currently has pinned on the device.
     int overrideCount() const { return m_overriddenRows.size(); }
 
+    // The connected unit's hardware report. The rows then leave out the device
+    // channels that unit does not publish (DeviceHardware::
+    // publishesDeviceChannel): a row that can only ever read 0 says something
+    // false about the unit. Without a report every row is shown. Rebuilds only
+    // when that changes which rows there are.
+    void setUnitHardware(const std::optional<DeviceHardware> &hardware);
+
 protected:
     // Closing releases every override on the device, then the lease stops.
     void closeEvent(QCloseEvent *event) override;
@@ -58,6 +68,9 @@ private:
     // also runs whenever an override is ticked or released, because a pinned
     // row is exempt from hiding.
     void onSelectChannels();
+    // Whether the unit whose report this dialog holds publishes the named
+    // channel; true for every channel when it holds none.
+    bool unitPublishes(const QString &channelName) const;
     void applyChannelSelection();
     // The body of rebuild(). keepOverrides carries the pinned channels across
     // by signal index — right only while the MAPPING is unchanged, i.e. the
@@ -78,6 +91,7 @@ private:
 
     DeviceLink *m_link;
     Configuration *m_config;
+    std::optional<DeviceHardware> m_unitHardware; // see setUnitHardware
     QTableWidget *m_table;
     QLabel *m_infoLabel;
     QPushButton *m_selectButton = nullptr;

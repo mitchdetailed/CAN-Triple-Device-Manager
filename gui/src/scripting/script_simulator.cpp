@@ -148,7 +148,37 @@ ScriptSimulator::TickResult ScriptSimulator::step(const QHash<QString, quint16> 
 
 quint32 ScriptSimulator::budget() const
 {
-    return SCRIPT_TICK_BUDGET;
+    return scriptTickBudget(); // the target's, while a ScriptCostScope holds one
+}
+
+ScriptCostScope::ScriptCostScope(const DeviceCapacity &target)
+    : m_costs(target.scriptCosts)
+{
+    uint32_t count = 0;
+    m_previousCosts = script_host_costs(&count);
+    m_previousCount = count;
+    m_previousBudget = script_tick_budget();
+    script_set_host_costs(m_costs.isEmpty()
+                              ? nullptr
+                              : reinterpret_cast<const uint8_t *>(m_costs.constData()),
+                          uint32_t(m_costs.size()));
+    script_set_host_budget(uint32_t(qMax(0, target.scriptBudget)));
+}
+
+ScriptCostScope::~ScriptCostScope()
+{
+    script_set_host_costs(m_previousCosts, m_previousCount);
+    script_set_host_budget(m_previousBudget);
+}
+
+quint32 scriptOpCost(quint8 op)
+{
+    return script_op_cost(op);
+}
+
+quint32 scriptTickBudget()
+{
+    return script_tick_budget();
 }
 
 } // namespace ct

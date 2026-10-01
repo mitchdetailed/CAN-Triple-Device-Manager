@@ -279,6 +279,25 @@ struct SecurePackagePolicy
     bool setViewer = false;
     AccessKey viewerKey = kNoAccessKey;
 
+    // The configuration reads a device channel firmware 1.0.15 introduced (the
+    // Tx Dropped counts), so the sealed stream carries the extended device
+    // channel list, which older firmware refuses. The install verdict checks
+    // the unit before anything is sent
+    // (DeviceMatchFacts::extendedDeviceChannelsSupported). A package whose
+    // configuration does not read them leaves the list out and installs on
+    // any firmware that takes sealed packages.
+    bool needsExtendedDeviceChannels = false;
+
+    // The package was built for a CAN Triple 2.0 that keeps its names apart
+    // from its records (DeviceCapacity::labelsApart): the sealed stream writes
+    // the message, signal and relay records without their names, then the
+    // names. It installs only on such a unit, and a package without this only
+    // on a unit that keeps names in its records; the install verdict holds the
+    // two to each other before anything is sent. For a Manager that predates
+    // that check, the stream leads with an empty name write, which only a unit
+    // that keeps names accepts.
+    bool needsLabelStore = false;
+
     bool isValid() const { return key.size() == kLicenseKeyBytes || hasKeyProof(); }
     // Whether installing needs the two hardware round trips at all.
     bool wantsHardwareMatch() const { return !matchMcuId.isEmpty() || matchSerialSet; }
@@ -331,11 +350,23 @@ struct InstallVerdict
     // it. Fatal on its own, and fixed by a firmware update, not a different
     // package: the sealed write would be refused mid-stream otherwise.
     bool viewerPasswordUnsupported = false;
+    // The package's configuration reads the extended device channels and the
+    // unit's firmware predates them (1.0.15). Fatal on its own and fixed by a
+    // firmware update, like the CAN Viewer password above.
+    bool extendedDeviceChannelsUnsupported = false;
+    // The package was built for a unit that keeps names apart (needsLabelStore)
+    // and this one keeps them in its records, or could not say: a CAN Triple,
+    // or a CAN Triple 2.0 on firmware from before its label store.
+    bool labelStoreMissing = false;
+    // The other way round: this unit keeps names apart, and the package was
+    // built for one that keeps them in its records.
+    bool labelStoreUnexpected = false;
 
     bool ok() const
     {
         return !noPolicy && !deviceUnlicensed && mismatches.isEmpty() && shortfalls.isEmpty()
-               && !viewerPasswordUnsupported;
+               && !viewerPasswordUnsupported && !extendedDeviceChannelsUnsupported
+               && !labelStoreMissing && !labelStoreUnexpected;
     }
 };
 
@@ -358,13 +389,18 @@ struct DeviceMatchFacts
     quint64 serial = 0;
     // What the unit holds, table by table — its CMD_GET_CAPACITY report, or
     // builtIn() for firmware that cannot say. capacityKnown is false when the
-    // read itself failed, in which case a package's counts are not judged.
+    // read itself failed, in which case a package's counts are not judged. It
+    // also says where the unit keeps its names (labelsApart()).
     bool capacityKnown = false;
     DeviceCapacity capacity;
     // Whether the unit's firmware can hold a CAN Viewer password: 1.0.14 or
     // newer, as READ_ACCESS_KEYS' third byte reports. Read only for a package
     // that sets one; false otherwise, so an unchecked unit is never assumed to.
     bool viewerPasswordSupported = false;
+    // Whether the unit's firmware publishes the extended device channels:
+    // 1.0.15 or newer, as its hardware report says. Read only for a package
+    // that needs them; false otherwise, for the reason above.
+    bool extendedDeviceChannelsSupported = false;
 };
 
 InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,

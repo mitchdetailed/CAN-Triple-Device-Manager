@@ -2,7 +2,7 @@
 
 Everything the device sends and receives on its three CAN buses is defined in **Connections &gt; Communications…**, which opens the **Communications Setup** dialog. The dialog has one tab per bus — **CAN 1**, **CAN 2** and **CAN 3** — plus a **Passwords** tab holding the configuration's four [Message Passwords](#passwords). Each bus tab holds that bus's options and its list of *sections*. A section is one entry on the bus: a receive message, a transmit message — plain or [Transmit CRC8](#crc8), which stamps a checksum into the frames it sends — a [message relay](relays.md), or Off.
 
-The device stores receive and transmit messages in one shared table of **500 messages**, drawn freely across the three buses. Relay sections do not use that table — they have their own table of 32 rules — and an Off section uses nothing at all. A Transmit CRC8 message sits in the message table like any transmit message and additionally takes one rule from the device's table of **20 CRC8 rules**, shared across all three buses. The "*N of M device messages used*" label under the sections list counts every section on every bus, so it reads high when a bus carries relays or Off entries. Signals (channel rows) share a separate budget of 1000 across the whole configuration.
+The device stores receive and transmit messages in one shared table of **500 messages**, drawn freely across the three buses. Relay sections do not use that table — they have their own table of 32 rules — and an Off section uses nothing at all. A Transmit CRC8 message sits in the message table like any transmit message and additionally takes one rule from the device's table of **20 CRC8 rules** (**100** on a CAN Triple 2.0), shared across all three buses. The "*N of M device messages used*" label under the sections list counts every section on every bus, so it reads high when a bus carries relays or Off entries. Signals (channel rows) share a separate budget of 1000 across the whole configuration.
 
 ## Bus options
 
@@ -17,12 +17,17 @@ a glance.</td></tr>
 83.3k / 50k</td><td>Arbitration bitrate. 83.3k is GMLAN's 83.333 kbit/s
 (1 Mbit / 12) — the device is programmed with 83,333 bit/s,
 not 83,000.</td></tr>
-<tr><td><b>FD Data :</b></td><td>Off (classic) / 1M / 2M</td><td>CAN FD data
+<tr><td><b>FD Data :</b></td><td>Off (classic) / 1M / 2M, and on a CAN Triple
+2.0 also 4M / 5M / 8M</td><td>CAN FD data
 phase rate. Setting a rate here is what enables the <b>CAN FD frame</b> checkbox
 in the section editor for this bus. The data rate must <em>exceed</em> the base
 rate — that is the device's own test for bringing the bus up in FD — so choices
 at or below the current Rate are disabled (1M is available while the base rate
-is below 1M).</td></tr>
+is below 1M). 4M, 5M and 8M are a CAN Triple 2.0's: they are greyed until one
+is the document's <a href="files.md#target">target</a> or connected, and a
+configuration that uses one on another unit is an error at Check Channels. The
+2.0's transceivers are certified for CAN FD up to 5 Mbit/s; 8M works in
+simpler networks (short buses, few nodes).</td></tr>
 <tr><td><b>Termination Resistor :</b></td><td>Off / On</td><td>Enables the bus's
 built-in 120Ω termination resistor. Applied regardless of Mode — a bus can be
 terminated while Off.</td></tr>
@@ -237,7 +242,9 @@ The channels tab is **grayed out while the Message Type is Off or Message Relay*
 <tr><th>Field</th><th>Meaning</th></tr>
 <tr><td><b>Name :</b></td><td>The section's display name. Left empty
 ("(automatic)"), it defaults to "Receive 0x640", "Transmit 0x…" or "Relay 0x…"
-from the base address.</td></tr>
+from the base address. The unit stores the name, so a Get Configuration returns
+it: up to 17 bytes on a CAN Triple, 32 on a
+<a href="can-triple-2.md#names">CAN Triple 2.0</a>.</td></tr>
 <tr><td><b>Message Type :</b></td><td><b>Off</b>, <b>Receive Message</b>,
 <b>Transmit Message</b>, <b>Transmit CRC8</b> (a transmit message that stamps a
 checksum into its frames — see <a href="#crc8">below</a>) or
@@ -399,10 +406,10 @@ to, picked with <b>Select…</b>. Every transmission writes it, so the value on
 the wire is visible in <a href="monitor.md">Monitor Channels</a> and usable
 anywhere a generated channel is — a math input, a condition, another message.
 OK refuses to close without one.</td></tr>
-<tr><td><b>CRC8 Byte Location :</b></td><td><b>Byte 0</b>–<b>Byte 7</b>: the
-byte of the frame the checksum is stamped into. It must lie inside the Message
-Length — OK refuses a location past the end — and the frame layout map shades
-it (see below).</td></tr>
+<tr><td><b>CRC8 Byte Location :</b></td><td><b>Byte 0</b>–<b>Byte 7</b>, or
+up to <b>Byte 63</b> on a CAN Triple 2.0: the byte of the frame the checksum is
+stamped into. It must lie inside the Message Length — OK refuses a location past
+the end — and the frame layout map shades it (see below).</td></tr>
 <tr><td><b>CRC8 Polynomial :</b></td><td>The generator polynomial, a hex byte
 0x00–0xFF with the x⁸ term implicit. Defaults to 0x00.</td></tr>
 <tr><td><b>Init Value :</b></td><td>The register's starting value, a hex byte.
@@ -413,7 +420,9 @@ element, a hex byte. Defaults to 0x00.</td></tr>
 bit-reverses each input byte before it enters the register, Ref Out reflects
 the register before the Final XOR.</td></tr>
 <tr><td><b>Element Count :</b></td><td>0–15, typed directly: how many element
-rows feed the checksum. The tab shows exactly that many rows; rows removed by
+rows feed the checksum. On a CAN Triple 2.0 one row can feed many bytes (see
+<b>ID (Whole)</b> and <b>Data Run</b> below), so two rows can cover a whole
+64-byte frame. The tab shows exactly that many rows; rows removed by
 lowering the count keep their settings, so raising it again hands your
 elements back. A count of 0 is legal — nothing feeds the register, so the
 stamp is the constant Init Value/Final XOR transform — but the validator
@@ -423,21 +432,34 @@ through.</td></tr>
 
 The hex fields take "0x1D" and bare "1D" alike and reformat to the canonical 0x form when you leave the field.
 
-Each element row is a type and a value, and the CRC is computed over the elements in row order, each contributing one byte:
+Each element row is a type and a value, and the CRC is computed over the elements in row order. ID, Data and Raw Value each feed one byte; the two types a CAN Triple 2.0 adds feed several:
 
 <table>
-<tr><th>Type</th><th>Value</th><th>The byte fed to the CRC</th></tr>
+<tr><th>Type</th><th>Value</th><th>The bytes fed to the CRC</th></tr>
 <tr><td><b>ID</b></td><td><b>ID</b> / <b>ID &gt;&gt; 8</b> /
 <b>ID &gt;&gt; 16</b> / <b>ID &gt;&gt; 24</b></td><td>A byte of this message's
 own CAN identifier, spelt as the shift the firmware performs — which is how OEM
 checksum specifications quote it.</td></tr>
-<tr><td><b>Data</b></td><td><b>Byte 0</b>–<b>Byte 7</b></td><td>A byte of the
-frame <em>after</em> every channel is packed. A byte at or past the Message
-Length feeds 0; the CRC byte itself feeds its pre-stamp value, because the
-stamp runs last.</td></tr>
+<tr><td><b>Data</b></td><td><b>Byte 0</b>–<b>Byte 7</b> (to <b>Byte 63</b> on
+a CAN Triple 2.0)</td><td>A byte of the frame <em>after</em> every channel is
+packed. A byte at or past the Message Length feeds 0; the CRC byte itself feeds
+its pre-stamp value, because the stamp runs last.</td></tr>
 <tr><td><b>Raw Value</b></td><td>a hex byte (e.g. 0x5A)</td><td>A literal byte,
 fed to the CRC as-is.</td></tr>
+<tr><td><b>ID (Whole)</b><br>CAN Triple 2.0</td><td><b>By Frame (2 or 4
+Bytes)</b> or <b>1</b>–<b>4 Bytes</b>, then <b>MSB First</b> or <b>LSB
+First</b></td><td>The identifier's bytes in one row. By Frame is 2 bytes for an
+11-bit identifier and 4 for a 29-bit one. MSB First feeds 0x18DAF110 as 0x18,
+0xDA, 0xF1, 0x10; LSB First feeds 0x10, 0xF1, 0xDA, 0x18.</td></tr>
+<tr><td><b>Data Run</b><br>CAN Triple 2.0</td><td><b>Byte</b> <i>a</i>
+<b>to Byte</b> <i>b</i>, each 0–63</td><td>Every frame byte from the first to
+the last, in that order: counting up, or down when the first is the higher
+(Byte 63 to Byte 0). The CRC's own byte is <em>left out</em> wherever it falls,
+so Byte 0 to Byte 63 means "every byte except the CRC". Bytes at or past the
+Message Length feed 0, as a Data element's do.</td></tr>
 </table>
+
+For example, a checksum over the identifier and every other byte of a 64-byte CAN FD frame is two rows on a CAN Triple 2.0: **ID (Whole)** By Frame, MSB First, then **Data Run** Byte 0 to Byte 63. On a CAN Triple the two new types are greyed in the Type list and the byte lists stop at Byte 7; a configuration that uses either, or a byte past Byte 7, is an error until a CAN Triple 2.0 is its [target](files.md#target).
 
 Recipes you may recognise:
 
@@ -445,6 +467,7 @@ Recipes you may recognise:
 <tr><th>Checksum</th><th>Polynomial</th><th>Init Value</th><th>Final XOR</th>
 <th>Ref In / Ref Out</th></tr>
 <tr><td>SAE J1850</td><td>0x1D</td><td>0xFF</td><td>0xFF</td><td>off / off</td></tr>
+<tr><td>AUTOSAR CRC-8 (0x2F)</td><td>0x2F</td><td>0xFF</td><td>0xFF</td><td>off / off</td></tr>
 <tr><td>SMBus CRC-8</td><td>0x07</td><td>0x00</td><td>0x00</td><td>off / off</td></tr>
 <tr><td>CRC-8/ROHC</td><td>0x07</td><td>0xFF</td><td>0x00</td><td>on / on</td></tr>
 </table>
@@ -457,11 +480,11 @@ A channel whose bits land in that byte turns **red**, like any other double-clai
 
 ### Capacity and validation
 
-The device runs at most **20** CRC8 rules, counted across all three buses — one table for the whole configuration, like the relays' 32, and separate from the 500-entry message table the message itself occupies. The Config Summary counts them under Device usage ("x/20 CRC8 rules"); see [Validation &amp; the Config Summary](validation-report.md).
+A CAN Triple runs at most **20** CRC8 rules and a CAN Triple 2.0 at most **100**, counted across all three buses — one table for the whole configuration, like the relays' 32, and separate from the 500-entry message table the message itself occupies. The Config Summary counts them under Device usage ("x/20 CRC8 rules", or x/100); see [Validation &amp; the Config Summary](validation-report.md).
 
 Check Channels rules on the recipe:
-- **Errors** — more than 20 Transmit CRC8 messages in the configuration; no CRC channel selected; a CRC byte location outside the message. The last two are also refused by the section editor's OK.
-- **Warnings** — a channel's bits packed into the byte the CRC is stamped into (the stamp runs last, so it overwrites them in every frame); a Data element reading at or past the Message Length (it feeds 0); a Data element reading the CRC's own byte (it feeds the pre-stamp value). Warnings rather than errors because some protocols genuinely do these — but each is far more often a mis-typed index than a choice.
+- **Errors** — more Transmit CRC8 messages than the target runs; no CRC channel selected; a CRC byte location outside the message; a channel's bits in the byte the CRC is stamped into (see [Overlaps](#overlaps)); and, when the target is not a CAN Triple 2.0, a byte location or Data element past Byte 7, an ID (Whole) element or a Data Run. No CRC channel, a location outside the message and a channel under the stamp are also refused by the section editor's OK.
+- **Warnings** — no elements at all (the stamp is the constant Init Value/Final XOR transform); a Data element reading at or past the Message Length (it feeds 0); a Data element reading the CRC's own byte (it feeds the pre-stamp value); a Data Run reaching past the Message Length (those bytes feed 0); a Data Run of only the CRC's own byte (a run leaves that byte out, so it feeds nothing). Warnings rather than errors because some protocols genuinely do these — but each is far more often a mis-typed index than a choice.
 
 > **Note:** The stamp writes its channel on every transmission, so the CRC channel counts as a writer in the two-writers check: pointing a calculation's output at the same channel earns the shared-slot warning, and the calculation's value would never be seen — the composer re-stamps on every transmit.
 

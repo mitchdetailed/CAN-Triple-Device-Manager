@@ -145,10 +145,12 @@ ModeColors modeColorsFor(const QPalette &pal)
 } // namespace
 
 CommunicationsDialog::CommunicationsDialog(Configuration *config, QWidget *parent,
-                                           ProtectedCommsProver prover)
+                                           ProtectedCommsProver prover,
+                                           std::optional<DeviceHardware> connected)
     : QDialog(parent)
     , m_config(config)
     , m_prover(std::move(prover))
+    , m_connected(std::move(connected))
 {
     setWindowTitle(tr("Communications Setup"));
     resize(720, 480);
@@ -446,11 +448,31 @@ QWidget *CommunicationsDialog::buildBusTab(int busIndex)
     tab.fdRateCombo->addItem(tr("Off (classic)"), 0);
     tab.fdRateCombo->addItem(tr("1M"), 1000);
     tab.fdRateCombo->addItem(tr("2M"), 2000);
-    // 4M and 5M left this menu before anything shipped with them. A file that
-    // still says one means "the fastest FD this build offers", not "classic" —
-    // falling to index 0 would silently strip FD from every section using it.
+    // 4M, 5M and 8M are the CAN Triple 2.0's: its 80 MHz CAN clock makes them
+    // exact, and transmitter delay compensation lets it send them (its
+    // capacity report says so). On any other target they are listed, greyed,
+    // so the menu says where they come from rather than hiding them.
+    const bool fastData = m_config->capacity().fastData();
+    tab.fdRateCombo->addItem(tr("4M"), 4000);
+    tab.fdRateCombo->addItem(tr("5M"), 5000);
+    tab.fdRateCombo->addItem(tr("8M"), 8000);
+    tab.fdRateCombo->setItemData(tab.fdRateCombo->count() - 1,
+                                 tr("8 Mbit/s works in simpler networks: the CAN Triple 2.0's "
+                                    "transceivers are certified for CAN FD to 5 Mbit/s."),
+                                 Qt::ToolTipRole);
+    if (!fastData)
+        for (int i = 0; i < tab.fdRateCombo->count(); ++i)
+            if (tab.fdRateCombo->itemData(i).toInt() > 2000)
+                tab.fdRateCombo->setItemData(
+                    i, tr("Needs a CAN Triple 2.0: choose one as the target, or connect one."),
+                    Qt::ToolTipRole);
+    // On a target without them, a file that says 4M or 5M (both were on this
+    // menu before anything shipped with them) means "the fastest FD this
+    // target offers", not "classic" — falling to index 0 would silently strip
+    // FD from every section using it.
     int fdIdx = tab.fdRateCombo->findData(m_buses[busIndex].dataRateKbps);
-    if (fdIdx < 0 && m_buses[busIndex].dataRateKbps > 0)
+    if ((fdIdx < 0 || (!fastData && m_buses[busIndex].dataRateKbps > 2000))
+        && m_buses[busIndex].dataRateKbps > 0)
         fdIdx = tab.fdRateCombo->findData(2000);
     tab.fdRateCombo->setCurrentIndex(qMax(0, fdIdx));
     // The device runs FD only when the data rate EXCEEDS the base rate — a
@@ -461,12 +483,12 @@ QWidget *CommunicationsDialog::buildBusTab(int busIndex)
     {
         QComboBox *rateCombo = tab.rateCombo;
         QComboBox *fdCombo = tab.fdRateCombo;
-        const auto updateFdChoices = [rateCombo, fdCombo]() {
+        const auto updateFdChoices = [rateCombo, fdCombo, fastData]() {
             const int base = rateCombo->currentData().toInt();
             auto *model = qobject_cast<QStandardItemModel *>(fdCombo->model());
             for (int i = 0; model && i < fdCombo->count(); ++i) {
                 const int fd = fdCombo->itemData(i).toInt();
-                model->item(i)->setEnabled(fd == 0 || fd > base);
+                model->item(i)->setEnabled(fd == 0 || (fd > base && (fd <= 2000 || fastData)));
             }
             const int cur = fdCombo->currentData().toInt();
             if (cur > 0 && cur <= base)
@@ -485,6 +507,18 @@ QWidget *CommunicationsDialog::buildBusTab(int busIndex)
     tab.terminationCombo->setToolTip(tr("Enable this bus's 120Ω termination resistor "
                                         "(applied on Send Configuration — firmware v9)"));
     optionsRow->addWidget(tab.terminationCombo);
+    // The connected unit says whether it can switch termination at all. One
+    // that cannot keeps the setting, for the units that can, but greys it out
+    // and says why, rather than letting On look like it will do something.
+    if (m_connected && m_connected->reported
+        && !m_connected->hasFeature(HW_FEAT_TERMINATION)) {
+        tab.terminationCombo->setEnabled(false);
+        tab.terminationCombo->setToolTip(
+            tr("The connected %1 cannot switch its termination resistors. Fit a 120Ω "
+               "resistor at each end of this bus instead. The setting is kept for units "
+               "that can switch it.")
+                .arg(m_connected->summary().toHtmlEscaped()));
+    }
     auto *rateNote = new QLabel(tr("(applied on Send Configuration — firmware v2)"));
     rateNote->setStyleSheet(QStringLiteral("color: gray;"));
     optionsRow->addWidget(rateNote);
@@ -1399,7 +1433,8 @@ void CommunicationsDialog::onLoadTemplate(int busIndex)
     }
 
     CommsTemplateMerge merge;
-    if (!mergeCommsTemplate(m_config->catalog(), busIndex, tmpl, &merge, &error)) {
+    if (!mergeCommsTemplate(m_config->catalog(), busIndex, tmpl, &merge, &error,
+                            m_config->capacity().channelNameBytes())) {
         QMessageBox::warning(this, tr("Load Communications Template"), error);
         return;
     }

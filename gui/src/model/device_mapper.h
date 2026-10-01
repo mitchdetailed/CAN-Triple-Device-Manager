@@ -27,6 +27,16 @@ struct DeviceTables {
     DeviceCapacity capacity = DeviceCapacity::builtIn();
     QVector<CanMessageConfig> messages; // receive AND transmit (direction is a flag)
     QVector<CanSignalConfig> signalConfigs;
+    // The NAMES of those records and of `relays`, one per record, as a CAN
+    // Triple 2.0 keeps them in its label store: up to capacity.labelBytes of
+    // UTF-8, empty for none. mapToDevice fills them for every target, clipped
+    // to what the target keeps whole (on a 1.x the records' own label fields
+    // carry the same names, and these ride along unsent). A Get from a unit
+    // whose names are apart fills them from CMD_READ_LABELS and leaves the
+    // records' label fields empty; mapFromDevice prefers these when set.
+    QVector<QByteArray> messageLabels;
+    QVector<QByteArray> signalLabels;
+    QVector<QByteArray> relayLabels;
     QVector<MathConfig> math;
     QVector<ConditionConfig> conditions;
     QVector<CounterConfig> counters; // firmware v3+
@@ -68,6 +78,9 @@ struct DeviceTables {
     // channel, so an unused device channel costs no signal slot and no bytes.
     // Initialised through the factory, not a brace list — see its comment.
     DeviceChannelsConfig deviceChannels = unusedDeviceChannels();
+    // The extended device channels (firmware 1.0.15, DEVCH_EXT_BASE onward),
+    // carried by their own commands and stored beside the header, not in it.
+    DeviceChannelsExtConfig deviceChannelsExt = unusedDeviceChannelsExt();
     // Compiled device-script bytecode, as 64-byte chunks (firmware store v5).
     // EMPTY when the document has no script — which is both the normal case and
     // what CLEARS a script off a device, since a Send writes each table as it
@@ -92,6 +105,18 @@ struct MappingResult {
     QHash<QString, int> channelToSignal;          // lower-case name -> signal idx
     QStringList errors;                           // blocking problems
     QStringList warnings;
+    // The configuration READS an extended device channel (firmware 1.0.15,
+    // DEVCH_EXT_BASE onward): a table, a transmitted signal or the script names
+    // one. Every device channel gets a slot whether read or not (mapToDevice),
+    // so the slots cannot tell you this. A sealed package needs to know
+    // (package_builder.cpp), because older firmware refuses the write that
+    // publishes these channels.
+    bool readsExtendedDeviceChannels = false;
+    // Which of them, by id: the Send summary names what the connected unit
+    // does not publish (the Tx Dropped counts before firmware 1.0.15, the
+    // supply on a board that does not measure it). readsExtendedDeviceChannels
+    // is "this list is not empty".
+    QList<int> extendedDeviceChannelsRead;
 
     bool ok() const { return errors.isEmpty(); }
 };
@@ -125,6 +150,18 @@ QVector<int> tableCountsOf(const DeviceTables &tables);
 // only when the configuration actually uses them. countsExceeding
 // (capacity.h) over tableCountsOf().
 QStringList tablesExceeding(const DeviceTables &tables, const DeviceCapacity &device);
+
+// The tables in the record form of the unit they are about to be sent to: to a
+// CAN Triple 2.0 that keeps its names apart (DeviceCapacity::labelsApart) the
+// message, signal and relay records go without their names and the names
+// follow them; to any other unit the records go whole. The mapper judged the
+// tables against the DOCUMENT's target and fills every name both ways, so
+// either form carries them, clipped to what that unit keeps; this only picks
+// the form, from the unit on the cable. Sent in the document's form instead,
+// the other kind of unit refuses the first record after its CLEAR, which on a
+// CAN Triple erases the configuration in place. `device` is the unit's
+// capacity report, or builtIn() for firmware without one.
+DeviceTables tablesForUnit(const DeviceTables &tables, const DeviceCapacity &device);
 
 // ---- The device script, as an image ---------------------------------------
 //

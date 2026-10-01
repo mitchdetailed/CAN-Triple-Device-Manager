@@ -201,14 +201,24 @@ public:
 
             m_preserveCheck =
                 new QCheckBox(QObject::tr("Preserve value across power cycles"), group);
+            const DeviceCapacity &target = m_config->capacity();
             m_preserveCheck->setToolTip(
-                QObject::tr("Retains the running total in flash, restoring it at the next\n"
-                            "power-up instead of the starting value.\n\n"
-                            "Shares a 20-entry store with preserved counters.\n\n"
-                            "A running integrator changes constantly, so unlike a counter\n"
-                            "it writes to flash on almost every 60 s save — which makes it\n"
-                            "the main consumer of both the store's space and its erase\n"
-                            "budget."));
+                target.retainedWearLimited()
+                    ? QObject::tr("Retains the running total in flash, restoring it at the next\n"
+                                  "power-up instead of the starting value.\n\n"
+                                  "Shares a %1-entry store with preserved counters.\n\n"
+                                  "A running integrator changes constantly, so unlike a counter\n"
+                                  "it writes to flash on almost every 60 s save — which makes it\n"
+                                  "the main consumer of both the store's space and its erase\n"
+                                  "budget.")
+                          .arg(target.retainedLimit())
+                    : QObject::tr("Retains the running total across power cycles, restoring it\n"
+                                  "at the next power-up instead of the starting value.\n\n"
+                                  "Written to the unit's retained-value memory every %1 while\n"
+                                  "it changes; up to %2 counters and integrators together can\n"
+                                  "be preserved.")
+                          .arg(retainedIntervalText(target.retainedEveryMs()))
+                          .arg(target.retainedLimit()));
             form->addRow(QString(), m_preserveCheck);
 
             auto *note = new QLabel(

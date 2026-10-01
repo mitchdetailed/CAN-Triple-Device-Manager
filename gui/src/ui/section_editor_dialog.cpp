@@ -22,6 +22,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStandardItemModel>
 #include <QTabWidget>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -263,16 +264,17 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
     paramGrid->addWidget(new QLabel(tr("Name :")), r, 0);
     m_nameEdit = new QLineEdit(m_section.name);
     m_nameEdit->setPlaceholderText(tr("(automatic)"));
-    // The device stores 17 bytes (store v18). Capped here so the field cannot
-    // hold a name that would not survive a Send - before this the only sign was
-    // a mapper warning at Send time, and a Get that came back with a shorter
-    // name than the one on screen.
-    ct::limitToUtf8Bytes(m_nameEdit, MAX_MESSAGE_NAME_BYTES);
+    // The target stores messageNameLimit() bytes of it: 17 on a CAN Triple
+    // (store v18), 32 on a CAN Triple 2.0. Capped here so the field cannot hold
+    // a name that would not survive a Send - before this the only sign was a
+    // mapper warning at Send time, and a Get that came back with a shorter name
+    // than the one on screen.
+    ct::limitToUtf8Bytes(m_nameEdit, ct::messageNameLimit(m_config));
     m_nameEdit->setToolTip(
         tr("Up to %1 characters, stored on the device so a Get Configuration "
            "returns it. Accented and non-Latin characters take 2-4 bytes of the "
            "%1, so a name using them holds fewer.")
-            .arg(MAX_MESSAGE_NAME_BYTES));
+            .arg(ct::messageNameLimit(m_config)));
     paramGrid->addWidget(m_nameEdit, r, 1, 1, 3);
     ++r;
 
@@ -1548,6 +1550,12 @@ void SectionEditorDialog::syncParametersFromUi()
                                     && m_section.crcElements.at(i).type
                                            == CommsSection::CrcElement::Raw;
                 e.value = rawOk ? raw : (wasRaw ? m_section.crcElements.at(i).value : 0);
+            } else if (e.type == CommsSection::CrcElement::IdAll) {
+                e.value = m_crcElemIdBytes[i]->currentData().toInt();
+                e.lsbFirst = m_crcElemIdOrder[i]->currentData().toBool();
+            } else if (e.type == CommsSection::CrcElement::DataRun) {
+                e.value = m_crcElemRunFirst[i]->currentData().toInt();
+                e.last = m_crcElemRunLast[i]->currentData().toInt();
             } else {
                 e.value = m_crcElemData[i]->currentData().toInt();
             }
@@ -1707,6 +1715,21 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
 
     auto *layout = new QVBoxLayout(page);
 
+    // The frame bytes a recipe may name: 0..63 on a CAN Triple 2.0 (its
+    // capacity report states CRC8 features), 0..7 on the CAN Triple. Never
+    // fewer than the bytes the section already names, so a section opened
+    // against a target that cannot run it shows its recipe as it is, for
+    // validation to flag, instead of the combos quietly rewriting it on OK.
+    const DeviceCapacity &target = m_config->capacity();
+    int maxByte = qMax(target.crc8MaxByte(), m_section.crcByteLocation);
+    for (const CommsSection::CrcElement &e : m_section.crcElements) {
+        if (e.type == CommsSection::CrcElement::Data || e.type == CommsSection::CrcElement::DataRun)
+            maxByte = qMax(maxByte, e.value);
+        if (e.type == CommsSection::CrcElement::DataRun)
+            maxByte = qMax(maxByte, e.last);
+    }
+    maxByte = qBound(7, maxByte, 63);
+
     auto *paramGroup = new QGroupBox(tr("CRC8 Checksum"));
     auto *grid = new QGridLayout(paramGroup);
     grid->setColumnStretch(1, 1);
@@ -1733,9 +1756,9 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
     m_crcByteCombo = new QComboBox;
     // "Byte N" — the same words the frame map's row headers use, because this
     // combo and the map's shaded row are one fact in two places.
-    for (int b = 0; b < 8; ++b)
+    for (int b = 0; b <= maxByte; ++b)
         m_crcByteCombo->addItem(tr("Byte %1").arg(b), b);
-    m_crcByteCombo->setCurrentIndex(qBound(0, m_section.crcByteLocation, 7));
+    m_crcByteCombo->setCurrentIndex(qBound(0, m_section.crcByteLocation, maxByte));
     m_crcByteCombo->setToolTip(
         tr("Which byte of the frame the checksum is stamped into, after every other byte "
            "is final. Shown shaded in the Channels tab's frame layout map; it must lie "
@@ -1820,8 +1843,10 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
         m_crcCountSpin->fontMetrics().horizontalAdvance(QStringLiteral("000")) + 24);
     m_crcCountSpin->setValue(qBound(0, int(m_section.crcElements.size()), kCrcElementSlots));
     m_crcCountSpin->setToolTip(
-        tr("How many of the element rows below feed the checksum, in order. Each "
-           "element contributes one byte."));
+        tr("How many of the element rows below feed the checksum, in order. An ID, "
+           "Data or Raw Value element contributes one byte; on a CAN Triple 2.0, "
+           "ID (Whole) contributes the identifier's bytes and Data Run a range of "
+           "the frame's bytes."));
     connect(m_crcCountSpin, &QSpinBox::valueChanged, this,
             [this]() { applyCrcEnablement(protocolFieldsEnabled()); });
     countRow->addWidget(m_crcCountSpin);
@@ -1859,6 +1884,24 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
         m_crcElemType[i]->addItem(tr("ID"), int(CommsSection::CrcElement::Id));
         m_crcElemType[i]->addItem(tr("Data"), int(CommsSection::CrcElement::Data));
         m_crcElemType[i]->addItem(tr("Raw Value"), int(CommsSection::CrcElement::Raw));
+        m_crcElemType[i]->addItem(tr("ID (Whole)"), int(CommsSection::CrcElement::IdAll));
+        m_crcElemType[i]->addItem(tr("Data Run"), int(CommsSection::CrcElement::DataRun));
+        // The last two are the CAN Triple 2.0's (its capacity report says so): a
+        // firmware without them skips the element and stamps a different CRC.
+        // Greyed where the target lacks them rather than left out, so an item's
+        // index stays its type, and a section that already uses one shows it.
+        if (auto *model = qobject_cast<QStandardItemModel *>(m_crcElemType[i]->model())) {
+            const QString needs =
+                tr("Needs a CAN Triple 2.0: choose one as the target, or connect one.");
+            if (!target.crc8WholeId()) {
+                model->item(int(CommsSection::CrcElement::IdAll))->setEnabled(false);
+                model->item(int(CommsSection::CrcElement::IdAll))->setToolTip(needs);
+            }
+            if (!target.crc8DataRuns()) {
+                model->item(int(CommsSection::CrcElement::DataRun))->setEnabled(false);
+                model->item(int(CommsSection::CrcElement::DataRun))->setToolTip(needs);
+            }
+        }
         m_crcElemType[i]->setSizeAdjustPolicy(QComboBox::AdjustToContents);
         rowsGrid->addWidget(m_crcElemType[i], i, 1);
 
@@ -1879,7 +1922,7 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
         m_crcElemId[i]->setSizeAdjustPolicy(QComboBox::AdjustToContents);
         m_crcElemStack[i]->addWidget(m_crcElemId[i]);
         m_crcElemData[i] = new QComboBox;
-        for (int b = 0; b < 8; ++b)
+        for (int b = 0; b <= maxByte; ++b)
             m_crcElemData[i]->addItem(tr("Byte %1").arg(b), b);
         m_crcElemData[i]->setSizeAdjustPolicy(QComboBox::AdjustToContents);
         m_crcElemStack[i]->addWidget(m_crcElemData[i]);
@@ -1893,6 +1936,54 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
         m_crcElemRaw[i]->setFixedWidth(
             m_crcElemRaw[i]->fontMetrics().horizontalAdvance(QStringLiteral("0x00")) + 24);
         m_crcElemStack[i]->addWidget(m_crcElemRaw[i]);
+
+        // ID (Whole): how many bytes of the identifier, and which end first.
+        auto *idAllPage = new QWidget;
+        auto *idAllRow = new QHBoxLayout(idAllPage);
+        idAllRow->setContentsMargins(0, 0, 0, 0);
+        m_crcElemIdBytes[i] = new QComboBox;
+        m_crcElemIdBytes[i]->addItem(tr("By Frame (2 or 4 Bytes)"), 0);
+        for (int n = 1; n <= 4; ++n)
+            m_crcElemIdBytes[i]->addItem(n == 1 ? tr("1 Byte") : tr("%1 Bytes").arg(n), n);
+        m_crcElemIdBytes[i]->setToolTip(
+            tr("How many bytes of the identifier feed the CRC. By Frame is 2 for an "
+               "11-bit identifier and 4 for a 29-bit one."));
+        m_crcElemIdOrder[i] = new QComboBox;
+        m_crcElemIdOrder[i]->addItem(tr("MSB First"), false);
+        m_crcElemIdOrder[i]->addItem(tr("LSB First"), true);
+        m_crcElemIdOrder[i]->setToolTip(
+            tr("Which end of the identifier goes first: MSB First feeds 0x18DAF110 as "
+               "0x18, 0xDA, 0xF1, 0x10."));
+        for (QComboBox *c : {m_crcElemIdBytes[i], m_crcElemIdOrder[i]}) {
+            c->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+            idAllRow->addWidget(c);
+        }
+        idAllRow->addStretch();
+        m_crcElemStack[i]->addWidget(idAllPage);
+
+        // Data Run: the first byte to the last, in either direction.
+        auto *runPage = new QWidget;
+        auto *runRow = new QHBoxLayout(runPage);
+        runRow->setContentsMargins(0, 0, 0, 0);
+        m_crcElemRunFirst[i] = new QComboBox;
+        m_crcElemRunLast[i] = new QComboBox;
+        for (int b = 0; b <= maxByte; ++b) {
+            m_crcElemRunFirst[i]->addItem(tr("Byte %1").arg(b), b);
+            m_crcElemRunLast[i]->addItem(tr("Byte %1").arg(b), b);
+        }
+        const QString runTip =
+            tr("Every frame byte from the first to the last, in that order — counting "
+               "down when the first is the higher — with the CRC's own byte left out "
+               "wherever it falls.");
+        for (QComboBox *c : {m_crcElemRunFirst[i], m_crcElemRunLast[i]}) {
+            c->setToolTip(runTip);
+            c->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+        }
+        runRow->addWidget(m_crcElemRunFirst[i]);
+        runRow->addWidget(new QLabel(tr("to")));
+        runRow->addWidget(m_crcElemRunLast[i]);
+        runRow->addStretch();
+        m_crcElemStack[i]->addWidget(runPage);
         rowsGrid->addWidget(m_crcElemStack[i], i, 2);
 
         // Every side is primed, not only the one the type names: the element's
@@ -1902,7 +1993,20 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
         m_crcElemId[i]->setCurrentIndex(
             initial.type == CommsSection::CrcElement::Id ? qBound(0, initial.value, 3) : 0);
         m_crcElemData[i]->setCurrentIndex(
-            initial.type == CommsSection::CrcElement::Data ? qBound(0, initial.value, 7) : 0);
+            initial.type == CommsSection::CrcElement::Data ? qBound(0, initial.value, maxByte)
+                                                           : 0);
+        m_crcElemIdBytes[i]->setCurrentIndex(
+            initial.type == CommsSection::CrcElement::IdAll ? qBound(0, initial.value, 4) : 0);
+        m_crcElemIdOrder[i]->setCurrentIndex(
+            initial.type == CommsSection::CrcElement::IdAll && initial.lsbFirst ? 1 : 0);
+        // A new run starts as the whole message: Byte 0 to its last byte.
+        m_crcElemRunFirst[i]->setCurrentIndex(
+            initial.type == CommsSection::CrcElement::DataRun ? qBound(0, initial.value, maxByte)
+                                                              : 0);
+        m_crcElemRunLast[i]->setCurrentIndex(
+            initial.type == CommsSection::CrcElement::DataRun
+                ? qBound(0, initial.last, maxByte)
+                : qBound(0, m_section.messageLengthBytes - 1, maxByte));
         reformatHexByteEdit(m_crcElemRaw[i],
                             initial.type == CommsSection::CrcElement::Raw ? initial.value : 0);
         connect(m_crcElemRaw[i], &QLineEdit::editingFinished, this, [this, i]() {
@@ -1914,7 +2018,7 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
             reformatHexByteEdit(m_crcElemRaw[i], wasRaw ? elems.at(i).value : 0);
         });
 
-        const int typeIndex = qBound(0, initial.type, 2);
+        const int typeIndex = qBound(0, initial.type, int(CommsSection::CrcElement::DataRun));
         m_crcElemType[i]->setCurrentIndex(typeIndex);
         m_crcElemStack[i]->setCurrentIndex(typeIndex);
         connect(m_crcElemType[i], &QComboBox::currentIndexChanged, this,

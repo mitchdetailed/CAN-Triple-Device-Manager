@@ -5,6 +5,7 @@
 #include <QIcon>
 #include <QScreen>
 #include <QStyle>
+#include <QTabWidget>
 #include <QTimer>
 
 #include "model/configuration.h"
@@ -13,11 +14,13 @@
 #include "ui/communications_dialog.h"
 #include "ui/conditions_dialog.h"
 #include "ui/edit_channel_dialog.h"
+#include "ui/help_window.h"
 #include "ui/main_window.h"
 #include "ui/monitor_channel_select_dialog.h"
 #include "ui/wheel_guard.h"
 #include "ui/section_editor_dialog.h"
 #include "ui/select_channel_dialog.h"
+#include "ui/theme.h"
 #include "ui/window_memory.h"
 
 // The version has exactly one source: the project() call in CMakeLists.txt,
@@ -122,6 +125,48 @@ void saveScreenshots(const QString &dir)
     ct::SectionEditorDialog editor(&config, section, 0, {}, /*sectionIndex=*/0);
     grab(&editor, QStringLiteral("section_editor"));
 
+    // A Transmit CRC8 on its CRC8 tab, targeting a CAN Triple 2.0: a 64-byte
+    // CAN FD recipe using the two element types only a 2.0 runs.
+    ct::Configuration fdConfig;
+    ct::DeviceCapacity cap20 = ct::DeviceCapacity::builtIn();
+    cap20.crc8Features = ct::CAPACITY_CRC8_WHOLE_ID | ct::CAPACITY_CRC8_DATA_RUNS;
+    cap20.tables[int(ct::DeviceTable::Crc8)].capacity = 100;
+    cap20.reported = true;
+    cap20.label = QStringLiteral("a CAN Triple 2.0");
+    fdConfig.setCapacity(cap20);
+    fdConfig.bus[0].enabled = true;
+    fdConfig.bus[0].rateKbps = 500;
+    fdConfig.bus[0].dataRateKbps = 2000;
+    ct::Channel crcCh;
+    crcCh.name = QStringLiteral("Frame CRC");
+    crcCh.quantity = QStringLiteral("Raw");
+    crcCh.dataType = QStringLiteral("u8");
+    crcCh.minValue = 0;
+    crcCh.maxValue = 255;
+    crcCh.userDefined = true;
+    fdConfig.catalog().addOrUpdateUserChannel(crcCh);
+    ct::CommsSection crcSection;
+    crcSection.name = QStringLiteral("FD Stamped");
+    crcSection.device = ct::SectionDevice::TransmitCrc8;
+    crcSection.fd = true;
+    crcSection.extended = true;
+    crcSection.baseAddress = 0x18DAF110;
+    crcSection.messageLengthBytes = 64;
+    crcSection.crcChannel = crcCh.name;
+    crcSection.crcByteLocation = 0;
+    crcSection.crcPolynomial = 0x2F;
+    crcSection.crcInitValue = 0xFF;
+    crcSection.crcFinalXor = 0xFF;
+    ct::CommsSection::CrcElement wholeId{ct::CommsSection::CrcElement::IdAll, 0};
+    ct::CommsSection::CrcElement run{ct::CommsSection::CrcElement::DataRun, 63};
+    run.last = 0;
+    crcSection.crcElements = {wholeId, run, {ct::CommsSection::CrcElement::Raw, 0x5A}};
+    fdConfig.bus[0].sections.append(crcSection);
+    ct::SectionEditorDialog crcEditor(&fdConfig, crcSection, 0, {}, /*sectionIndex=*/0);
+    if (auto *tabs = crcEditor.findChild<QTabWidget *>())
+        tabs->setCurrentIndex(tabs->count() - 1);
+    grab(&crcEditor, QStringLiteral("section_editor_crc8"));
+
     ct::AddChannelDialog add(&config, row2, section.alignment, 8, false);
     grab(&add, QStringLiteral("add_comms_channel"));
 
@@ -146,6 +191,13 @@ void saveScreenshots(const QString &dir)
     ct::MonitorChannelSelectDialog select(QList<ct::Channel>{rpmCh, tempCh, orphanCh},
                                           QStringList{QStringLiteral("Engine Temperature")});
     grab(&select, QStringLiteral("select_monitor_channels"));
+
+    // The manual, on a page with tables, notes and warnings: the help is in
+    // the theme too (help_style.h).
+    ct::HelpWindow help;
+    help.resize(1100, 800);
+    help.showPage(QStringLiteral("communications.html"));
+    grab(&help, QStringLiteral("help"));
 }
 
 } // namespace
@@ -185,7 +237,22 @@ int main(int argc, char *argv[])
                                               QStringLiteral("Save dialog screenshots and exit"),
                                               QStringLiteral("dir"));
     parser.addOption(screenshotOption);
+    // One run in a theme without keeping it: for screenshots of each, and for
+    // support to see what a customer sees.
+    const QCommandLineOption themeOption(
+        QStringLiteral("theme"),
+        QStringLiteral("Draw this run in a theme: windows, light, dark, midnight-blue or "
+                       "carbon-red"),
+        QStringLiteral("name"));
+    parser.addOption(themeOption);
     parser.process(app);
+
+    // Before the first window, so none is ever drawn in the wrong colours.
+    // Screenshots are the plain program unless a theme is named.
+    if (parser.isSet(themeOption))
+        ct::applyTheme(ct::themeFromKey(parser.value(themeOption)));
+    else if (!parser.isSet(screenshotOption))
+        ct::applyTheme(ct::savedTheme());
 
     if (parser.isSet(screenshotOption)) {
         saveScreenshots(parser.value(screenshotOption));

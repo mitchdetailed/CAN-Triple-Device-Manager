@@ -2,6 +2,8 @@
 // JSON round-trips, the access passwords and the .ct3s secure container.
 // Exits 0 on success, 1 on first failure.
 #include <QCoreApplication>
+#include <QEventLoop>
+#include <QHash>
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
@@ -28,6 +30,7 @@
 #include "../src/model/config_file.h"
 #include "../src/model/secure_file.h"
 #include "../src/model/sealed_stream.h"
+#include "../src/model/unit_target.h"
 #include "seal.h"
 #include "../src/model/validation.h"
 #include "../src/protocol/asc_log.h"
@@ -37,6 +40,7 @@
 #include "../src/protocol/crc16.h"
 #include "../src/protocol/device_link.h"
 #include "../src/protocol/framer.h"
+#include "fake_device_link.h"
 
 // The bytecode format a retained script image is written in, so this file can
 // build one the DEVICE's own verifier accepts rather than a blob that only
@@ -52,7 +56,7 @@ static int failures = 0;
 // re-reading something this build just WROTE passes it: the pre-14 legacy
 // protection keys migrate only when the file actually predates 14, so handing
 // such a call a stale number would ratchet a Read Only section into Hidden.
-static constexpr int kCurrentSchemaVersion = 21;
+static constexpr int kCurrentSchemaVersion = 22;
 // A .ct3 fileVersion this build has never heard of, for checking that a file
 // from a NEWER release is refused rather than half-read. DERIVED, not typed:
 // it was the literal 14 until 2.3.0, the 13 -> 14 schema bump caught it up, and
@@ -352,7 +356,7 @@ static void testMapper()
     // not move — which is the property that makes the change invisible here
     // beyond this count.
     const int kDocSignals = 4;
-    CHECK(mapped.tables.signalConfigs.size() == kDocSignals + DEVCH_COUNT);
+    CHECK(mapped.tables.signalConfigs.size() == kDocSignals + DEVCH_TOTAL);
     if (mapped.tables.signalConfigs.size() >= kDocSignals) {
         const CanSignalConfig &sig = mapped.tables.signalConfigs[0];
         CHECK(sigMsgIdx(sig) == 0);
@@ -1584,8 +1588,10 @@ static void testIntegrators()
     // under the limit for each table alone but over it together — the case a
     // per-table check would wave through and the device would silently trim.
     {
-        const auto preservedCount = [](int counters, int integrators) {
+        const auto preservedCount = [](int counters, int integrators,
+                                       const DeviceCapacity &target = DeviceCapacity::builtIn()) {
             Configuration cfg;
+            cfg.setCapacity(target);
             for (int i = 0; i < counters; ++i) {
                 CounterRow c;
                 c.outputChannel = QStringLiteral("C%1").arg(i);
@@ -1610,6 +1616,75 @@ static void testIntegrators()
         CHECK(preservedCount(18, 8) == 1); // 26 total — over the shared ring
         CHECK(preservedCount(18, 2) == 0); // 20 total — exactly the limit
         CHECK(preservedCount(0, 8) == 0);  // integrators alone always fit
+
+        // A CAN Triple 2.0 target states its own figures (capacity report
+        // format 2): every counter and integrator, written every 0.1 s, in
+        // memory with no wear. The same documents fit it.
+        DeviceCapacity two = DeviceCapacity::builtIn();
+        two.reported = true;
+        two.retainedValues = MAX_COUNTERS + MAX_INTEGRATORS;
+        two.retainedIntervalMs = 100;
+        two.retainedNoWear = true;
+        CHECK(preservedCount(18, 8, two) == 0);
+        CHECK(preservedCount(MAX_COUNTERS, MAX_INTEGRATORS, two) == 0);
+        DeviceCapacity tight = two;
+        tight.retainedValues = 10;
+        CHECK(preservedCount(10, 1, tight) == 1); // the limit is whatever the target states
+
+        // The wear note is about flash erases: said for a flash target, not for FRAM.
+        const auto wearNotes = [](const DeviceCapacity &target) {
+            Configuration cfg;
+            cfg.setCapacity(target);
+            IntegratorRow g;
+            g.outputChannel = QStringLiteral("Distance");
+            g.inputIsChannel = false;
+            g.inputValue = 1;
+            g.preserveValue = true;
+            cfg.integratorRows.append(g);
+            int notes = 0;
+            for (const ValidationIssue &v : validateConfiguration(cfg))
+                if (v.message.contains(QStringLiteral("flash erase")))
+                    ++notes;
+            return notes;
+        };
+        CHECK(wearNotes(DeviceCapacity::builtIn()) == 1);
+        CHECK(wearNotes(two) == 0);
+
+        // The figures travel with the document's target, and a changed figure
+        // is a changed target (the file has something to save).
+        DeviceCapacity back;
+        CHECK(DeviceCapacity::fromJson(two.toJson(), &back));
+        CHECK(back.retainedValues == two.retainedValues && back.retainedIntervalMs == 100
+              && back.retainedNoWear);
+        CHECK(back.sameLayout(DeviceCapacity::builtIn())); // no table moved for them
+        DeviceCapacity plain;
+        CHECK(DeviceCapacity::fromJson(DeviceCapacity::builtIn().toJson(), &plain));
+        CHECK(plain.retainedValues == 0 && plain.retainedLimit() == kRetainedValuesBuiltIn
+              && plain.retainedWearLimited());
+        Configuration doc;
+        doc.setCapacity(DeviceCapacity::builtIn());
+        doc.setDirty(false);
+        doc.setCapacity(two);
+        CHECK(doc.isDirty());
+
+        // At Send, against the unit on the cable: preserved rows past what it
+        // keeps are refused before anything is sent.
+        DeviceTables tables;
+        for (int i = 0; i < 26; ++i) {
+            CounterConfig c{};
+            c.flags = COUNTERFLAG_ACTIVE | COUNTERFLAG_PRESERVE;
+            tables.counters.append(c);
+        }
+        const QStringList over = tablesExceeding(tables, DeviceCapacity::builtIn());
+        CHECK(over.size() == 1
+              && over.first() == QStringLiteral("26 counters and integrators set to Preserve "
+                                                "their value, but this device keeps 20"));
+        CHECK(tablesExceeding(tables, two).isEmpty());
+        tables.counters[0].flags = COUNTERFLAG_PRESERVE; // an inactive row keeps nothing
+        CHECK(tablesExceeding(tables, DeviceCapacity::builtIn()).size() == 1);
+        for (int i = 1; i < 6; ++i)
+            tables.counters[i].flags = COUNTERFLAG_ACTIVE;
+        CHECK(tablesExceeding(tables, DeviceCapacity::builtIn()).isEmpty()); // 20 left
     }
 
     // A preserved integrator with no reset input can never be cleared at all —
@@ -2219,7 +2294,7 @@ SIG_VALTYPE_ 1600 BoostF : 1;
     // 2 identifiers × (Selector + one Val) = 4 signals; Selector appears twice
     // (a distinct gated receive signal per identifier). Plus the device
     // channels, which ride every Send regardless of what the document says.
-    CHECK(mr.tables.signalConfigs.size() == 4 + DEVCH_COUNT);
+    CHECK(mr.tables.signalConfigs.size() == 4 + DEVCH_TOTAL);
     const int selIdx = mr.channelToSignal.value(QStringLiteral("selector"), -1);
     const int aIdx = mr.channelToSignal.value(QStringLiteral("vala"), -1);
     CHECK(selIdx >= 0 && aIdx >= 0);
@@ -3446,6 +3521,755 @@ static void testMigratedResetIsTheExactInverse()
     CHECK(!ct::invertConditionExpr({msg}, {}, &outT, &outJ));
 }
 
+// CAN FD data phases above 2 Mbit/s are the CAN Triple 2.0's (its capacity
+// report states them): Check Channels calls one an error on any other target,
+// and a document keeps the rate through a save and a load.
+static void testFastDataRates()
+{
+    DeviceCapacity cap20 = DeviceCapacity::builtIn();
+    cap20.canFeatures = CAPACITY_CAN_FAST_DATA;
+    cap20.reported = true;
+    CHECK(cap20.fastData() && !DeviceCapacity::builtIn().fastData());
+    const auto fastErrors = [](const Configuration &c) {
+        int n = 0;
+        for (const ValidationIssue &vi : validateConfiguration(c))
+            if (vi.severity == ValidationIssue::Error
+                && vi.message.contains(QStringLiteral("needs a CAN Triple 2.0"))
+                && vi.message.contains(QStringLiteral("data rate")))
+                ++n;
+        return n;
+    };
+    for (const int rate : {1000, 2000, 4000, 5000, 8000}) {
+        Configuration onX;
+        onX.bus[0].enabled = true;
+        onX.bus[0].rateKbps = 500;
+        onX.bus[0].dataRateKbps = rate;
+        CHECK(fastErrors(onX) == (rate > 2000 ? 1 : 0));
+        Configuration on20;
+        on20.setCapacity(cap20);
+        on20.bus[0].enabled = true;
+        on20.bus[0].rateKbps = 500;
+        on20.bus[0].dataRateKbps = rate;
+        CHECK(fastErrors(on20) == 0);
+        QTemporaryFile file;
+        file.setFileTemplate(QDir::tempPath() + QStringLiteral("/ct_fastdata_XXXXXX.ct3"));
+        CHECK(file.open());
+        const QString path = file.fileName();
+        file.close();
+        QString error;
+        CHECK(on20.saveToFile(path, &error));
+        Configuration back;
+        CHECK(back.loadFromFile(path, &error));
+        CHECK(back.bus[0].dataRateKbps == rate && back.capacity().fastData());
+    }
+    // A bus that is off, or classic, says nothing about its data rate.
+    Configuration off;
+    off.bus[1].rateKbps = 500;
+    off.bus[1].dataRateKbps = 8000;
+    CHECK(fastErrors(off) == 0);
+}
+
+// ---- A CAN Triple 2.0 keeps its names in a label store ---------------------
+
+// What a CAN Triple 2.0 states since its names moved to the label store: 32
+// bytes of every name, and its message, signal and relay records at the 2.0's
+// sizes. test_firmware_v2 holds both to the 2.0 line's own headers.
+static DeviceCapacity labelStoreTarget()
+{
+    DeviceCapacity cap = DeviceCapacity::builtIn();
+    cap.labelBytes = LABEL_STORE_BYTES;
+    cap.tables[int(DeviceTable::Messages)].itemSize = V2_MESSAGE_BYTES;
+    cap.tables[int(DeviceTable::Signals)].itemSize = V2_SIGNAL_BYTES;
+    cap.tables[int(DeviceTable::Relays)].itemSize = V2_RELAY_BYTES;
+    cap.reported = true;
+    cap.label = QStringLiteral("a CAN Triple 2.0");
+    return cap;
+}
+
+// The bytes a record of the table `writeCmd` writes takes on a CAN Triple 2.0;
+// 0 for a command that writes no table.
+static int v2RecordBytes(quint8 writeCmd)
+{
+    switch (writeCmd) {
+    case CMD_WRITE_MSG_CFG: return V2_MESSAGE_BYTES;
+    case CMD_WRITE_SIG_CFG: return V2_SIGNAL_BYTES;
+    case CMD_WRITE_RELAY_CFG: return V2_RELAY_BYTES;
+    case CMD_WRITE_MATH_CFG: return int(sizeof(MathConfig));
+    case CMD_WRITE_COND_CFG: return int(sizeof(ConditionConfig));
+    case CMD_WRITE_COUNTER_CFG: return int(sizeof(CounterConfig));
+    case CMD_WRITE_TIMER_CFG: return int(sizeof(TimerConfig));
+    case CMD_WRITE_CONST_CFG: return int(sizeof(ConstantConfig));
+    case CMD_WRITE_TABLE2X16_DEF: return int(sizeof(Table2x16Def));
+    case CMD_WRITE_TABLE2X16_OUT: return int(sizeof(Table2x16Out));
+    case CMD_WRITE_TABLE8X8_DEF: return int(sizeof(Table8x8Def));
+    case CMD_WRITE_TABLE8X8_ROW: return int(sizeof(Table8x8GridRow));
+    case CMD_WRITE_INTEG_CFG: return int(sizeof(IntegratorConfig));
+    case CMD_WRITE_CRC8_CFG: return int(sizeof(Crc8Config));
+    case CMD_WRITE_SCRIPT: return int(sizeof(ScriptChunk));
+    default: return 0;
+    }
+}
+
+// A CAN Triple 2.0 in miniature, for ConfigTransfer: its tables at the 2.0's
+// record sizes and its label store, answering what a Send and a Get ask the way
+// firmware/v2's serial_proto.c does. A write whose records are not the 2.0's
+// size is ERR_INVALID_LEN, which is what a 1.x-sized record sent to a 2.0 gets;
+// a read echoes its range, then the records, zeros past what is stored (every
+// table's READ command is its WRITE plus one); READ_LABELS echoes its five bytes,
+// then the names, an empty slot as zeros. Anything else is ACKed and forgotten.
+// The unit itself held this conversation on the bench (firmware v2
+// tools/hwtest/labels_hw_test.py, and a Send and Get through these classes);
+// this keeps the Manager's half of it in every test run.
+struct LabelStoreUnit {
+    QHash<int, QByteArray> tables; // by WRITE command: the records, back to back
+    QByteArray names[3];           // by LABEL_KIND_*: the 32-byte slots, back to back
+    int labelWrites = 0;
+    int refuseSignalNamesAt = -1; // a READ_LABELS of channel names from here is refused
+
+    FakeDeviceLink::Reply answer(quint8 cmd, const QByteArray &p)
+    {
+        using Reply = FakeDeviceLink::Reply;
+        const auto u16 = [&p](int at) { return int(quint8(p[at])) | int(quint8(p[at + 1])) << 8; };
+        const auto put = [](QByteArray &dst, int at, const QByteArray &bytes) {
+            if (dst.size() < at + bytes.size())
+                dst.append(at + int(bytes.size()) - int(dst.size()), '\0');
+            dst.replace(at, bytes.size(), bytes);
+        };
+        const auto take = [](const QByteArray &src, int at, int bytes) {
+            QByteArray out = src.mid(at, bytes);
+            out.append(bytes - int(out.size()), '\0');
+            return out;
+        };
+        if (cmd == CMD_CLEAR_CONFIG) {
+            tables.clear();
+            for (QByteArray &n : names)
+                n.clear();
+            return Reply::ack();
+        }
+        if (cmd == CMD_WRITE_LABELS || cmd == CMD_READ_LABELS) {
+            if (p.size() < 5)
+                return Reply::nack(ERR_INVALID_LEN);
+            const int kind = quint8(p[0]), count = u16(3);
+            const int at = u16(1) * LABEL_STORE_BYTES, bytes = count * LABEL_STORE_BYTES;
+            if (kind > LABEL_KIND_RELAY || count == 0)
+                return Reply::nack(ERR_OUT_OF_BOUNDS);
+            if (cmd == CMD_READ_LABELS && kind == LABEL_KIND_SIGNAL && u16(1) == refuseSignalNamesAt)
+                return Reply::nack(ERR_FLASH_WRITE);
+            if (cmd == CMD_READ_LABELS)
+                return p.size() == 5 ? Reply::ack(p + take(names[kind], at, bytes))
+                                     : Reply::nack(ERR_INVALID_LEN);
+            if (p.size() != 5 + bytes)
+                return Reply::nack(ERR_INVALID_LEN);
+            put(names[kind], at, p.mid(5));
+            ++labelWrites;
+            return Reply::ack();
+        }
+        if (const int size = v2RecordBytes(cmd)) {
+            if (p.size() < 4 || p.size() != 4 + u16(2) * size)
+                return Reply::nack(ERR_INVALID_LEN);
+            put(tables[cmd], u16(0) * size, p.mid(4));
+            return Reply::ack();
+        }
+        if (const int size = v2RecordBytes(quint8(cmd - 1))) {
+            if (p.size() != 4)
+                return Reply::nack(ERR_INVALID_LEN);
+            return Reply::ack(p + take(tables.value(cmd - 1), u16(0) * size, u16(2) * size));
+        }
+        return Reply::ack();
+    }
+};
+
+// Runs a transfer to its end: true when it finished well. A Get's tables land
+// in *tables. A transfer that never finishes fails rather than hangs.
+static bool runLabelTransfer(ConfigTransfer *t, QString *error, DeviceTables *tables = nullptr)
+{
+    bool ok = false;
+    error->clear();
+    QEventLoop loop;
+    QObject::connect(t, &ConfigTransfer::tablesReady, &loop, [tables](const DeviceTables &got) {
+        if (tables)
+            *tables = got;
+    });
+    QObject::connect(t, &ConfigTransfer::finished, &loop,
+                     [&ok, error, &loop](bool success, const QString &why) {
+                         ok = success;
+                         *error = why;
+                         loop.quit();
+                     });
+    QTimer::singleShot(20000, &loop, [&loop, error]() {
+        *error = QStringLiteral("timed out");
+        loop.quit();
+    });
+    loop.exec();
+    return ok;
+}
+
+// A Send to a unit that is not the document's target (unit_target.h): the
+// configuration is judged again against the unit. What the unit cannot run is
+// a problem, what comes out differently there a change, and a unit that IS the
+// target is no check at all. The document is left exactly as it was.
+static void testUnitTarget()
+{
+    DeviceCapacity cap20 = labelStoreTarget();
+    cap20.crc8Features = CAPACITY_CRC8_WHOLE_ID | CAPACITY_CRC8_DATA_RUNS;
+    cap20.canFeatures = CAPACITY_CAN_FAST_DATA;
+    cap20.label = QStringLiteral("device on COM43");
+    const DeviceCapacity x1 = DeviceCapacity::builtIn();
+    const auto says = [](const QStringList &lines, const QString &what) {
+        for (const QString &line : lines)
+            if (line.contains(what))
+                return true;
+        return false;
+    };
+
+    // A document made for the 2.0 whose only 2.0 thing is its names' length.
+    const auto build = [](Configuration &c, const DeviceCapacity &target, const QString &msg,
+                          const QString &chan) {
+        c.setCapacity(target);
+        c.bus[0].enabled = true;
+        CommsSection rx;
+        rx.name = msg;
+        rx.device = SectionDevice::ReceiveMessage;
+        rx.baseAddress = 0x120;
+        rx.messageLengthBytes = 8;
+        rx.alignment = SectionAlignment::WordSwap;
+        CommsChannelRow row;
+        row.channelName = chan;
+        row.startBit = 0;
+        row.bitLength = 16;
+        rx.rows.append(row);
+        c.bus[0].sections.append(rx);
+    };
+    Configuration named;
+    build(named, cap20, QStringLiteral("Anti-lock Brake Module Status"), // 29 bytes
+          QStringLiteral("Front Left Wheel Speed Sensor 01"));            // 32 bytes
+
+    // The unit IS the target: no check. The label says where the numbers came
+    // from, not what they are.
+    DeviceCapacity same = cap20;
+    same.label = QStringLiteral("device on COM7");
+    same.reported = false;
+    UnitTargetCheck c = checkUnitTarget(named, same, mapToDevice);
+    CHECK(!c.differs && c.problems.isEmpty() && c.changes.isEmpty());
+
+    // To a CAN Triple: two names come out shorter, and nothing is refused.
+    named.setDirty(false);
+    c = checkUnitTarget(named, x1, mapToDevice);
+    CHECK(c.differs && c.problems.isEmpty());
+    CHECK(c.changes.size() == 2);
+    CHECK(says(c.changes,
+               QStringLiteral("'Front Left Wheel Speed Sensor 01' is longer than the 31-byte")));
+    CHECK(says(c.changes,
+               QStringLiteral("'Anti-lock Brake Module Status' is longer than the 17-byte")));
+    // ...and the document is as it was: its own target, not made dirty.
+    CHECK(named.capacity().sameTarget(cap20) && named.capacity().label == cap20.label);
+    CHECK(!named.isDirty());
+
+    // Using what only the 2.0 has, a CAN FD data phase of 5 Mbit/s: refused on
+    // a CAN Triple, in Check Channels' words.
+    Configuration fast;
+    build(fast, cap20, QStringLiteral("Short"), QStringLiteral("Speed"));
+    fast.bus[0].rateKbps = 500;
+    fast.bus[0].dataRateKbps = 5000;
+    c = checkUnitTarget(fast, x1, mapToDevice);
+    CHECK(c.differs && says(c.problems, QStringLiteral("needs a CAN Triple 2.0")));
+    CHECK(checkUnitTarget(fast, cap20, mapToDevice).problems.isEmpty());
+    // The same layout with one feature fewer (a 2.0 build from before its fast
+    // data rates) is not the target either, and refuses the same.
+    DeviceCapacity slow = cap20;
+    slow.canFeatures = 0;
+    CHECK(slow.sameLayout(cap20));
+    c = checkUnitTarget(fast, slow, mapToDevice);
+    CHECK(c.differs && says(c.problems, QStringLiteral("CAN FD data rate of 5")));
+
+    // A CAN Triple's document to a 2.0: other firmware, and nothing in it comes
+    // out differently there.
+    Configuration plain;
+    build(plain, x1, QStringLiteral("Engine"), QStringLiteral("Engine RPM"));
+    c = checkUnitTarget(plain, cap20, mapToDevice);
+    CHECK(c.differs && c.problems.isEmpty() && c.changes.isEmpty());
+
+    CHECK(targetName(cap20) == QStringLiteral("device on COM43"));
+    CHECK(targetName(x1) == QStringLiteral("this program's built-in numbers"));
+}
+
+// A CAN Triple 2.0 keeps every name in its label store, 32 bytes of each: the
+// mapper fills the lists to that, a Send writes the 2.0's shorter records and
+// then the names (and verifies both), a Get reads them back into a document
+// that has every name whole, and a 1.x is sent what it has always been sent.
+// Names cross between the two formats in both directions.
+static void testLabelStore()
+{
+    const DeviceCapacity cap20 = labelStoreTarget();
+    CHECK(cap20.labelsApart() && cap20.channelNameBytes() == 32 && cap20.messageNameBytes() == 32);
+
+    // Every name past what a CAN Triple (1.x) keeps: a 32-byte channel name
+    // (31 there), a 29-byte message name and a 26-byte relay name with an
+    // accent (17 there), and a 33-byte name whose 32nd byte starts a two-byte
+    // character, which the 2.0 keeps as the 31 bytes before it.
+    const QString chan32 = QStringLiteral("Front Left Wheel Speed Sensor 01");
+    const QString chanCut = QString::fromUtf8("Oil Temperature Sensor Bank 1 A\xC3\xA9");
+    const QString chanKept = QStringLiteral("Oil Temperature Sensor Bank 1 A");
+    const QString msgName = QStringLiteral("Anti-lock Brake Module Status");
+    const QString relayName = QString::fromUtf8("Relais d'entr\xC3\xA9" "e vers CAN3");
+    CHECK(chan32.toUtf8().size() == 32 && chanCut.toUtf8().size() == 33);
+    CHECK(msgName.toUtf8().size() == 29 && relayName.toUtf8().size() == 26);
+
+    const auto build = [&](Configuration &c, const DeviceCapacity &target) {
+        c.setCapacity(target);
+        c.bus[0].enabled = true;
+        c.bus[1].enabled = true;
+        CommsSection rx;
+        rx.name = msgName;
+        rx.device = SectionDevice::ReceiveMessage;
+        rx.baseAddress = 0x120;
+        rx.messageLengthBytes = 8;
+        rx.alignment = SectionAlignment::WordSwap;
+        CommsChannelRow a;
+        a.channelName = chan32;
+        a.startBit = 0;
+        a.bitLength = 16;
+        CommsChannelRow b = a;
+        b.channelName = chanCut;
+        b.startBit = 16;
+        rx.rows.append(a);
+        rx.rows.append(b);
+        c.bus[0].sections.append(rx);
+        CommsSection relay;
+        relay.name = relayName;
+        relay.device = SectionDevice::MessageRelay;
+        relay.baseAddress = 0x300;
+        relay.relayBitmask = 0x7FF;
+        relay.routeBusMask = 1 << 0;
+        c.bus[1].sections.append(relay);
+    };
+
+    // ---- the mapper: every name whole for the 2.0, the 1.x's fields as ever ----
+    Configuration cfg;
+    build(cfg, cap20);
+    const MappingResult mr = mapToDevice(cfg);
+    RT_REQUIRE(mr.ok());
+    RT_REQUIRE(mr.tables.messages.size() == 1 && mr.tables.relays.size() == 1);
+    RT_REQUIRE(mr.tables.messageLabels.size() == 1 && mr.tables.relayLabels.size() == 1);
+    RT_REQUIRE(mr.tables.signalLabels.size() == mr.tables.signalConfigs.size());
+    const int a = mr.channelToSignal.value(chan32.toLower(), -1);
+    const int b = mr.channelToSignal.value(chanCut.toLower(), -1);
+    RT_REQUIRE(a >= 0 && b >= 0);
+    CHECK(mr.tables.messageLabels[0] == msgName.toUtf8());
+    CHECK(mr.tables.relayLabels[0] == relayName.toUtf8());
+    CHECK(mr.tables.signalLabels[a] == chan32.toUtf8());
+    CHECK(mr.tables.signalLabels[b] == chanKept.toUtf8());
+    bool warnedCut = false; // the one name that comes back shorter says so
+    for (const QString &w : mr.warnings)
+        warnedCut = warnedCut
+                    || (w.contains(QStringLiteral("32-byte device label")) && w.contains(chanKept));
+    CHECK(warnedCut);
+
+    Configuration old;
+    build(old, DeviceCapacity::builtIn());
+    const MappingResult mr1 = mapToDevice(old);
+    RT_REQUIRE(mr1.ok() && mr1.tables.messages.size() == 1 && mr1.tables.relays.size() == 1);
+    const auto field = [](const char *f, size_t size) {
+        return QByteArray(f, int(qstrnlen(f, size)));
+    };
+    CHECK(field(mr1.tables.messages[0].label, sizeof(mr1.tables.messages[0].label))
+          == msgName.toUtf8().left(17));
+    CHECK(mr1.tables.messageLabels.value(0) == msgName.toUtf8().left(17));
+
+    // ---- a Send's frames: the 2.0's record sizes, then every name ----
+    const auto planOf = [](const DeviceTables &t, int budget = int(MAX_TX_PAYLOAD)) {
+        return ConfigTransfer::planInstallFrames(t, {}, 7, QStringLiteral("Names"), budget);
+    };
+    // Every frame of `cmd` holds whole records of `bytes`, and there are some.
+    const auto recordsExact = [](const QList<PlannedFrame> &frames, quint8 cmd, int bytes) {
+        int seen = 0;
+        for (const PlannedFrame &f : frames) {
+            if (f.cmd != cmd)
+                continue;
+            const int count = quint8(f.payload[2]) | quint8(f.payload[3]) << 8;
+            if (f.payload.size() != 4 + count * bytes)
+                return false;
+            seen += count;
+        }
+        return seen > 0;
+    };
+    // The records `cmd` writes, back to back (a plan writes a table in order).
+    const auto recordsOf = [](const QList<PlannedFrame> &frames, quint8 cmd) {
+        QByteArray all;
+        for (const PlannedFrame &f : frames)
+            if (f.cmd == cmd)
+                all += f.payload.mid(4);
+        return all;
+    };
+    // The names a plan writes for `kind`, in slot order; empty if any frame is
+    // malformed or out of order.
+    const auto namesIn = [](const QList<PlannedFrame> &frames, quint8 kind) {
+        QVector<QByteArray> out;
+        for (const PlannedFrame &f : frames) {
+            if (f.cmd != CMD_WRITE_LABELS || quint8(f.payload[0]) != kind)
+                continue;
+            const int start = quint8(f.payload[1]) | quint8(f.payload[2]) << 8;
+            const int count = quint8(f.payload[3]) | quint8(f.payload[4]) << 8;
+            if (f.payload.size() != 5 + count * LABEL_STORE_BYTES || start != out.size())
+                return QVector<QByteArray>();
+            for (int i = 0; i < count; ++i) {
+                const char *slot = f.payload.constData() + 5 + i * LABEL_STORE_BYTES;
+                out.append(QByteArray(slot, int(qstrnlen(slot, LABEL_STORE_BYTES))));
+            }
+        }
+        return out;
+    };
+    const QList<PlannedFrame> plan20 = planOf(mr.tables);
+    CHECK(recordsExact(plan20, CMD_WRITE_MSG_CFG, V2_MESSAGE_BYTES));
+    CHECK(recordsExact(plan20, CMD_WRITE_SIG_CFG, V2_SIGNAL_BYTES));
+    CHECK(recordsExact(plan20, CMD_WRITE_RELAY_CFG, V2_RELAY_BYTES));
+    CHECK(namesIn(plan20, LABEL_KIND_MESSAGE) == QVector<QByteArray>{msgName.toUtf8()});
+    CHECK(namesIn(plan20, LABEL_KIND_RELAY) == QVector<QByteArray>{relayName.toUtf8()});
+    CHECK(namesIn(plan20, LABEL_KIND_SIGNAL) == mr.tables.signalLabels);
+    // A sealed package's smaller frames: every one inside its budget, and the
+    // same names.
+    const QList<PlannedFrame> sealed20 = planOf(mr.tables, 200);
+    bool inBudget = true;
+    for (const PlannedFrame &f : sealed20)
+        inBudget = inBudget && f.payload.size() <= 200;
+    CHECK(inBudget);
+    CHECK(namesIn(sealed20, LABEL_KIND_SIGNAL) == mr.tables.signalLabels);
+    // A 1.x takes whole records and nothing apart: it has no label store.
+    const QList<PlannedFrame> plan1 = planOf(mr1.tables);
+    CHECK(recordsExact(plan1, CMD_WRITE_MSG_CFG, int(sizeof(CanMessageConfig))));
+    CHECK(recordsExact(plan1, CMD_WRITE_SIG_CFG, int(sizeof(CanSignalConfig))));
+    CHECK(recordsExact(plan1, CMD_WRITE_RELAY_CFG, int(sizeof(RelayConfig))));
+    bool labelsTo1x = false;
+    for (const PlannedFrame &f : plan1)
+        labelsTo1x = labelsTo1x || f.cmd == CMD_WRITE_LABELS;
+    CHECK(!labelsTo1x);
+
+    // ---- a Send and a Get through the Manager's own transfer ----
+    LabelStoreUnit unit;
+    FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) { return unit.answer(cmd, p); });
+    QString error;
+    CHECK(runLabelTransfer(ConfigTransfer::send(&link, mr.tables, /*verify=*/true), &error));
+    if (!error.isEmpty())
+        std::printf("      send: %s\n", qPrintable(error));
+    CHECK(unit.labelWrites >= 3 && link.sentAny(CMD_READ_LABELS)); // written, then verified
+    DeviceTables got;
+    CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap20), &error, &got));
+    if (!error.isEmpty())
+        std::printf("      get: %s\n", qPrintable(error));
+    // A slot per record over each table's range, as the records are read.
+    RT_REQUIRE(got.messageLabels.size() == cap20.capacityOf(DeviceTable::Messages));
+    RT_REQUIRE(got.signalLabels.size() == cap20.capacityOf(DeviceTable::Signals));
+    RT_REQUIRE(got.relayLabels.size() == cap20.capacityOf(DeviceTable::Relays));
+    RT_REQUIRE(got.messages.size() == got.messageLabels.size());
+    CHECK(got.messageLabels[0] == msgName.toUtf8() && got.relayLabels[0] == relayName.toUtf8());
+    CHECK(got.signalLabels[a] == chan32.toUtf8() && got.signalLabels[b] == chanKept.toUtf8());
+    CHECK(got.signalLabels.value(mr.tables.signalConfigs.size()).isEmpty());
+    // The records come back without names — those are the label store's — and
+    // with everything else as sent.
+    CHECK(field(got.messages[0].label, sizeof(got.messages[0].label)).isEmpty());
+    CHECK(got.messages[0].can_id == mr.tables.messages[0].can_id);
+    CHECK(std::memcmp(reinterpret_cast<const char *>(&got.signalConfigs[a]) + V2_SIGNAL_AT,
+                      reinterpret_cast<const char *>(&mr.tables.signalConfigs[a]) + V2_SIGNAL_AT,
+                      size_t(V2_SIGNAL_BYTES))
+          == 0);
+    Configuration back;
+    mapFromDevice(got, back);
+    CHECK(back.capacity().labelsApart());
+    bool sawMsg = false, sawRelay = false, saw32 = false, sawKept = false;
+    for (const CommsSection &s : back.bus[0].sections) {
+        sawMsg = sawMsg || s.name == msgName;
+        for (const CommsChannelRow &row : s.rows) {
+            saw32 = saw32 || row.channelName == chan32;
+            sawKept = sawKept || row.channelName == chanKept;
+        }
+    }
+    for (const CommsSection &s : back.bus[1].sections)
+        sawRelay = sawRelay || (s.isRelay() && s.name == relayName);
+    CHECK(sawMsg);
+    CHECK(sawRelay);
+    CHECK(saw32);
+    CHECK(sawKept);
+
+    // A chunk of names the unit refuses costs those names, not the Get: the
+    // chunks after it are still read, and the refused one reads as no names.
+    // (A Get reads 63 names a request: channel slots 63..125 are the second.)
+    {
+        QByteArray &channelNames = unit.names[LABEL_KIND_SIGNAL];
+        const auto place = [&channelNames](int slot, const QByteArray &name) {
+            const int end = (slot + 1) * LABEL_STORE_BYTES;
+            if (channelNames.size() < end)
+                channelNames.append(end - int(channelNames.size()), '\0');
+            channelNames.replace(slot * LABEL_STORE_BYTES, int(name.size()), name);
+        };
+        place(70, QByteArrayLiteral("Inside The Refused Chunk"));
+        place(130, QByteArrayLiteral("Past The Refused Chunk"));
+        unit.refuseSignalNamesAt = 63;
+        DeviceTables gapped;
+        CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap20), &error, &gapped));
+        if (!error.isEmpty())
+            std::printf("      get with a refused chunk: %s\n", qPrintable(error));
+        unit.refuseSignalNamesAt = -1;
+        RT_REQUIRE(gapped.signalLabels.size() == cap20.capacityOf(DeviceTable::Signals));
+        CHECK(gapped.signalLabels[a] == chan32.toUtf8());
+        CHECK(gapped.signalLabels[70].isEmpty());
+        CHECK(gapped.signalLabels[130] == QByteArrayLiteral("Past The Refused Chunk"));
+    }
+
+    // A name the unit holds wrongly fails the read-back, before the commit.
+    LabelStoreUnit liar;
+    FakeDeviceLink liarLink([&liar](quint8 cmd, const QByteArray &p) { return liar.answer(cmd, p); });
+    liarLink.beforeEach = [&liar](quint8 cmd, const QByteArray &) {
+        if (cmd == CMD_READ_LABELS && !liar.names[LABEL_KIND_RELAY].isEmpty())
+            liar.names[LABEL_KIND_RELAY][0] = 'X';
+    };
+    CHECK(!runLabelTransfer(ConfigTransfer::send(&liarLink, mr.tables, /*verify=*/true), &error));
+    CHECK(error.contains(QStringLiteral("relay names"))
+          && error.contains(QStringLiteral("does not match")));
+    CHECK(!liarLink.sentAny(CMD_SAVE_TO_FLASH));
+    // And the model is the 2.0 it stands for: a 1.x's whole records are refused.
+    LabelStoreUnit strict;
+    FakeDeviceLink strictLink(
+        [&strict](quint8 cmd, const QByteArray &p) { return strict.answer(cmd, p); });
+    CHECK(!runLabelTransfer(ConfigTransfer::send(&strictLink, mr1.tables, /*verify=*/false),
+                            &error));
+    CHECK(error.contains(QStringLiteral("Sending messages")));
+
+    // ---- names between the two formats (settleLabels) ----
+    // Tables read from a 1.x have their names in the records alone: sent to a
+    // 2.0, its label store gets the names those fields hold.
+    DeviceTables from1x = mr1.tables;
+    from1x.messageLabels.clear();
+    from1x.signalLabels.clear();
+    from1x.relayLabels.clear();
+    from1x.capacity = cap20;
+    const QList<PlannedFrame> to20 = planOf(from1x);
+    CHECK(namesIn(to20, LABEL_KIND_MESSAGE) == QVector<QByteArray>{msgName.toUtf8().left(17)});
+    CHECK(namesIn(to20, LABEL_KIND_RELAY) == QVector<QByteArray>{relayName.toUtf8().left(17)});
+    CHECK(namesIn(to20, LABEL_KIND_SIGNAL).value(a) == chan32.toUtf8().left(31));
+    // Tables read from a 2.0 have them in the lists alone: sent to a 1.x, the
+    // records' fields carry them, each clipped to its field on a character
+    // boundary.
+    DeviceTables from20 = mr.tables;
+    for (CanMessageConfig &m : from20.messages)
+        std::memset(m.label, 0, sizeof(m.label));
+    for (CanSignalConfig &s : from20.signalConfigs)
+        std::memset(s.label, 0, sizeof(s.label));
+    for (RelayConfig &r : from20.relays)
+        std::memset(r.label, 0, sizeof(r.label));
+    from20.messageLabels[0] = QByteArray("ABCDEFGHIJKLMNOP\xC3\xA9"); // byte 17 splits the é
+    from20.capacity = DeviceCapacity::builtIn();
+    const QList<PlannedFrame> to1x = planOf(from20);
+    const QByteArray msgs = recordsOf(to1x, CMD_WRITE_MSG_CFG);
+    const QByteArray sigs = recordsOf(to1x, CMD_WRITE_SIG_CFG);
+    const QByteArray rels = recordsOf(to1x, CMD_WRITE_RELAY_CFG);
+    RT_REQUIRE(msgs.size() == int(sizeof(CanMessageConfig)) && rels.size() == int(sizeof(RelayConfig)));
+    RT_REQUIRE(sigs.size() == mr.tables.signalConfigs.size() * int(sizeof(CanSignalConfig)));
+    CanMessageConfig m1{};
+    std::memcpy(&m1, msgs.constData(), sizeof(m1));
+    RelayConfig r1{};
+    std::memcpy(&r1, rels.constData(), sizeof(r1));
+    CanSignalConfig sa{}, sb{};
+    std::memcpy(&sa, sigs.constData() + a * int(sizeof(CanSignalConfig)), sizeof(sa));
+    std::memcpy(&sb, sigs.constData() + b * int(sizeof(CanSignalConfig)), sizeof(sb));
+    CHECK(field(m1.label, sizeof(m1.label)) == QByteArray("ABCDEFGHIJKLMNOP"));
+    CHECK(field(r1.label, sizeof(r1.label)) == relayName.toUtf8().left(17));
+    CHECK(field(sa.label, sizeof(sa.label)) == chan32.toUtf8().left(31));
+    CHECK(field(sb.label, sizeof(sb.label)) == chanKept.toUtf8());
+
+    // ---- a Send takes the UNIT's form, whatever the document targets ----
+    // (tablesForUnit: the Send command, a package installed unsealed, and the
+    // update window's restore.) A document for a CAN Triple goes to this 2.0
+    // with its names apart, as far as that document kept them...
+    CHECK(!tablesForUnit(mr.tables, DeviceCapacity::builtIn()).capacity.labelsApart());
+    CHECK(tablesForUnit(mr1.tables, cap20).capacity.labelsApart());
+    const int a1 = mr1.channelToSignal.value(chan32.toLower(), -1);
+    RT_REQUIRE(a1 >= 0);
+    LabelStoreUnit retarget;
+    FakeDeviceLink retargetLink(
+        [&retarget](quint8 cmd, const QByteArray &p) { return retarget.answer(cmd, p); });
+    CHECK(runLabelTransfer(
+        ConfigTransfer::send(&retargetLink, tablesForUnit(mr1.tables, cap20), /*verify=*/true),
+        &error));
+    DeviceTables back1;
+    CHECK(runLabelTransfer(ConfigTransfer::get(&retargetLink, nullptr, cap20), &error, &back1));
+    CHECK(back1.messageLabels.value(0) == msgName.toUtf8().left(17));
+    CHECK(back1.signalLabels.value(a1) == chan32.toUtf8().left(31));
+    // ...and a 2.0 document's tables, put in a CAN Triple's form, are whole
+    // records with the names in them and nothing sent apart.
+    const QList<PlannedFrame> for1x = planOf(tablesForUnit(mr.tables, DeviceCapacity::builtIn()));
+    CHECK(recordsExact(for1x, CMD_WRITE_SIG_CFG, int(sizeof(CanSignalConfig))));
+    bool apartTo1x = false;
+    for (const PlannedFrame &f : for1x)
+        apartTo1x = apartTo1x || f.cmd == CMD_WRITE_LABELS;
+    CHECK(!apartTo1x);
+    const QByteArray msgs1x = recordsOf(for1x, CMD_WRITE_MSG_CFG);
+    RT_REQUIRE(msgs1x.size() == int(sizeof(CanMessageConfig)));
+    CanMessageConfig m1x{};
+    std::memcpy(&m1x, msgs1x.constData(), sizeof(m1x));
+    CHECK(field(m1x.label, sizeof(m1x.label)) == msgName.toUtf8().left(17));
+
+    // ---- the plans' read classification, with the label reads in them ----
+    CHECK(ConfigTransfer::planClassificationFaultForTest(false, cap20).isEmpty());
+    CHECK(ConfigTransfer::planClassificationFaultForTest(true, cap20).isEmpty());
+}
+
+// The CAN Triple 2.0's CRC8: a 64-byte CAN FD message whose checksum is the
+// whole identifier plus runs of frame bytes in both directions, stamped into
+// byte 40. Offered only where the target states it: a 2.0 target maps it and
+// reads it back unchanged; a 1.x target refuses every part of it by name, at
+// Check Channels and at the mapper.
+static void testTransmitCrc8Fd()
+{
+    DeviceCapacity cap20 = DeviceCapacity::builtIn();
+    cap20.crc8Features = CAPACITY_CRC8_WHOLE_ID | CAPACITY_CRC8_DATA_RUNS;
+    cap20.tables[int(DeviceTable::Crc8)].capacity = 100;
+    cap20.reported = true;
+    cap20.label = QStringLiteral("a CAN Triple 2.0");
+    CHECK(cap20.crc8WholeId() && cap20.crc8DataRuns() && cap20.crc8MaxByte() == 63);
+    CHECK(DeviceCapacity::builtIn().crc8MaxByte() == 7 && !DeviceCapacity::builtIn().crc8DataRuns());
+
+    CommsSection sec;
+    sec.name = QStringLiteral("FD Stamped");
+    sec.device = SectionDevice::TransmitCrc8;
+    sec.fd = true;
+    sec.baseAddress = 0x18DAF110;
+    sec.extended = true;
+    sec.messageLengthBytes = 64;
+    sec.transmitRateHz = 50;
+    CommsChannelRow row;
+    row.channelName = QStringLiteral("FD Counter");
+    row.startBit = 0;
+    row.bitLength = 8;
+    row.dbcType = int(DbcType::Unsigned);
+    row.dbcFactor = 1.0;
+    sec.rows.append(row);
+    sec.crcChannel = QStringLiteral("FD CRC");
+    sec.crcByteLocation = 40;
+    sec.crcPolynomial = 0x2F;
+    sec.crcInitValue = 0xFF;
+    sec.crcFinalXor = 0xFF;
+    CommsSection::CrcElement idAll{CommsSection::CrcElement::IdAll, 0};
+    CommsSection::CrcElement up{CommsSection::CrcElement::DataRun, 0};
+    up.last = 63;
+    CommsSection::CrcElement down{CommsSection::CrcElement::DataRun, 63};
+    down.last = 41;
+    CommsSection::CrcElement idLsb{CommsSection::CrcElement::IdAll, 3};
+    idLsb.lsbFirst = true;
+    sec.crcElements = {idAll, up, down, idLsb, {CommsSection::CrcElement::Data, 50}};
+
+    // One CAN FD bus holding one section, sized against `target`.
+    const auto build = [](Configuration &c, const DeviceCapacity &target, const CommsSection &s) {
+        c.bus[0].enabled = true;
+        c.bus[0].rateKbps = 500;
+        c.bus[0].dataRateKbps = 2000;
+        c.setCapacity(target);
+        c.bus[0].sections.append(s);
+    };
+    Configuration cfg;
+    build(cfg, cap20, sec);
+
+    const auto crcIssues = [](const Configuration &c, ValidationIssue::Severity severity) {
+        QStringList out;
+        for (const ValidationIssue &vi : validateConfiguration(c))
+            if (vi.severity == severity && vi.message.contains(QStringLiteral("CAN Triple 2.0")))
+                out.append(vi.message);
+        return out;
+    };
+    CHECK(crcIssues(cfg, ValidationIssue::Error).isEmpty()); // the 2.0 runs all of it
+
+    // ---- the device tables: the wire's spelling of each element ----
+    const MappingResult mr = mapToDevice(cfg);
+    CHECK(mr.ok());
+    CHECK(mr.tables.crc8.size() == 1);
+    if (mr.tables.crc8.size() == 1) {
+        const Crc8Config &cc = mr.tables.crc8[0];
+        CHECK(cc.byte_location == 40);
+        CHECK(cc.element_count == 5);
+        CHECK(cc.elem_type[0] == CRC8_ELEM_ID_ALL && cc.elem_value[0] == 0);
+        CHECK(cc.elem_type[1] == (CRC8_ELEM_DATA_RUN | 0) && cc.elem_value[1] == 63);
+        CHECK(cc.elem_type[2] == (CRC8_ELEM_DATA_RUN | 63) && cc.elem_value[2] == 41);
+        CHECK(cc.elem_type[3] == CRC8_ELEM_ID_ALL
+              && cc.elem_value[3] == (CRC8_IDALL_LSB_FIRST | 3));
+        CHECK(cc.elem_type[4] == CRC8_ELEM_DATA && cc.elem_value[4] == 50);
+    }
+
+    // ---- a Get restores the recipe as it was written ----
+    const auto sameRecipe = [](const CommsSection &a, const CommsSection &b) {
+        if (a.crcByteLocation != b.crcByteLocation || a.crcElements.size() != b.crcElements.size())
+            return false;
+        for (int e = 0; e < a.crcElements.size(); ++e) {
+            const auto &x = a.crcElements[e], &y = b.crcElements[e];
+            if (x.type != y.type || x.value != y.value
+                || (x.type == CommsSection::CrcElement::DataRun && x.last != y.last)
+                || (x.type == CommsSection::CrcElement::IdAll && x.lsbFirst != y.lsbFirst))
+                return false;
+        }
+        return true;
+    };
+    Configuration back;
+    mapFromDevice(mr.tables, back);
+    CHECK(back.bus[0].sections.size() == 1);
+    if (back.bus[0].sections.size() == 1)
+        CHECK(sameRecipe(back.bus[0].sections[0], sec));
+
+    // ---- the .ct3: the recipe and the target's CRC8 features survive ----
+    QTemporaryFile file;
+    CHECK(file.open());
+    const QString path = file.fileName();
+    file.close();
+    QString error;
+    CHECK(cfg.saveToFile(path, &error));
+    Configuration loaded;
+    CHECK(loaded.loadFromFile(path, &error));
+    CHECK(loaded.capacity().crc8Features == cap20.crc8Features);
+    CHECK(loaded.bus[0].sections.size() == 1);
+    if (loaded.bus[0].sections.size() == 1) {
+        CHECK(sameRecipe(loaded.bus[0].sections[0], sec));
+        CHECK(loaded.bus[0].sections[0].toJson() == sec.toJson());
+    }
+
+    // ---- a CAN Triple (1.x) target refuses every part of it, by name ----
+    Configuration old;
+    build(old, DeviceCapacity::builtIn(), sec);
+    const QStringList errors = crcIssues(old, ValidationIssue::Error);
+    const auto said = [&errors](const QString &what) {
+        for (const QString &e : errors)
+            if (e.contains(what))
+                return true;
+        return false;
+    };
+    CHECK(said(QStringLiteral("CRC byte location 40 is past Byte 7")));
+    CHECK(said(QStringLiteral("CRC element 1 feeds the whole identifier")));
+    CHECK(said(QStringLiteral("CRC element 2 is a run of frame bytes")));
+    CHECK(said(QStringLiteral("CRC element 5 reads frame byte 50, past Byte 7")));
+    const MappingResult refused = mapToDevice(old);
+    CHECK(!refused.ok());
+    CHECK(refused.tables.crc8.isEmpty());
+    bool sawNeeds = false;
+    for (const QString &e : refused.errors)
+        sawNeeds = sawNeeds || e.contains(QStringLiteral("needs a CAN Triple 2.0"));
+    CHECK(sawNeeds);
+
+    // ---- a run's own lint: past the message, and a run of only the CRC byte ----
+    CommsSection ls = sec;
+    ls.messageLengthBytes = 32;
+    ls.crcByteLocation = 20;
+    CommsSection::CrcElement past{CommsSection::CrcElement::DataRun, 0};
+    past.last = 40;
+    CommsSection::CrcElement self{CommsSection::CrcElement::DataRun, 20};
+    self.last = 20;
+    ls.crcElements = {past, self};
+    Configuration lint;
+    build(lint, cap20, ls);
+    bool sawPast = false, sawSelf = false;
+    for (const ValidationIssue &vi : validateConfiguration(lint)) {
+        sawPast = sawPast || vi.message.contains(QStringLiteral("runs to frame byte 40, past the 32-byte"));
+        sawSelf = sawSelf || vi.message.contains(QStringLiteral("a run of only the CRC's own byte"));
+    }
+    CHECK(sawPast);
+    CHECK(sawSelf);
+}
+
 static void testTransmitCrc8()
 {
     Configuration cfg;
@@ -3643,20 +4467,42 @@ static void testTransmitCrc8()
     // The other two stay Warnings: reading the CRC's own byte as a Data element
     // feeds the pre-stamp value (odd, occasionally intended) and an element
     // past the frame feeds 0. Neither corrupts a channel.
-    int overlapError = 0, selfReadWarn = 0, pastEndWarn = 0;
-    for (const ValidationIssue &vi : validateConfiguration(lint)) {
-        if (vi.severity == ValidationIssue::Error
-            && vi.message.contains(QStringLiteral("the CRC8 is stamped into")))
-            ++overlapError;
-        if (vi.severity != ValidationIssue::Warning)
-            continue;
-        if (vi.message.contains(QStringLiteral("the CRC's own byte")))
-            ++selfReadWarn;
-        if (vi.message.contains(QStringLiteral("past the 8-byte message")))
-            ++pastEndWarn;
-    }
+    //
+    // Byte 12 is past Byte 7, which only a CAN Triple 2.0 target takes: on the
+    // CAN Triple 1.x it is an error that names the 2.0, and the past-the-frame
+    // warning is the 2.0's to give.
+    const auto lintCounts = [&lint](int *overlapError, int *selfReadWarn, int *pastEndWarn,
+                                    int *needs20) {
+        *overlapError = *selfReadWarn = *pastEndWarn = *needs20 = 0;
+        for (const ValidationIssue &vi : validateConfiguration(lint)) {
+            if (vi.severity == ValidationIssue::Error
+                && vi.message.contains(QStringLiteral("the CRC8 is stamped into")))
+                ++*overlapError;
+            if (vi.severity == ValidationIssue::Error
+                && vi.message.contains(QStringLiteral("past Byte 7 — needs a CAN Triple 2.0")))
+                ++*needs20;
+            if (vi.severity != ValidationIssue::Warning)
+                continue;
+            if (vi.message.contains(QStringLiteral("the CRC's own byte")))
+                ++*selfReadWarn;
+            if (vi.message.contains(QStringLiteral("past the 8-byte message")))
+                ++*pastEndWarn;
+        }
+    };
+    int overlapError = 0, selfReadWarn = 0, pastEndWarn = 0, needs20 = 0;
+    lintCounts(&overlapError, &selfReadWarn, &pastEndWarn, &needs20);
     CHECK(overlapError == 1);
     CHECK(selfReadWarn == 1);
+    CHECK(needs20 == 1);
+    CHECK(pastEndWarn == 0);
+    DeviceCapacity cap20 = DeviceCapacity::builtIn();
+    cap20.crc8Features = CAPACITY_CRC8_WHOLE_ID | CAPACITY_CRC8_DATA_RUNS;
+    cap20.reported = true;
+    lint.setCapacity(cap20);
+    lintCounts(&overlapError, &selfReadWarn, &pastEndWarn, &needs20);
+    CHECK(overlapError == 1);
+    CHECK(selfReadWarn == 1);
+    CHECK(needs20 == 0);
     CHECK(pastEndWarn == 1);
 
     // ---- zero elements: a real spelling, warned about, and round-trippable ----
@@ -5146,6 +5992,39 @@ static void testSecureFile()
         SecurePackagePolicy untouched;
         untouched.key = viewer.key;
         CHECK(packageInstallVerdict(untouched, older).ok());
+    }
+
+    // ---- a configuration reading Tx Dropped needs firmware 1.0.15 ----
+    // The same shape as the CAN Viewer password: its own flag, judged before
+    // anything is sent, and a package that does not need it never asks.
+    {
+        SecurePackagePolicy reads;
+        reads.key = deriveLicenseKey(QStringLiteral("fleet master phrase"));
+        reads.needsExtendedDeviceChannels = true;
+
+        DeviceMatchFacts older;
+        older.licensed = true; // extendedDeviceChannelsSupported left false
+        InstallVerdict v = packageInstallVerdict(reads, older);
+        CHECK(!v.ok());
+        CHECK(v.extendedDeviceChannelsUnsupported);
+        CHECK(!v.viewerPasswordUnsupported && v.mismatches.isEmpty() && v.shortfalls.isEmpty());
+
+        DeviceMatchFacts current = older;
+        current.extendedDeviceChannelsSupported = true;
+        CHECK(packageInstallVerdict(reads, current).ok());
+
+        SecurePackagePolicy plain;
+        plain.key = reads.key;
+        CHECK(packageInstallVerdict(plain, older).ok());
+
+        // The flag survives the file, and a package that does not need it
+        // writes nothing: its policy is the one an older Builder wrote.
+        CHECK(SecurePackagePolicy::fromJson(reads.toJson()).needsExtendedDeviceChannels);
+        CHECK(!plain.toJson().contains(QStringLiteral("needsExtendedDeviceChannels")));
+        CHECK(!SecurePackagePolicy::fromJson(plain.toJson()).needsExtendedDeviceChannels);
+        SecurePackagePolicy withheld = reads;
+        withheld.keysWithheld = true;
+        CHECK(SecurePackagePolicy::fromJson(withheld.toJson()).needsExtendedDeviceChannels);
     }
 
     // ---- the sealed install stream, and the format-3 container around it ----
@@ -7057,6 +7936,14 @@ static void testDeviceLinkReadCommands()
         CMD_GET_DEVICE_INFO,
         // The capacity report, listed in the edit that added it.
         CMD_GET_CAPACITY,
+        // The hardware report — which board this is — likewise.
+        CMD_GET_HARDWARE,
+        // The extended device channels (firmware 1.0.15), in the edit that
+        // added them.
+        CMD_READ_DEVICE_CHANNELS_EXT,
+        // The CAN Triple 2.0's names and its own settings.
+        CMD_READ_LABELS,
+        CMD_READ_DEVICE_SETTINGS,
     };
     for (quint8 cmd : reads)
         CHECK(DeviceLink::isReadResponse(cmd));
@@ -7069,6 +7956,8 @@ static void testDeviceLinkReadCommands()
         // ACCESS_RESPONSE is answered ACK/NACK — listing it as a read would
         // leave requestSync waiting for a payload that never comes.
         CMD_WRITE_ACCESS_KEYS, CMD_ACCESS_RESPONSE,
+        CMD_WRITE_DEVICE_CHANNELS, CMD_WRITE_DEVICE_CHANNELS_EXT,
+        CMD_WRITE_LABELS, CMD_WRITE_DEVICE_SETTINGS,
     };
     for (quint8 cmd : nonReads)
         CHECK(!DeviceLink::isReadResponse(cmd));
@@ -7106,7 +7995,8 @@ static void testDeviceLinkReadCommands()
     for (quint8 cmd : {CMD_GET_STATUS, CMD_READ_CONFIG_NAME, CMD_GET_DEVICE_ID,
                        CMD_READ_ACCESS_KEYS, CMD_ACCESS_CHALLENGE,
                        CMD_READ_CONFIG_VERSION, CMD_READ_CAN_SETUP, CMD_READ_DEVICE_CHANNELS,
-                       CMD_GET_DEVICE_INFO, CMD_GET_CAPACITY}) {
+                       CMD_GET_DEVICE_INFO, CMD_GET_CAPACITY, CMD_GET_HARDWARE,
+                       CMD_READ_DEVICE_CHANNELS_EXT, CMD_READ_DEVICE_SETTINGS}) {
         CHECK(DeviceLink::isReadResponse(cmd));
         CHECK(!DeviceLink::echoesRequestRange(cmd));
     }
@@ -7115,7 +8005,7 @@ static void testDeviceLinkReadCommands()
                        CMD_READ_COND_CFG, CMD_READ_COUNTER_CFG, CMD_READ_TIMER_CFG,
                        CMD_READ_CONST_CFG, CMD_READ_RELAY_CFG, CMD_READ_TABLE2X16_DEF,
                        CMD_READ_TABLE2X16_OUT, CMD_READ_TABLE8X8_DEF, CMD_READ_TABLE8X8_ROW,
-                       CMD_READ_INTEG_CFG, CMD_READ_CRC8_CFG}) {
+                       CMD_READ_INTEG_CFG, CMD_READ_CRC8_CFG, CMD_READ_LABELS}) {
         CHECK(DeviceLink::isReadResponse(cmd));
         CHECK(DeviceLink::echoesRequestRange(cmd));
     }
@@ -7177,7 +8067,14 @@ static void testDeviceChannelsAlwaysMapped()
     // vanish into a declaration that declares nothing.
     QSet<int> seenSlots;
     for (const Channel &dev : ChannelCatalog::deviceChannels()) {
-        const quint16 slot = mapped.tables.deviceChannels.signal_idx[dev.deviceChannelId];
+        // Two lists, one id space: the header's, then the extended one.
+        const int id = dev.deviceChannelId;
+        CHECK(id >= 0 && id < DEVCH_TOTAL);
+        if (id < 0 || id >= DEVCH_TOTAL)
+            continue;
+        const quint16 slot = id < DEVCH_COUNT
+                                 ? mapped.tables.deviceChannels.signal_idx[id]
+                                 : mapped.tables.deviceChannelsExt.signal_idx[id - DEVCH_EXT_BASE];
         CHECK(slot < MAX_SIGNALS);
         CHECK(!seenSlots.contains(int(slot)));
         seenSlots.insert(int(slot));
@@ -7187,11 +8084,14 @@ static void testDeviceChannelsAlwaysMapped()
         CHECK(mapped.signalToChannel.value(int(slot)).compare(
                   dev.name, Qt::CaseInsensitive) == 0);
     }
-    CHECK(seenSlots.size() == DEVCH_COUNT);
+    CHECK(seenSlots.size() == DEVCH_TOTAL);
+    // Mapped is not READ: the document names none of them, and that is the
+    // fact a sealed package goes by (package_builder.cpp).
+    CHECK(!mapped.readsExtendedDeviceChannels);
 
     // The document's own channel is still there and still first — device
     // channels are appended, so nothing the document owns shifts.
-    CHECK(mapped.tables.signalConfigs.size() == 1 + DEVCH_COUNT);
+    CHECK(mapped.tables.signalConfigs.size() == 1 + DEVCH_TOTAL);
     CHECK(mapped.channelToSignal.value(QStringLiteral("coolant temp"), -1) == 0);
 
     // Referencing one must not allocate a SECOND slot for it: signalFor()
@@ -7219,6 +8119,138 @@ static void testDeviceChannelsAlwaysMapped()
     CHECK(m2.tables.deviceChannels.signal_idx[DEVCH_ONTIME]
           == quint16(m2.channelToSignal.value(
                  ChannelCatalog::deviceOnTimeName().toLower(), -1)));
+    // Device OnTime is in the header's list, not the extended one.
+    CHECK(!m2.readsExtendedDeviceChannels);
+}
+
+// The Tx Dropped channels (firmware 1.0.15): the first EXTENDED device
+// channels, published through a list of their own (DEVCH_EXT_BASE onward)
+// because the header's DeviceChannelsConfig is full and Manager 1.2.6 discards
+// a device-channels reply longer than the 82 bytes it knows.
+//
+// Pinned: the catalogue rows and their ids; that reading one lands its slot in
+// the EXTENDED list and nowhere in the header's; that the mapper says it was
+// read (the sealed-package rule hangs on that); and that a transmit row
+// carrying one survives a Get, which is the device-channel regression
+// testDeviceChannelTransmitRowSurvivesGet guards, repeated for the new list.
+static void testTxDroppedChannels()
+{
+    CHECK(DEVCH_EXT_BASE == DEVCH_COUNT);
+    CHECK(DEVCH_TX_DROPPED_BASE == DEVCH_EXT_BASE);
+    // The Tx Dropped block, then the supply block (CAN Triple 2.0).
+    CHECK(DEVCH_SUPPLY == DEVCH_TX_DROPPED_BASE + DEVCH_BUS_COUNT);
+    CHECK(DEVCH_EXT_COUNT == DEVCH_BUS_COUNT + 4);
+    CHECK(DEVCH_TOTAL == DEVCH_COUNT + DEVCH_EXT_COUNT);
+    {
+        const struct {
+            int id;
+            const char *name;
+        } supply[] = {
+            {DEVCH_SUPPLY, "Device Supply Voltage"},
+            {DEVCH_SUPPLY_MIN, "Device Supply Voltage Minimum"},
+            {DEVCH_SUPPLY_MAX, "Device Supply Voltage Maximum"},
+            {DEVCH_USB_SUPPLY, "Device USB Supply Voltage"},
+        };
+        for (const auto &s : supply) {
+            const Channel c = ChannelCatalog::deviceChannelById(s.id);
+            CHECK(c.isValid() && c.name == QLatin1String(s.name));
+            CHECK(c.dataType == QStringLiteral("u16") && c.decimalPlaces == 2);
+        }
+    }
+    CHECK(int(sizeof(DeviceChannelsExtConfig)) == DEVCH_EXT_COUNT * 2);
+    for (int bus0 = 0; bus0 < DEVCH_BUS_COUNT; ++bus0) {
+        const QString name = QStringLiteral("Device CAN%1 Tx Dropped").arg(bus0 + 1);
+        CHECK(ChannelCatalog::isDeviceChannel(name));
+        const Channel c = ChannelCatalog::deviceChannelById(DEVCH_TX_DROPPED_BASE + bus0);
+        CHECK(c.isValid() && c.name == name);
+        CHECK(c.dataType == QStringLiteral("u32"));
+    }
+    // Read by nothing, the list of extended channels read is empty.
+    {
+        Configuration bare;
+        const MappingResult none = mapToDevice(bare);
+        CHECK(!none.readsExtendedDeviceChannels && none.extendedDeviceChannelsRead.isEmpty());
+    }
+    // Every id in the extended range has a catalogue row, and nothing past it.
+    for (int id = DEVCH_EXT_BASE; id < DEVCH_EXT_END; ++id)
+        CHECK(ChannelCatalog::deviceChannelById(id).isValid());
+    CHECK(!ChannelCatalog::deviceChannelById(DEVCH_TOTAL).isValid());
+    {
+        const DeviceChannelsExtConfig unused = unusedDeviceChannelsExt();
+        for (int i = 0; i < DEVCH_EXT_COUNT; ++i)
+            CHECK(unused.signal_idx[i] == SIG_MSG_NONE);
+    }
+
+    // Read by a calculation.
+    Configuration doc;
+    MathRow copy;
+    copy.op = MATH_OP_ADD;
+    copy.aIsChannel = true;
+    copy.aChannel = QStringLiteral("Device CAN2 Tx Dropped");
+    copy.bIsChannel = false;
+    copy.bConst = 0.0;
+    copy.destChannel = QStringLiteral("Tx Drop Copy");
+    doc.mathRows.append(copy);
+    const MappingResult mapped = mapToDevice(doc);
+    CHECK(mapped.ok());
+    CHECK(mapped.readsExtendedDeviceChannels);
+    // By id, the one it reads and nothing else: the Send summary's notes hang on it.
+    CHECK(mapped.extendedDeviceChannelsRead == QList<int>{DEVCH_TX_DROPPED_BASE + 1});
+    const int slot = mapped.channelToSignal.value(QStringLiteral("device can2 tx dropped"), -1);
+    CHECK(slot >= 0);
+    CHECK(mapped.tables.deviceChannelsExt.signal_idx[DEVCH_TX_DROPPED_BASE + 1 - DEVCH_EXT_BASE]
+          == quint16(slot));
+    // Its neighbours are mapped too (every device channel is), to their own
+    // slots, and none of the three appears in the header's list.
+    for (int i = 0; i < DEVCH_EXT_COUNT; ++i) {
+        const quint16 s = mapped.tables.deviceChannelsExt.signal_idx[i];
+        CHECK(s < MAX_SIGNALS);
+        for (int h = 0; h < DEVCH_COUNT; ++h)
+            CHECK(mapped.tables.deviceChannels.signal_idx[h] != s);
+    }
+    CHECK(mapped.signalToChannel.value(slot).compare(QStringLiteral("Device CAN2 Tx Dropped"),
+                                                     Qt::CaseInsensitive)
+          == 0);
+
+    // Carried in a transmitted message: read too, and back from a Get.
+    Configuration cfg;
+    cfg.bus[0].enabled = true;
+    CommsSection tx;
+    tx.name = QStringLiteral("Drop Report");
+    tx.device = SectionDevice::TransmitMessage;
+    tx.alignment = SectionAlignment::WordSwap;
+    tx.baseAddress = 0x7E1;
+    tx.messageLengthBytes = 8;
+    tx.transmitRateHz = 10;
+    CommsChannelRow row;
+    row.channelName = QStringLiteral("Device CAN3 Tx Dropped");
+    row.startBit = 0;
+    row.bitLength = 16;
+    row.dbcType = int(DbcType::Unsigned);
+    row.dbcFactor = 1.0;
+    tx.rows.append(row);
+    cfg.bus[0].sections.append(tx);
+    const MappingResult mr = mapToDevice(cfg);
+    CHECK(mr.ok());
+    CHECK(mr.readsExtendedDeviceChannels);
+
+    Configuration back;
+    mapFromDevice(mr.tables, back);
+    CHECK(back.bus[0].sections.size() == 1);
+    if (back.bus[0].sections.size() == 1) {
+        const CommsSection &s = back.bus[0].sections[0];
+        CHECK(s.rows.size() == 1);
+        if (s.rows.size() == 1)
+            CHECK(s.rows[0].channelName == QStringLiteral("Device CAN3 Tx Dropped"));
+    }
+    CHECK(!back.catalog().findByName(QStringLiteral("Device CAN3 Tx Dropped")).userDefined);
+    // And the Get's document sends the same list again.
+    const MappingResult again = mapToDevice(back);
+    CHECK(again.ok());
+    CHECK(again.readsExtendedDeviceChannels);
+    CHECK(std::memcmp(&again.tables.deviceChannelsExt, &mr.tables.deviceChannelsExt,
+                      sizeof(DeviceChannelsExtConfig))
+          == 0);
 }
 
 // A transmit row whose channel IS a device channel — "Device CAN1 Bus Off"
@@ -7871,6 +8903,10 @@ int main(int argc, char *argv[])
     testTransmitOrder();
     testMessageRelay();
     testTransmitCrc8();
+    testTransmitCrc8Fd();
+    testFastDataRates();
+    testLabelStore();
+    testUnitTarget();
     testMigratedResetIsTheExactInverse();
     testTriggeredTransmit();
     testConditionOutputsAreBoolean();
@@ -7900,6 +8936,7 @@ int main(int argc, char *argv[])
     testCanLogExportFormats();
     testDeviceChannelsAlwaysMapped();
     testDeviceChannelTransmitRowSurvivesGet();
+    testTxDroppedChannels();
     testDisabledBusSectionsSurviveGet();
     testSectionNamesSurviveAGetIntoABlankDocument();
     testAnUnnamedSectionStillGetsAGeneratedName();

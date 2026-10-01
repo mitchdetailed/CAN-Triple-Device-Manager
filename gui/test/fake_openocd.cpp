@@ -16,7 +16,14 @@
 //   pending   option bytes programmed but not yet loaded (hex)
 //   erased    1 once the chip has been mass-erased
 //   programs  images programmed and verified
-//   fail      a failure to play: probe-open, erase, obl-noop, unlock-fails
+//   idcode    the debug ID code (hex; default a G47x's)
+//   package   the package code, PKG[4:0] (hex; default 0B, the 1.x's 48-pin)
+//   flashkb   the flash-size register (default 128, as the 1.x's part reads)
+//   fail      a failure to play: probe-open, erase, obl-noop, unlock-fails,
+//             fingerprint (the package read is refused on an open chip)
+// On a protected chip the package and flash-size reads are refused as well:
+// whether real silicon allows them at level 1 is not known, and refusing is
+// the harder case for the tool.
 // Every run's -c commands are appended to the file named by FAKE_OCD_CALLS, one
 // line per run, joined with " | ".
 //
@@ -39,6 +46,9 @@ struct Chip {
     uint32_t pending = 0xFFEFF8AAu;
     int erased = 0;
     int programs = 0;
+    uint32_t idcode = 0x20036469u; // STM32G47x/G48x, rev 0x2003
+    uint32_t package = 0x0Bu;      // LQFP48: a CAN Triple 1.x
+    uint32_t flashKb = 128;        // what a 1.x's STM32G473CB reports
     std::string fail;
 };
 
@@ -81,6 +91,12 @@ Chip load(const std::string &path)
         c.erased = std::atoi(kv["erased"].c_str());
     if (kv.count("programs"))
         c.programs = std::atoi(kv["programs"].c_str());
+    if (kv.count("idcode"))
+        c.idcode = uint32_t(std::strtoul(kv["idcode"].c_str(), nullptr, 16));
+    if (kv.count("package"))
+        c.package = uint32_t(std::strtoul(kv["package"].c_str(), nullptr, 16));
+    if (kv.count("flashkb"))
+        c.flashKb = uint32_t(std::strtoul(kv["flashkb"].c_str(), nullptr, 10));
     if (kv.count("fail"))
         c.fail = kv["fail"];
     return c;
@@ -91,9 +107,11 @@ void save(const std::string &path, const Chip &c)
     FILE *f = std::fopen(path.c_str(), "w");
     if (!f)
         return;
-    std::fprintf(f, "optr=%08X\npending=%08X\nerased=%d\nprograms=%d\nfail=%s\n",
+    std::fprintf(f,
+                 "optr=%08X\npending=%08X\nerased=%d\nprograms=%d\nidcode=%08X\npackage=%02X\n"
+                 "flashkb=%u\nfail=%s\n",
                  unsigned(c.optr), unsigned(c.pending), c.erased, c.programs,
-                 c.fail.c_str());
+                 unsigned(c.idcode), unsigned(c.package), unsigned(c.flashKb), c.fail.c_str());
     std::fclose(f);
 }
 
@@ -202,6 +220,20 @@ int main(int argc, char **argv)
                         (chip.optr & kDbank) ? "dual" : "single");
         } else if (cmd == "mdw 0x40022020") {
             std::printf("0x40022020: %08x \n", unsigned(chip.optr));
+        } else if (cmd == "mdw 0xe0042000") {
+            // The debug ID code is a debug-port register: readable whatever
+            // the protection level.
+            std::printf("0xe0042000: %08x \n", unsigned(chip.idcode));
+        } else if (cmd == "mdw 0x1fff7500" || cmd == "mdw 0x1fff75e0") {
+            if (rdpLevel(chip.optr) != 0 || chip.fail == "fingerprint") {
+                std::printf("Error: Failed to read memory at 0x%s\n", cmd.c_str() + 6);
+                return quit(1); // OpenOCD stops at the first failed command
+            }
+            // Upper bits set on purpose: the tool must mask to the field.
+            if (cmd == "mdw 0x1fff7500")
+                std::printf("0x1fff7500: %08x \n", unsigned(0xFFFFFFE0u | chip.package));
+            else
+                std::printf("0x1fff75e0: %08x \n", unsigned(0xFFFF0000u | chip.flashKb));
         } else if (cmd == "stm32l4x mass_erase 0") {
             if (chip.fail == "erase" || rdpLevel(chip.optr) != 0) {
                 std::printf("stm32l4x mass erase failed\n");

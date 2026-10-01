@@ -1,5 +1,6 @@
 // Tools > Channel Editor — every channel in the document in one table.
 #include "channel_editor_dialog.h"
+#include "theme.h"
 #include "window_memory.h"
 
 #include <QDialogButtonBox>
@@ -260,7 +261,7 @@ void ChannelEditorDialog::rebuild()
                     .arg(c.decimalPlaces)
                     .arg(trimmedNumber(c.minValue, c.decimalPlaces),
                          trimmedNumber(c.maxValue, c.decimalPlaces), suggestion);
-            const QBrush warn(QColor(0xC0, 0x30, 0x00));
+            const QBrush warn(warningColor(palette()));
             for (int col = 0; col < ColCount; ++col) {
                 item->setForeground(col, warn);
                 item->setToolTip(col, why);
@@ -335,7 +336,7 @@ void ChannelEditorDialog::rebuild()
         summary += QStringLiteral("  ");
         summary += tr("⚠ %1 channel(s) have a data type too small for their range — "
                       "their readings are clamped on the device.").arg(miscount);
-        m_summaryLabel->setStyleSheet(QStringLiteral("color: #C03000;"));
+        m_summaryLabel->setStyleSheet(colorRule(warningColor(palette())));
     } else {
         m_summaryLabel->setStyleSheet(QString());
     }

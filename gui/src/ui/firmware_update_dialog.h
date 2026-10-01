@@ -24,6 +24,7 @@
 #include "../protocol/device_link.h"
 #include "../protocol/firmware_image.h"
 #include "../protocol/firmware_update.h"
+#include "../protocol/hardware.h"
 
 class QCheckBox;
 class QLabel;
@@ -57,6 +58,11 @@ public:
     // cleared it — the status read that confirms an install is gated on Get.
     explicit FirmwareUpdateDialog(DeviceLink *link, QWidget *parent = nullptr,
                                   ReproveFn reproveSend = {}, ReproveFn reproveGet = {});
+
+    // Load and validate the image at `path` as Browse does, without the file
+    // dialog or the message box: false, with *error set, when it is refused.
+    // Public for the tests, which drive the choice of file directly.
+    bool selectImage(const QString &path, QString *error);
 
 signals:
     // F1, or the Help button. A signal rather than another constructor callback
@@ -96,7 +102,9 @@ private:
 
     // Close the port, wait for the device to finish installing and re-enumerate,
     // and reopen. The install itself erases and copies the application slot, so
-    // the device is genuinely gone for a second or two.
+    // the device is genuinely gone for a second or two. A CAN Triple 2.0 is
+    // given longer: an image that does not start is restarted and then rolled
+    // back before the unit answers again.
     bool waitForDeviceToReturn(QString *error);
 
     // After a successful update whose store version changed, offer to send the
@@ -118,9 +126,21 @@ private:
 
     std::optional<FirmwareImage> m_image;
     FwUpdateStatus m_status {};
+    // A CAN Triple 2.0's firmware copies, read with the status: which one is
+    // running, what the others hold, whether the running image is on trial and
+    // what the unit last rolled back from. nullopt on a 1.x unit.
+    std::optional<FwUpdateStatus2> m_slots;
     // The unit's capacity report, read with the status. nullopt when the
     // firmware predates the report (then its version is all it can say).
     std::optional<DeviceCapacity> m_deviceCapacity;
+    // Which board the unit is (CMD_GET_HARDWARE), read before the status
+    // because it is ungated. nullopt when the read failed; a unit on firmware
+    // without the command is DeviceHardware::builtIn(), a CAN Triple 1.x.
+    std::optional<DeviceHardware> m_deviceHardware;
+    // Why the hardware report could not be read. A reason not to update only
+    // when the status read then worked: the link is fine and the report is in
+    // a form this Manager cannot read, so it cannot tell which board this is.
+    QString m_hardwareError;
     bool m_statusValid = false;
     bool m_busy = false;            // an update is running; dismissal is blocked
     bool m_firstShow = true;        // defer the initial device read to showEvent

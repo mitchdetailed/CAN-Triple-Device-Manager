@@ -13,7 +13,7 @@ To add a constant, choose **Calculations → Constants…**. The dialog lists ev
 ## Adding or changing a constant
 
 The **Constant** editor holds two groups plus the Active tick:
-- **Channel Name** — **Channel Name:**, up to 31 characters (the device stores a 32-byte label). A new constant starts as "New Constant" with the name selected for typing over.
+- **Channel Name** — **Channel Name:**, up to 31 bytes (32 on a [CAN Triple 2.0](can-triple-2.md#names)). A new constant starts as "New Constant" with the name selected for typing over.
 - **Constant Details**:
     - **Data Type:** — boolean, u8, u16, u32, s8, s16, s32 or float. The field starts blank and a choice is required.
     - **Decimal Places:** — 0–8, capped by the type: boolean is locked at 0, u8/s8 allow up to 2, u16/s16 up to 4, u32/s32/float up to 8.
@@ -24,7 +24,7 @@ The **Constant** editor holds two groups plus the Active tick:
 ## Name rules
 
 OK enforces the same rules as the other channel editors:
-- The name must not be empty, and must fit the device's 31-byte label budget — a name with non-ASCII characters can exceed the byte limit within the character cap and is refused with "Names are limited to 31 bytes on the device."
+- The name must not be empty, and must fit what the target unit keeps of a name: 31 bytes on a CAN Triple, 32 on a CAN Triple 2.0. A name with non-ASCII characters can exceed the byte limit within the character cap and is refused with "Names are limited to 31 bytes on the target unit." (32 for a CAN Triple 2.0).
 - No two constants may share a name (case-insensitive): "A constant named "X" already exists."
 - A constant may not take the name of an unrelated existing channel — it would overwrite that channel's definition: "A channel named "X" already exists. Choose a different name."
 

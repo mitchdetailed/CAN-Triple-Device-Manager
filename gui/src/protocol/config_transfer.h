@@ -86,8 +86,11 @@ public:
     // classification guard's verdict (empty = healthy). Exists so the
     // classification test fails the moment a read step and DeviceLink's lists
     // disagree, instead of the disagreement shipping and being found on
-    // hardware — which has now happened for six read commands.
-    static QString planClassificationFaultForTest(bool getPlan);
+    // hardware — which has now happened for six read commands. `capacity` is
+    // the target the plan is built for: a CAN Triple 2.0 whose names are in its
+    // label store adds the label writes and reads.
+    static QString planClassificationFaultForTest(
+        bool getPlan, const DeviceCapacity &capacity = DeviceCapacity::builtIn());
 
     // Test seam: the Get plan's requests — (command, payload) in order — for a
     // given capacity, so a test can hold the ranges read against the numbers
@@ -136,6 +139,15 @@ public:
     // branch.
     bool anyReplyLost() const { return m_replyLost; }
 
+    // Whether the device declined a QUIET optional step's command as unknown
+    // (ERR_INVALID_CMD). Such a step is tolerated like any optional one but is
+    // not listed in skippedStages(), because on firmware that predates it its
+    // absence is the normal state rather than news. The extended device
+    // channels are the case: every unit before 1.0.15 lacks them, and every Send
+    // and Get to one would otherwise say so. A caller with a reason to mention
+    // it (the configuration reads one of those channels) asks here.
+    bool deviceLacked(quint8 cmd) const { return m_lacked.contains(cmd); }
+
     // True if the transfer FAILED and the device's reason was ERR_LOCKED — it
     // declined the step for want of a password this session has not proved.
     //
@@ -167,10 +179,17 @@ private:
         int table = -1;
         bool optional = false; // NACK tolerated (e.g. TX table on v1 firmware)
         bool skipIfUnsupported = false; // tolerate only ERR_INVALID_CMD, not real errors
+        // With `optional`: an ERR_INVALID_CMD is recorded in deviceLacked()
+        // rather than in skippedStages(). Any other failure is reported as usual.
+        bool quietIfUnsupported = false;
         bool captureName = false; // read step: response is the 32-byte config name
         bool captureBusSetup = false; // read step: response is ControlCanPayload[3]
         bool captureDeviceChannels = false; // read step: response is DeviceChannelsConfig
+        bool captureDeviceChannelsExt = false; // read step: the extended list (firmware 1.0.15)
         bool captureMsgPasswords = false;   // read step: response is MessagePasswordRecord
+        // read step: a CMD_READ_LABELS reply of this LABEL_KIND_*, into the
+        // matching DeviceTables label list; -1 = not a label read.
+        int captureLabels = -1;
         QByteArray expectedEcho; // verify steps: expected response payload
         // Marks the read-back phase. expectedEcho would nearly do, but this is
         // also what runNext() scans forward over to abandon the REST of the
@@ -202,6 +221,7 @@ private:
     bool m_failedLocked = false;
     bool m_replyLost = false;
     QStringList m_skippedStages;
+    QList<quint8> m_lacked; // see deviceLacked()
     DeviceTables m_readTables;
     QString m_deviceConfigName;
     QVector<ControlCanPayload> m_deviceBusSetup;

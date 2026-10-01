@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Integrators</title>
-<link rel="stylesheet" href="help.css">
+<link rel="stylesheet" type="text/css" href="help.css">
 </head>
 <body>
 <h1>Integrators</h1>
@@ -79,8 +79,8 @@ Leave it empty for "(never reset)".</td></tr>
 <tr><td>Control</td><td>When reset, set value to :</td><td>The value loaded on
 a reset edge.</td></tr>
 <tr><td>Control</td><td>Preserve value across power cycles</td><td>Retains the
-running total in flash and restores it at the next power-up instead of the
-starting value — see below.</td></tr>
+running total and restores it at the next power-up instead of the starting
+value — see below.</td></tr>
 <tr><td>Limits</td><td>Minimum : / Maximum :</td><td>The value holds at these
 limits — for a count-down integrator the minimum is the floor it stops at — unless
 <b>Roll over at the limits</b> is ticked. A maximum that does not exceed the
@@ -104,9 +104,14 @@ cycles</b> also ticked, nothing can ever clear the total.
 
 <h2>Preserve and flash wear</h2>
 
-<p>Preserved values live in a small flash store that is flushed about once a
-minute and holds at most <b>20</b> entries, shared with preserved
-<a href="counters.html">counters</a>. The two are not equal customers of that
+<p>A CAN Triple 2.0 keeps preserved values in FRAM, memory with no write limit:
+every counter and integrator can be preserved, values are written every
+0.1&nbsp;s while they change, and nothing below applies to it. Check Channels
+says nothing about wear for a configuration whose target is a CAN Triple 2.0.</p>
+
+<p>On a CAN Triple, preserved values live in a small flash store that is
+flushed about once a minute and holds at most <b>20</b> entries, shared with
+preserved <a href="counters.html">counters</a>. The two are not equal customers of that
 store: a counter is event-driven and often unchanged for a whole minute, so
 its flush costs nothing, but a running integrator changes on every step and
 writes a record at essentially every 60&nbsp;s flush.</p>

@@ -443,8 +443,9 @@ void adoptCommsTemplatePasswords(Configuration &config, const CommsTemplate &tmp
     }
 }
 
+static_assert(MAX_CHANNEL_NAME_BYTES == 31, "mergeCommsTemplate's default name limit");
 bool mergeCommsTemplate(ChannelCatalog &catalog, int busIndex, const CommsTemplate &tmpl,
-                        CommsTemplateMerge *out, QString *error)
+                        CommsTemplateMerge *out, QString *error, int nameLimit)
 {
     if (tmpl.sections.isEmpty()) {
         if (error)
@@ -511,7 +512,7 @@ bool mergeCommsTemplate(ChannelCatalog &catalog, int busIndex, const CommsTempla
         // clipping — which is what this did — lets exactly that case through with
         // no disambiguator at all, and two channels then share a name.
         const QString root = incoming.name;
-        QString candidate = clipName(root, MAX_CHANNEL_NAME_BYTES);
+        QString candidate = clipName(root, nameLimit);
         const bool shortened = candidate != root;
         const bool collided = taken.contains(candidate.toLower());
         // The " 2" disambiguator has to fit the label budget too, so it eats
@@ -519,7 +520,7 @@ bool mergeCommsTemplate(ChannelCatalog &catalog, int busIndex, const CommsTempla
         for (int n = 2; taken.contains(candidate.toLower()); ++n) {
             const QString suffix = QStringLiteral(" %1").arg(n);
             candidate =
-                clipName(root, MAX_CHANNEL_NAME_BYTES - int(suffix.toUtf8().size())) + suffix;
+                clipName(root, nameLimit - int(suffix.toUtf8().size())) + suffix;
         }
         plan.to = candidate;
         plan.channel.name = candidate;
@@ -531,7 +532,7 @@ bool mergeCommsTemplate(ChannelCatalog &catalog, int busIndex, const CommsTempla
             result.notes.append(QStringLiteral("Channel '%1' shortened to fit — names are "
                                                "limited to %2 bytes on the device.")
                                     .arg(root)
-                                    .arg(MAX_CHANNEL_NAME_BYTES));
+                                    .arg(nameLimit));
         if (collided)
             result.notes.append(
                 isDevice

@@ -2,6 +2,7 @@
 #include "tables_dialog.h"
 #include "window_memory.h"
 #include "hex_input.h"
+#include "name_limits.h"
 
 #include <QButtonGroup>
 #include <QComboBox>
@@ -129,17 +130,17 @@ struct OutputControls {
     QSpinBox *decimalsSpin;
 };
 OutputControls buildOutputGroup(QWidget *parent, const QString &name,
-                                const QString &dataType, int decimals)
+                                const QString &dataType, int decimals, int nameLimit)
 {
     auto *group = new QGroupBox(QObject::tr("Output Channel"), parent);
     auto *form = new QFormLayout(group);
     OutputControls oc{};
     oc.group = group;
     oc.nameEdit = new QLineEdit(name, group);
-    oc.nameEdit->setMaxLength(MAX_CHANNEL_NAME_BYTES); // device label budget
+    oc.nameEdit->setMaxLength(nameLimit); // what the target keeps of a name
     oc.nameEdit->setToolTip(
-        QObject::tr("Up to %1 characters — the device stores a %2-byte label.")
-            .arg(MAX_CHANNEL_NAME_BYTES).arg(SIGNAL_LABEL_LEN));
+        QObject::tr("Up to %1 characters — the most of a channel name the target unit keeps.")
+            .arg(nameLimit));
     form->addRow(QObject::tr("Channel Name:"), oc.nameEdit);
     oc.typeCombo = new QComboBox(group);
     for (const DataTypeInfo &t : kDataTypes)
@@ -237,17 +238,18 @@ AxisControls buildAxisGroup(QDialog *parent, Configuration *config, QVBoxLayout 
 }
 
 bool validateOutputName(QDialog *dlg, const QString &name, const QStringList &reserved,
-                        const QStringList &siblingNames, const QString &axisA, const QString &axisB)
+                        const QStringList &siblingNames, const QString &axisA, const QString &axisB,
+                        int nameLimit)
 {
     if (name.isEmpty()) {
         QMessageBox::warning(dlg, dlg->windowTitle(),
                              QObject::tr("The output channel name must not be empty."));
         return false;
     }
-    if (name.toUtf8().size() > MAX_CHANNEL_NAME_BYTES) {
+    if (name.toUtf8().size() > nameLimit) {
         QMessageBox::warning(dlg, dlg->windowTitle(),
-                             QObject::tr("Names are limited to %1 bytes on the device.")
-                                 .arg(MAX_CHANNEL_NAME_BYTES));
+                             QObject::tr("Names are limited to %1 bytes on the target unit.")
+                                 .arg(nameLimit));
         return false;
     }
     if (name.compare(axisA, Qt::CaseInsensitive) == 0
@@ -287,7 +289,8 @@ public:
         m_siblings = siblingNames;
 
         auto *layout = new QVBoxLayout(this);
-        m_out = buildOutputGroup(this, row.outputChannel, row.dataType, row.decimalPlaces);
+        m_out = buildOutputGroup(this, row.outputChannel, row.dataType, row.decimalPlaces,
+                                 ct::channelNameLimit(m_config));
         m_axis = buildAxisGroup(this, config, layout, tr("Input Axis"), row.xChannel, row.xInterp,
                                 livePatch, [this]() { updateConstraints(); });
 
@@ -444,7 +447,8 @@ private:
     {
         const QString name = m_out.nameEdit->text().trimmed();
         if (!validateOutputName(this, name, m_reserved, m_siblings,
-                                channelField(m_axis.channelEdit), QString()))
+                                channelField(m_axis.channelEdit), QString(),
+                                ct::channelNameLimit(m_config)))
             return;
         // Populated sites are contiguous from the left; count them.
         int n = 0;
@@ -520,7 +524,8 @@ public:
         // would push OK off the bottom of the screen with no way to reach it.
         auto *content = new QWidget;
         auto *layout = new QVBoxLayout(content);
-        m_out = buildOutputGroup(this, row.outputChannel, row.dataType, row.decimalPlaces);
+        m_out = buildOutputGroup(this, row.outputChannel, row.dataType, row.decimalPlaces,
+                                 ct::channelNameLimit(m_config));
         m_xAxis = buildAxisGroup(this, config, layout, tr("X Axis"), row.xChannel, row.xInterp,
                                  livePatch, [this]() { updateConstraints(); }, true);
         m_yAxis = buildAxisGroup(this, config, layout, tr("Y Axis"), row.yChannel, row.yInterp,
@@ -870,7 +875,7 @@ private:
         const QString name = m_out.nameEdit->text().trimmed();
         if (!validateOutputName(this, name, m_reserved, m_siblings,
                                 channelField(m_xAxis.channelEdit),
-                                channelField(m_yAxis.channelEdit)))
+                                channelField(m_yAxis.channelEdit), ct::channelNameLimit(m_config)))
             return;
         // Contiguous populated X sites (top row) and Y sites (left column).
         const int nx = filledX();

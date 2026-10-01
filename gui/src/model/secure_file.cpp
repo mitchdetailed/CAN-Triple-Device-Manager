@@ -464,6 +464,14 @@ QJsonObject SecurePackagePolicy::toJson() const
             counts.append(n);
         o[QStringLiteral("tableCounts")] = counts;
     }
+    // Written only when true, so a package that does not need the extended
+    // device channels is byte-for-byte the policy an older Builder wrote.
+    if (needsExtendedDeviceChannels)
+        o[QStringLiteral("needsExtendedDeviceChannels")] = true;
+    // Likewise: absent means the names are in the records, which is what every
+    // package before the label store is.
+    if (needsLabelStore)
+        o[QStringLiteral("needsLabelStore")] = true;
     // Written only when selected, so "leave this password alone" and "clear it"
     // are different documents rather than the same one read two ways. The value
     // is the DERIVED key in hex — see the struct — and kNoAccessKey means clear.
@@ -512,6 +520,8 @@ SecurePackagePolicy SecurePackagePolicy::fromJson(const QJsonObject &o)
     p.configVersion = quint16(o[QStringLiteral("configVersion")].toInt());
     for (const QJsonValue &v : o[QStringLiteral("tableCounts")].toArray())
         p.tableCounts.append(v.toInt());
+    p.needsExtendedDeviceChannels = o[QStringLiteral("needsExtendedDeviceChannels")].toBool();
+    p.needsLabelStore = o[QStringLiteral("needsLabelStore")].toBool();
     // contains(), not "is the key non-zero": a zero key means CLEAR it, which is
     // a real instruction and must survive the round trip.
     const auto keyAt = [&o](const QString &name) {
@@ -599,6 +609,26 @@ InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,
     // would refuse the sealed write in the middle of the stream.
     if (policy.setViewer && !device.viewerPasswordSupported)
         v.viewerPasswordUnsupported = true;
+    // The same for a configuration that reads the extended device channels
+    // (1.0.15). The stream leads with a write only that firmware knows, so a
+    // Manager without this check still leaves the unit untouched; this is the
+    // check that says why, before the relay starts.
+    if (policy.needsExtendedDeviceChannels && !device.extendedDeviceChannelsSupported)
+        v.extendedDeviceChannelsUnsupported = true;
+    // Where the names go. A stream built for a unit that keeps them apart
+    // writes records a unit that keeps them in its records refuses — after its
+    // CLEAR, which on a CAN Triple (1.x) erases the configuration in place — and
+    // the other way round the records are the wrong size too. Held to each
+    // other both ways. A unit whose capacity could not be read is not guessed
+    // at, except that a package needing the label store is refused: the unit
+    // it could erase is exactly the one that cannot say.
+    if (device.capacityKnown) {
+        const bool apart = device.capacity.labelsApart();
+        v.labelStoreMissing = policy.needsLabelStore && !apart;
+        v.labelStoreUnexpected = !policy.needsLabelStore && apart;
+    } else {
+        v.labelStoreMissing = policy.needsLabelStore;
+    }
     return v;
 }
 

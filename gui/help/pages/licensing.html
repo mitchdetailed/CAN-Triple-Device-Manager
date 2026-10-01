@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Firmware Licensing &amp; Access Keys</title>
-<link rel="stylesheet" href="help.css">
+<link rel="stylesheet" type="text/css" href="help.css">
 </head>
 <body>
 <h1>Firmware Licensing &amp; Access Keys</h1>
@@ -176,6 +176,21 @@ records them separately.</p>
 <p>The CAN Viewer password needs device firmware 1.0.14 or newer. The Manager will
 not install a package that sets or removes it on an older unit: it stops before
 anything is sent and says to update the unit's firmware first.</p>
+
+<p>The same applies to a configuration that reads one of the <b>Device CAN<i>n</i>
+Tx Dropped</b> channels, which need device firmware 1.0.15 or newer. The package
+records that, and the Manager will not install it on an older unit. If an older
+Manager installs it anyway, the unit refuses the first frame of the stream and
+nothing on it changes. A package whose configuration does not read those
+channels installs on older firmware as before.</p>
+
+<p>A package built for a <a href="can-triple-2.html#names">CAN Triple 2.0</a>
+installs only on a CAN Triple 2.0, because the 2.0 keeps the names of its
+channels, messages and relays apart and takes the configuration in a different
+form; a package built for a CAN Triple installs only on a CAN Triple. The
+Manager checks the connected unit and stops before anything is sent. If an
+older Manager installs a CAN Triple 2.0 package on a CAN Triple anyway, the
+unit refuses the first frame of the stream and nothing on it changes.</p>
 
 <p>The password writes ride inside the sealed install stream, ahead of the
 configuration, so the device applies them because the stream is sealed under

@@ -44,6 +44,12 @@ uint8_t script_exec_on_tick(void);
 
 void script_exec_status(ScriptStatus *out);
 
+#if !defined(CT_TARGET_STM32)
+
+void script_set_host_budget(uint32_t budget);
+uint32_t script_tick_budget(void);
+#endif
+
 bool script_exec_running(void);
 
 float script_exec_state(uint16_t idx);

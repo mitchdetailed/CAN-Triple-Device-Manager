@@ -60,6 +60,17 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                     break;
                 }
         }
+        // FD data phases above 2 Mbit/s are the CAN Triple 2.0's (its capacity
+        // report states them): another unit cannot transmit them, because it
+        // has no transmitter delay compensation, and cannot time 4 or 8 Mbit/s
+        // exactly. An error rather than the old quiet fall-back to 2M, which
+        // would run the bus at a rate the configuration does not say.
+        if (bus.enabled && bus.isFd() && bus.dataRateKbps > 2000 && !config.capacity().fastData())
+            add(ValidationIssue::Error, QStringLiteral("CAN %1").arg(busIdx + 1),
+                QStringLiteral("a CAN FD data rate of %1 kbit/s needs a CAN Triple 2.0 (choose "
+                               "one as the target, or connect one); other units run FD data "
+                               "phases to 2 Mbit/s")
+                    .arg(busRateLabel(bus.dataRateKbps)));
         // Almost every message-level finding names something a protected
         // message exists to withhold — its CAN ID, its frame length, a row's
         // start bit and width. Rather than sanitising each one (where the next
@@ -417,6 +428,20 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                         QStringLiteral("CRC byte location %1 is outside the %2-byte message — "
                                        "the stamp has no byte to land in")
                             .arg(s.crcByteLocation).arg(s.messageLengthBytes));
+                // The CAN Triple 2.0's CRC8 (its capacity report states it): byte
+                // positions past 7, the whole identifier and runs of frame bytes.
+                // A firmware without them stamps a different checksum — an
+                // element it does not know feeds nothing — so each is an error on
+                // any other target, and the mapper refuses the same recipe.
+                const DeviceCapacity &crcTarget = config.capacity();
+                const QString needs20 = QStringLiteral(
+                    "needs a CAN Triple 2.0 (choose one as the target, or connect one)");
+                if (s.crcByteLocation > crcTarget.crc8MaxByte())
+                    add(ValidationIssue::Error, loc,
+                        QStringLiteral("CRC byte location %1 is past Byte %2 — %3")
+                            .arg(s.crcByteLocation)
+                            .arg(crcTarget.crc8MaxByte())
+                            .arg(needs20));
                 // Channel-vs-CRC-byte moved to reportLayoutClashes() above, and
                 // it is an ERROR there rather than the Warning it was here. The
                 // old rationale — "not an error the way two rows overlapping is,
@@ -440,9 +465,48 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                 // often a mis-typed index than a choice, so it is said out loud.
                 for (int e = 0; e < s.crcElements.size(); ++e) {
                     const CommsSection::CrcElement &el = s.crcElements[e];
+                    if (el.type == CommsSection::CrcElement::IdAll) {
+                        if (!crcTarget.crc8WholeId())
+                            add(ValidationIssue::Error, loc,
+                                QStringLiteral("CRC element %1 feeds the whole identifier — %2")
+                                    .arg(e + 1)
+                                    .arg(needs20));
+                        continue;
+                    }
+                    if (el.type == CommsSection::CrcElement::DataRun) {
+                        if (!crcTarget.crc8DataRuns()) {
+                            add(ValidationIssue::Error, loc,
+                                QStringLiteral("CRC element %1 is a run of frame bytes — %2")
+                                    .arg(e + 1)
+                                    .arg(needs20));
+                            continue;
+                        }
+                        const int top = qMax(el.value, el.last);
+                        if (top >= s.messageLengthBytes)
+                            add(ValidationIssue::Warning, loc,
+                                QStringLiteral("CRC element %1 runs to frame byte %2, past the "
+                                               "%3-byte message — the bytes past its end feed 0 "
+                                               "into the checksum")
+                                    .arg(e + 1)
+                                    .arg(top)
+                                    .arg(s.messageLengthBytes));
+                        if (el.value == el.last && el.value == s.crcByteLocation)
+                            add(ValidationIssue::Warning, loc,
+                                QStringLiteral("CRC element %1 is a run of only the CRC's own "
+                                               "byte, which a run leaves out — it feeds nothing")
+                                    .arg(e + 1));
+                        continue;
+                    }
                     if (el.type != CommsSection::CrcElement::Data)
                         continue;
-                    if (el.value >= s.messageLengthBytes)
+                    if (el.value > crcTarget.crc8MaxByte())
+                        add(ValidationIssue::Error, loc,
+                            QStringLiteral("CRC element %1 reads frame byte %2, past Byte %3 — %4")
+                                .arg(e + 1)
+                                .arg(el.value)
+                                .arg(crcTarget.crc8MaxByte())
+                                .arg(needs20));
+                    else if (el.value >= s.messageLengthBytes)
                         add(ValidationIssue::Warning, loc,
                             QStringLiteral("CRC element %1 reads frame byte %2, past the "
                                            "%3-byte message — it feeds 0 into the checksum")
@@ -855,11 +919,12 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                 QStringLiteral("maximum must exceed minimum"));
     }
 
-    // "Preserve value" retains a value across power cycles in a small flash
-    // store that holds at most 20 values TOTAL — counters and integrators share
-    // one ring, so the budget has to be counted across both. Beyond that the
-    // device keeps the counters and drops the excess integrators, which would
-    // be a silent surprise, so it is an error here instead.
+    // "Preserve value" retains a value across power cycles, and a unit keeps
+    // only so many, counters and integrators TOGETHER: the target's
+    // retainedLimit() — 20 in the CAN Triple's flash ring, every one of them on
+    // a CAN Triple 2.0. Beyond it the device keeps the counters and drops the
+    // excess integrators, which would be a silent surprise, so it is an error
+    // here instead.
     {
         int counters = 0, integrators = 0;
         for (const CounterRow &c : config.counterRows)
@@ -869,7 +934,8 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
             if (g.active && g.preserveValue)
                 ++integrators;
         const int preserved = counters + integrators;
-        constexpr int kMaxPreserved = 20;
+        const DeviceCapacity &target = config.capacity();
+        const int kMaxPreserved = target.retainedLimit();
         if (preserved > kMaxPreserved)
             add(ValidationIssue::Error, QStringLiteral("Preserved values"),
                 QStringLiteral("%1 items have Preserve value enabled (%2 counters + %3 "
@@ -877,11 +943,12 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                                "cycles — turn Preserve off on %5 of them")
                     .arg(preserved).arg(counters).arg(integrators).arg(kMaxPreserved)
                     .arg(preserved - kMaxPreserved));
-        // Wear note. A counter is event-driven and often unchanged for a whole
-        // minute, so a flush costs nothing; a running integrator changes every
-        // step and so writes a record at essentially every 60 s flush. Worth
-        // saying out loud, because the two look identical in the UI.
-        if (integrators > 0)
+        // Wear note, for a unit whose store wears (flash): a counter is
+        // event-driven and often unchanged for a whole minute, so a flush costs
+        // nothing; a running integrator changes every step and so writes a
+        // record at essentially every 60 s flush. Worth saying out loud,
+        // because the two look identical in the UI.
+        if (integrators > 0 && target.retainedWearLimited())
             add(ValidationIssue::Info, QStringLiteral("Preserved values"),
                 QStringLiteral("%1 preserved integrator(s) write to the retained-value store on "
                                "almost every 60 s flush, since their totals change constantly — "

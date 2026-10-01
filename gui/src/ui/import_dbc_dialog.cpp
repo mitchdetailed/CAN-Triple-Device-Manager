@@ -161,7 +161,12 @@ public:
 class ChannelNameDelegate : public QStyledItemDelegate
 {
 public:
-    using QStyledItemDelegate::QStyledItemDelegate;
+    // `nameLimit`: what the document's target keeps of a name (name_limits.h).
+    ChannelNameDelegate(QObject *parent, int nameLimit)
+        : QStyledItemDelegate(parent)
+        , m_nameLimit(nameLimit)
+    {
+    }
     QWidget *createEditor(QWidget *parent, const QStyleOptionViewItem &option,
                           const QModelIndex &index) const override
     {
@@ -169,9 +174,12 @@ public:
         // BYTES, not characters - setMaxLength counts QChars and the label
         // budget is UTF-8 bytes. See name_limits.h.
         if (auto *line = qobject_cast<QLineEdit *>(editor))
-            ct::limitToUtf8Bytes(line, MAX_CHANNEL_NAME_BYTES);
+            ct::limitToUtf8Bytes(line, m_nameLimit);
         return editor;
     }
+
+private:
+    int m_nameLimit;
 };
 
 // Blocks the inline editor on informational columns.
@@ -301,7 +309,7 @@ ImportDbcDialog::ImportDbcDialog(Configuration *config, const DbcFile &dbc,
     // takes in transmit mode, where the one editable thing — the Send Channel
     // — is picked through a dialog on double-click. buildTree() installs the
     // set for the mode.
-    m_nameDelegate = new ChannelNameDelegate(m_tree);
+    m_nameDelegate = new ChannelNameDelegate(m_tree, ct::channelNameLimit(m_config));
     m_quantityDelegate = new QuantityDelegate(m_tree);
     m_unitDelegate = new UnitDelegate(m_tree);
     m_readOnlyDelegate = new ReadOnlyDelegate(m_tree);
@@ -707,6 +715,7 @@ void ImportDbcDialog::accept()
     QSet<QString> usedNames;
     for (const Channel &c : m_config->catalog().userChannels())
         usedNames.insert(c.name.toLower());
+    const int nameLimit = ct::channelNameLimit(m_config); // what the target keeps
     // DBC signal names routinely run past what the device label holds, so clip
     // to the byte budget here rather than letting the mapper truncate silently.
     // Never cut a multi-byte UTF-8 codepoint in half.
@@ -731,20 +740,20 @@ void ImportDbcDialog::accept()
     };
     const auto uniqueName = [&](const QString &base) {
         const QString root = base.isEmpty() ? tr("Signal") : base;
-        const QString clipped = clip(root, MAX_CHANNEL_NAME_BYTES);
+        const QString clipped = clip(root, nameLimit);
         QString candidate = clipped;
         // A " 2" disambiguator has to fit the budget too, so it eats into the
         // root rather than pushing the name back over the limit.
         for (int n = 2; usedNames.contains(candidate.toLower()); ++n) {
             const QString suffix = QStringLiteral(" %1").arg(n);
-            candidate = clip(root, MAX_CHANNEL_NAME_BYTES - int(suffix.toUtf8().size())) + suffix;
+            candidate = clip(root, nameLimit - int(suffix.toUtf8().size())) + suffix;
         }
         usedNames.insert(candidate.toLower());
         if (candidate != base && !base.isEmpty())
             warns.append(candidate == clipped
                              ? tr("Channel '%1' shortened to '%2' (names are limited to %3 bytes "
                                   "on the device)")
-                                   .arg(base, candidate).arg(MAX_CHANNEL_NAME_BYTES)
+                                   .arg(base, candidate).arg(nameLimit)
                              : tr("Channel '%1' renamed to '%2' (name already in use)")
                                    .arg(base, candidate));
         return candidate;

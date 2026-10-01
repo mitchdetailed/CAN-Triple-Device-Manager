@@ -269,6 +269,32 @@ MonitorChannelsDialog::MonitorChannelsDialog(DeviceLink *link, Configuration *co
     rebuild();
 }
 
+bool MonitorChannelsDialog::unitPublishes(const QString &channelName) const
+{
+    if (!m_unitHardware)
+        return true;
+    const Channel ch = m_config->catalog().findByName(channelName);
+    return !ch.isValid() || ch.deviceChannelId < 0
+           || m_unitHardware->publishesDeviceChannel(ch.deviceChannelId);
+}
+
+void MonitorChannelsDialog::setUnitHardware(const std::optional<DeviceHardware> &hardware)
+{
+    // Compared by what it decides, not field by field: a new report that
+    // publishes the same channels must not rebuild the rows (and release the
+    // overrides a rebuild releases) for nothing.
+    const auto decides = [](const std::optional<DeviceHardware> &hw) {
+        QList<bool> out;
+        for (int id = 0; id < DEVCH_TOTAL; ++id)
+            out.append(!hw || hw->publishesDeviceChannel(id));
+        return out;
+    };
+    const bool changed = decides(hardware) != decides(m_unitHardware);
+    m_unitHardware = hardware;
+    if (changed)
+        rebuild();
+}
+
 void MonitorChannelsDialog::rebuild()
 {
     rebuildRows(/*keepOverrides=*/false);
@@ -324,6 +350,8 @@ void MonitorChannelsDialog::rebuildRows(bool keepOverrides)
     entries.reserve(mapping.signalToChannel.size());
     for (auto it = mapping.signalToChannel.constBegin();
          it != mapping.signalToChannel.constEnd(); ++it) {
+        if (!unitPublishes(it.value()))
+            continue;
         entries.append(qMakePair(it.value(), it.key()));
     }
     std::sort(entries.begin(), entries.end(),

@@ -19,6 +19,7 @@ const QLatin1String kCommsTemplates("Communications Templates");
 const QLatin1String kChannelLists("Channel Lists");
 const QLatin1String kSettings("Settings");
 const QLatin1String kFirmwareImages("Firmware");
+const QLatin1String kFirmwareImagesV2("CAN Triple 2.0"); // under kFirmwareImages
 const QLatin1String kFirmwareBackups("Firmware Update Backups");
 const QLatin1String kDeviceScripts("Scripts");
 
@@ -52,6 +53,11 @@ QString settingsDirectory()
 QString firmwareImagesDirectory()
 {
     return programRoot() + QLatin1Char('/') + kFirmwareImages;
+}
+
+QString firmwareImagesDirectoryV2()
+{
+    return firmwareImagesDirectory() + QLatin1Char('/') + kFirmwareImagesV2;
 }
 
 QString userFilesRoot()

@@ -24,6 +24,7 @@
 
 #include "capacity.h"
 #include "fw_image.h"
+#include "hardware.h"
 
 namespace ct {
 
@@ -32,10 +33,31 @@ class FirmwareImage
 public:
     // Read and fully validate a .ctf. Returns nullopt with *error set to
     // something a user can act on when the file is missing, unreadable, not a
-    // firmware image, for another product, or corrupt.
+    // firmware image, for another product, or corrupt. A file for another
+    // board is refused by NAME ("firmware for the CAN Triple 2.0") before any
+    // other check, so a user holding the wrong file is told which one it is
+    // rather than that it is too large or corrupt.
     static std::optional<FirmwareImage> load(const QString &path, QString *error);
 
     const FwImageHeader &header() const { return m_header; }
+    quint16 productId() const { return m_header.product_id; }
+    // The board this image runs on: the CAN Triple (1.x) or the CAN Triple 2.0,
+    // the only two load() accepts. An image goes only to a unit of its own
+    // board; the update dialog enforces that.
+    BoardFamily family() const { return familyForProduct(m_header.product_id); }
+    // The application slot on each board, which bounds its images.
+    static quint32 appSlotSize(BoardFamily family);
+    // The newest bootloader of each board this Manager knows, which is what a
+    // file for that board is validated against: an image that asks for more
+    // is one no unit of that board can install.
+    static quint32 newestBootloader(BoardFamily family);
+    // The oldest min_bootloader_version an image for the board may carry. 0 for
+    // the CAN Triple; 3 for the 2.0, whose earlier images were built for the
+    // layout of its provisional firmware and would not start on the 2.0 line.
+    static quint32 oldestImageBootloader(BoardFamily family);
+    // "2.0.1" for a version the 2.0 firmware packed (FwUpdateStatus2); empty
+    // for 0, which means none.
+    static QString packedVersionText(quint32 packed);
     const QByteArray &bytes() const { return m_bytes; }
     quint32 size() const { return static_cast<quint32>(m_bytes.size()); }
 

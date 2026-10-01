@@ -87,11 +87,25 @@ Set **Up** to **Message received** and pick a message, and the counter advances 
 
 ## Preserve value
 
-Ticking **Preserve value** keeps the counter's value across power cycles. The value is written to a small flash store about once a minute, so up to a minute of counting can be lost on a sudden power cut, and the store is reset whenever you send a changed configuration — preserved values never reattach to a different counter.
+Ticking **Preserve value** keeps the counter's value across power cycles. How often it is saved, and how many can be kept, depends on the board the configuration is for (its [target firmware](files.md#target)):
 
-At most **20** values can be preserved, and the store is *shared* between counters and [integrators](integrators.md). The label at the bottom of the dialog shows a running budget of the counters in this list ("Preserved across power cycles: N of 20."); the combined counter + integrator total is enforced by [Check Channels](validation-report.md), which reports an error when the two together exceed 20.
+<table>
+<tr><th></th><th>CAN Triple</th><th>CAN Triple 2.0</th></tr>
+<tr><td>Kept in</td><td>A small flash store</td><td>FRAM: memory with no write
+limit</td></tr>
+<tr><td>Written</td><td>About once a minute</td><td>Every 0.1 s while the
+value changes</td></tr>
+<tr><td>A sudden power cut loses</td><td>Up to a minute of counting</td><td>At
+most 0.1 s of counting</td></tr>
+<tr><td>How many</td><td><b>20</b> counters and integrators together</td><td>Every
+counter and integrator</td></tr>
+</table>
 
-> **Warning:** On a device whose flash has no room for the retained-value store, preserved counters still run but start from their reset value at every power-up. Without **Preserve value**, every counter starts from its reset value at power-up.
+On both, preserved values are reset whenever you send a changed configuration — they never reattach to a different counter.
+
+The limit is shared between counters and [integrators](integrators.md). The label at the bottom of the dialog counts both against it ("Preserved across power cycles: N of 20, counters and integrators together."). [Check Channels](validation-report.md) reports an error when the total is over the target's limit, and **Send Configuration** refuses one that preserves more values than the connected unit keeps.
+
+> **Warning:** On a CAN Triple whose flash has no room for the retained-value store, preserved counters still run but start from their reset value at every power-up. Without **Preserve value**, every counter starts from its reset value at power-up.
 
 ## See also
 

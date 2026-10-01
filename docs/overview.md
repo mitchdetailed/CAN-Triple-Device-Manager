@@ -26,12 +26,31 @@ Viewer… (F4), Reset Device, Device Status…, Set Access
 Passwords…, Update Firmware…, Firmware License Manager…. See
 <a href="online.md">Online: Send, Get &amp; Flash</a>.</td></tr>
 <tr><td><b>Tools</b></td><td>Channel Editor…, Lua Console…, Connection
-Settings… (the serial port belongs to the application, not the
-document).</td></tr>
+Settings… and Theme (the serial port and the look belong to the
+application, not the document). See <a href="#themes">Themes</a>.</td></tr>
 <tr><td><b>Help</b></td><td>Contents… (F1) — this help — and About….</td></tr>
 </table>
 
 The status bar shows the document's file path on the left (or "Unsaved configuration"), and on the right the protected-comms state (only when the document carries a Protected Comms password) and the link state — "Connected: COM5 @ 7372800" or "Not connected".
+
+<a id="themes"></a>
+
+## Themes
+
+**Tools → Theme** sets the colours the whole program is drawn in:
+
+<table>
+<tr><th>Theme</th><th>Look</th></tr>
+<tr><td>Windows Default</td><td>The program as it has always looked: Windows'
+own controls, light or dark as Windows is set.</td></tr>
+<tr><td>Light</td><td>Light grey and white with blue highlights, whatever
+Windows is set to.</td></tr>
+<tr><td>Dark</td><td>Graphite with blue highlights.</td></tr>
+<tr><td>Midnight Blue</td><td>Deep navy with teal highlights.</td></tr>
+<tr><td>Carbon Red</td><td>Near black with red highlights.</td></tr>
+</table>
+
+A theme applies at once, to every window that is open, and the program starts in it next time. It belongs to your Windows account, not to the configuration, so a configuration looks the same to everyone it is sent to. Errors, warnings and notes keep their meaning in every theme, in colours picked to be read on it. This help follows the theme too: on Dark, Midnight Blue and Carbon Red, and on Windows Default when Windows is dark, its pages are drawn in the theme's colours.
 
 ## Where to start
 

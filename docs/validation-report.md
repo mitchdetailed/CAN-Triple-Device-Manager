@@ -29,11 +29,12 @@ behaviour is surprising.</td><td>No</td></tr>
 - A duplicate receive CAN ID on one bus — only the first message would match.
 - A signal that does not fit its frame, or a row with no channel selected.
 - A message relay that forwards to no bus.
-- A Transmit CRC8 message with no CRC channel selected, or a CRC byte location outside the message; more than 20 Transmit CRC8 messages across the buses — the device runs at most 20 CRC8 rules.
+- A Transmit CRC8 message with no CRC channel selected, or a CRC byte location outside the message; more Transmit CRC8 messages across the buses than the device runs — 20 CRC8 rules on a CAN Triple, 100 on a CAN Triple 2.0; a CRC8 recipe using what only a CAN Triple 2.0 has (a byte past Byte 7, an ID (Whole) element or a Data Run) when the target is not one.
+- A bus with a CAN FD data rate above 2 Mbit/s (4M, 5M or 8M) when the target is not a CAN Triple 2.0.
 - A calculation with no output channel, or an input set to "channel" with no channel chosen.
 - A transmit rate outside 1–200 Hz; an integrator rate beyond what the engine evaluates.
 - A lookup table whose outputs do not match its sites, or a blank table axis.
-- More than 20 counters and integrators with Preserve value enabled — the device retains at most 20 across power cycles and would silently drop the excess.
+- More counters and integrators with Preserve value enabled than the target keeps across power cycles — 20 on a CAN Triple — which the device would silently drop.
 
 ### Warnings — examples
 

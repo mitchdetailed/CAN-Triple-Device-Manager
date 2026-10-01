@@ -380,6 +380,53 @@ void testChannelPaneSortsByStartBit()
 // drifts back silently: nothing fails if it reverts, the editor just quietly
 // starts pre-answering a question the user is supposed to answer. New… opens a
 // MODAL editor, so the check runs from a timer inside that modal loop.
+// The Termination Resistor selector follows the connected unit: live with no
+// unit or one that can switch it, greyed with the reason on one that cannot
+// (the CAN Triple 2.0 rev 2.00), whose setting is kept for the units that can.
+QList<QComboBox *> terminationCombos(CommunicationsDialog &d)
+{
+    QList<QComboBox *> out;
+    for (QComboBox *c : d.findChildren<QComboBox *>())
+        if (c->count() == 2 && c->itemText(0) == QStringLiteral("Off")
+            && c->itemText(1) == QStringLiteral("On"))
+            out.append(c);
+    return out;
+}
+
+void testTerminationFollowsTheConnectedUnit()
+{
+    Configuration config;
+    buildConfig(config);
+    {
+        CommunicationsDialog d(&config);
+        const QList<QComboBox *> combos = terminationCombos(d);
+        CHECK(combos.size() == 3);
+        for (QComboBox *c : combos)
+            CHECK(c->isEnabled());
+    }
+    DeviceHardware unit;
+    unit.family = BoardFamily::CanTriple2;
+    unit.reported = true;
+    unit.boardRevMajor = 2;
+    unit.features = HW_FEAT_USB_LINK;
+    {
+        CommunicationsDialog d(&config, nullptr, {}, unit);
+        const QList<QComboBox *> combos = terminationCombos(d);
+        CHECK(combos.size() == 3);
+        for (QComboBox *c : combos) {
+            CHECK(!c->isEnabled());
+            CHECK(c->toolTip().contains(QStringLiteral("cannot switch")));
+        }
+    }
+    unit.boardRevMinor = 1; // a 2.01, whose descriptor says its switches work
+    unit.features |= HW_FEAT_TERMINATION;
+    {
+        CommunicationsDialog d(&config, nullptr, {}, unit);
+        for (QComboBox *c : terminationCombos(d))
+            CHECK(c->isEnabled());
+    }
+}
+
 void testNewOpensAsOff()
 {
     Configuration config;
@@ -787,6 +834,7 @@ int main(int argc, char **argv)
     testEditNeedsASingleRow();
     testRemoveTakesTheWholeSelection();
     testNewOpensAsOff();
+    testTerminationFollowsTheConnectedUnit();
     testChannelPaneSortsByStartBit();
     testTheEditorListIsInFrameOrder();
     testTheTieBreaksDecideTheRest();

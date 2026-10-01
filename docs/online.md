@@ -6,7 +6,9 @@ The Online menu moves configurations between the editor and a connected CAN Trip
 <tr><th>Command</th><th>Shortcut</th><th>What it does</th></tr>
 <tr><td>Connect</td><td></td><td>Opens the serial link. Reuses this session's
 last port; the first connect of a session (or a port that has gone away)
-opens Connection Settings. The status bar's right side shows the result.</td></tr>
+opens Connection Settings. The status bar's right side shows the result, and
+which board answered — CAN Triple or CAN Triple 2.0 — with its firmware
+version.</td></tr>
 <tr><td>Disconnect</td><td></td><td>Closes the serial link. The device keeps
 running its configuration; the live windows simply stop updating.</td></tr>
 <tr><td>Send Configuration</td><td>F5</td><td>Programs the open document onto the device and saves it to flash.</td></tr>
@@ -15,8 +17,9 @@ running its configuration; the live windows simply stop updating.</td></tr>
 <tr><td>Monitor Channels…</td><td>F3</td><td>Live channel values, and per-channel overrides on firmware 1.0.12 — see <a href="monitor.md">Monitoring Live Values</a>.</td></tr>
 <tr><td>CAN Viewer…</td><td>F4</td><td>Raw frame monitor and inject-frame form, with Vector <code>.asc</code>, SocketCAN <code>.log</code> and PEAK <code>.trc</code> export.</td></tr>
 <tr><td>Reset Device</td><td></td><td>Reboots the device; it reloads its saved configuration.</td></tr>
-<tr><td>Device Status…</td><td></td><td>Uptime, bus counters, identity, passwords and fleet information.</td></tr>
+<tr><td>Device Status…</td><td></td><td>Uptime, bus counters, which board it is, identity, passwords and fleet information.</td></tr>
 <tr><td>Get Device Info…</td><td></td><td>The manufacturing record burned into the unit at build: maker, product, hardware version, serial and date, plus the chip's MCU ID.</td></tr>
+<tr><td>LED Brightness…</td><td></td><td>A CAN Triple 2.0's LED brightness, 5 % to 100 % of standard, kept by the unit — see <a href="#brightness">LED Brightness…</a>.</td></tr>
 <tr><td>Set Access Passwords…</td><td></td><td>Device-held function passwords — see <a href="licensing.md">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 <tr><td>Firmware License Manager…</td><td></td><td>Writes the unit's licence: manufacturer, model, version, Firmware Key and FW Updater Password — see <a href="licensing.md">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 </table>
@@ -28,7 +31,8 @@ To program the device with the open document, choose Online → Send Configurati
 2. **Fleet identity check.** The same rules the uploader applies are run against the connected unit. Here a failing rule is *advisory*: it is shown with its reason and a Yes/No question defaulting to No, because Send is the engineer's command and a bench unit is routinely re-loaded. Upload Configuration… is the path that refuses outright.
 3. **Validation.** If the configuration has any Error, the send stops and Check Channels opens — see [Validation &amp; the Config Summary](validation-report.md).
 4. **The Protect Communication gate.** If any message being sent is marked **Protect Communication**, the connected unit must confirm the **Protected Comms** password the configuration carries — any of the unit's four slots will do. A unit that cannot is **refused**, with the reason named: it has no Protected Comms password set, the configuration carries none of its own, the two do not match, or the unit could not even be asked. See [Sending a configuration that contains protected messages](communications.md#protectedsend). When the only Protect Communication messages are switched **Off** — not sent, so the gate does not run — a unit with no Protected Comms password gets a Yes/No warning instead: it cannot guard what those markings promise, and the fix is Online → Set Access Passwords…
-5. **Confirmation.** A dialog summarises what will be sent (messages, channels, math, User Conditions, counters, timers), the bus settings that will be applied, and any mapper warnings. It asks for a required **Configuration Title :** (stored on the device, up to 32 bytes) and offers two checkboxes:
+5. **The target.** A document is checked against its [target firmware](files.md#target), the firmware it was made for. When the connected unit is not that firmware, the configuration is checked again against the unit. Anything the unit cannot run (a CAN Triple 2.0's CRC8 elements or CAN FD data rates above 2 Mbit/s on a CAN Triple, for instance) stops the send with the list, and nothing is sent. Anything that comes out differently on the unit, above all names it keeps shorter, is listed in the confirmation under **On this unit**, so you can cancel. To work on the configuration for that unit, make it the target (File → Target Firmware…) and use Check Channels.
+6. **Confirmation.** A dialog summarises what will be sent (messages, channels, math, User Conditions, counters, timers), the bus settings that will be applied, and any mapper warnings. It asks for a required **Configuration Title :** (stored on the device, up to 32 bytes) and offers two checkboxes:
     - **Lock this configuration to this device** — stores the device's unique chip ID with the configuration, so the device refuses to run it if it is copied to a different CAN Triple. Sending to another device re-binds it. Offered only when the firmware can report a device ID.
     - **Reset device after sending** — reboots the unit once the transfer completes.
 
@@ -93,6 +97,7 @@ One read-only report of what the unit is and what it is doing:
 - Uptime and per-bus receive/transmit frame counters.
 - Active table counts (messages, channels, math, User Conditions).
 - Firmware protocol version.
+- Which board it is — CAN Triple or CAN Triple 2.0, with the board revision where the unit records one — its processor, and the firmware and bootloader versions it runs. Firmware older than 1.0.15 cannot say, and every unit running it is a CAN Triple.
 - MCU ID and whether the stored configuration is locked to a different unit (which is why an apparently inert device shows 0 active messages).
 - Readout protection: whether the flash can be read over the debug port. A licensed unit locks itself at boot from firmware 1.0.9 — see [Readout protection](licensing.md#readout).
 - Which access passwords are set — never their values. This tells you in advance that a Send or Get will ask for a password.
@@ -116,6 +121,8 @@ Who built this board, what it is, and when. Five values, burned into the STM32's
 
 **None of it can ever change.** OTP memory is programmed once and has no erase, so what a unit reports here it reports for the life of the part — which is what makes it worth quoting on a warranty claim, and why this application has no way to write it. Burning the record is a manufacturing step performed once by a separate tool.
 
+Below the record the dialog names the **Board** — CAN Triple or CAN Triple 2.0, with a revision where the unit records one — and its **Processor**. These come from the chip itself rather than from the burned text, so they are right even on a unit whose record was never burned (firmware 1.0.15 and newer).
+
 It is a separate dialog from Device Status for that reason. Device Status answers *what is this device doing*, and every line of it can differ between two readings a second apart. This answers *what is this device*, and no line of it can differ at all.
 
 > **Note:** **Unknown** means that field was never burned. Each field occupies a whole number of double-words and OTP is programmed one double-word at a time, so a board can carry a manufacturer and no serial number — that is what one looks like between two stages of provisioning, and each field is reported on its own. An unburned field reads back as all 0x00 or all 0xFF; neither is a value, so neither is shown as one. A unit whose OTP was never touched at all says so in a sentence rather than as five Unknown rows.
@@ -123,6 +130,17 @@ It is a separate dialog from Device Status for that reason. Device Status answer
 The date is read as DDMMYYYY. A field that is not a readable date is shown exactly as it was burned and labelled as such, rather than corrected to the nearest plausible day — a wrong date presented as a right one is worse than one that visibly does not parse.
 
 No password is needed, deliberately. Nothing here describes a configuration, and an RMA cannot be conditioned on holding the password of the configuration being returned as faulty — so a locked-down unit still answers this. On firmware older than the command the dialog says so and points out that the record is in the chip either way, so nobody concludes the board was never provisioned and burns a second one over the top of it.
+
+<a id="brightness"></a>
+
+## LED Brightness…
+
+Sets how bright a [CAN Triple 2.0](can-triple-2.md)'s lights are, from **100 %**, the standard brightness, down to **5 %** of it. One setting covers every light, and bright and dim change together, so every light still reads the same way (a bus pulsing with traffic still pulses).
+- The unit's lights follow the slider as you drag it, so you can judge the brightness where the unit is mounted. The percentage beside **OK** is the level the slider is at; the arrow keys move it one percent at a time. **OK** sends the brightness to the unit, which keeps it; **Cancel** puts back the brightness it had when the window opened.
+- The unit keeps the setting itself, across restarts and firmware updates. It is not part of the configuration: a Send leaves it alone, and a Get does not read it.
+- Changing it needs the unit's **Send a Configuration** password, when one is set; the window asks for it first.
+- A CAN Triple has no brightness setting, and the command says so.
+- While the unit installs a firmware update, its bootloader shows the update's colours at the standard brightness.
 
 ## After a firmware update
 

@@ -52,7 +52,8 @@ QList<PlannedFrame> passwordFrames(const SecurePackagePolicy &policy)
     // function, and a Manager that predates it relays the stream without the
     // verdict that would have stopped it. Leading, that refusal comes before
     // any other password or any configuration write, so the unit is left
-    // exactly as it was.
+    // exactly as it was. (Only the 1.0.15 probe in buildSecurePackage goes
+    // ahead of it: any firmware that takes the probe takes this too.)
     add(policy.setViewer, policy.viewerKey, AccessFunction::CanViewer, 1,
         QStringLiteral("CAN Viewer"));
     add(policy.setSend, policy.sendKey, AccessFunction::SendConfiguration, 1,
@@ -106,11 +107,49 @@ PackageBuildResult buildSecurePackage(const PackageBuildRequest &request)
     if (fleetKey.size() != kLicenseKeyBytes)
         return fail(QStringLiteral("The Firmware Key could not be derived."));
 
-    QList<PlannedFrame> frames = passwordFrames(request.policy);
-    frames += ConfigTransfer::planInstallFrames(mapped.tables, busSetupsFor(source),
-                                                request.policy.configVersion,
-                                                source.effectiveTitle(),
-                                                sealedInnerPayloadBudget());
+    QList<PlannedFrame> install = ConfigTransfer::planInstallFrames(
+        mapped.tables, busSetupsFor(source), request.policy.configVersion,
+        source.effectiveTitle(), sealedInnerPayloadBudget());
+    // The extended device channels (firmware 1.0.15). A Send can let an older
+    // unit refuse their write and carry on, but a sealed stream cannot: every
+    // Manager that relays one stops at the first refusal, and by the time that
+    // write arrives the configuration has been cleared. So the write rides
+    // only when the configuration READS one of these channels. Otherwise it
+    // is left out, and CLEAR_CONFIG leaves the list empty on 1.0.15, which is
+    // the right state for a configuration that never reads it.
+    const bool needsExt = mapped.readsExtendedDeviceChannels;
+    if (!needsExt) {
+        install.removeIf(
+            [](const PlannedFrame &f) { return f.cmd == CMD_WRITE_DEVICE_CHANNELS_EXT; });
+    }
+    QList<PlannedFrame> frames;
+    // A CAN Triple 2.0 that keeps its names apart gets its records without
+    // them, which a unit keeping names in its records refuses, and on a CAN
+    // Triple (1.x) only AFTER the CLEAR has erased its configuration in place.
+    // So the stream leads with the label store's probe, an empty name write:
+    // only a unit that keeps names answers it, and every other refuses the
+    // stream before anything else is written, whichever Manager relays it.
+    const bool labelsApart = mapped.tables.capacity.labelsApart();
+    if (labelsApart) {
+        PlannedFrame probe;
+        probe.cmd = CMD_WRITE_LABELS;
+        probe.payload = QByteArray(5, '\0'); // kind 0, start 0, count 0
+        probe.stage = QStringLiteral("Checking where the device keeps names");
+        frames.append(probe);
+    }
+    if (needsExt) {
+        // An empty list at the very head: the CLEAR_CONFIG behind it empties
+        // the list anyway, and firmware older than 1.0.15 refuses it as an
+        // unknown command. That refusal is the first thing the unit hears, so
+        // a Manager that predates the install verdict's check still leaves
+        // the unit exactly as it was.
+        PlannedFrame probe;
+        probe.cmd = CMD_WRITE_DEVICE_CHANNELS_EXT;
+        probe.stage = QStringLiteral("Checking the device firmware");
+        frames.append(probe);
+    }
+    frames += passwordFrames(request.policy);
+    frames += install;
     const QByteArray stream = buildSealedStream(fleetKey, frames, &error);
     if (stream.isEmpty())
         return fail(error);
@@ -129,6 +168,8 @@ PackageBuildResult buildSecurePackage(const PackageBuildRequest &request)
     // a unit that holds less BEFORE the first frame rather than have the
     // device NACK the twenty-first with the configuration already erased.
     written.tableCounts = tableCountsOf(mapped.tables);
+    written.needsExtendedDeviceChannels = needsExt;
+    written.needsLabelStore = labelsApart;
     if (!written.isValid())
         return fail(QStringLiteral("The package policy could not be sealed."));
 

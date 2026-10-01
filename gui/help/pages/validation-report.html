@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Validation &amp; the Config Summary</title>
-<link rel="stylesheet" href="help.css">
+<link rel="stylesheet" type="text/css" href="help.css">
 </head>
 <body>
 <h1>Validation &amp; the Config Summary</h1>
@@ -63,17 +63,21 @@ match.</li>
 selected.</li>
 <li>A message relay that forwards to no bus.</li>
 <li>A Transmit CRC8 message with no CRC channel selected, or a CRC byte
-location outside the message; more than 20 Transmit CRC8 messages across the
-buses — the device runs at most 20 CRC8 rules.</li>
+location outside the message; more Transmit CRC8 messages across the buses than
+the device runs — 20 CRC8 rules on a CAN Triple, 100 on a CAN Triple 2.0; a CRC8
+recipe using what only a CAN Triple 2.0 has (a byte past Byte 7, an ID (Whole)
+element or a Data Run) when the target is not one.</li>
+<li>A bus with a CAN FD data rate above 2&nbsp;Mbit/s (4M, 5M or 8M) when the
+target is not a CAN Triple 2.0.</li>
 <li>A calculation with no output channel, or an input set to "channel" with no
 channel chosen.</li>
 <li>A transmit rate outside 1–200 Hz; an integrator rate beyond what the
 engine evaluates.</li>
 <li>A lookup table whose outputs do not match its sites, or a blank table
 axis.</li>
-<li>More than 20 counters and integrators with Preserve value enabled — the
-device retains at most 20 across power cycles and would silently drop the
-excess.</li>
+<li>More counters and integrators with Preserve value enabled than the target
+keeps across power cycles — 20 on a CAN Triple — which the device would
+silently drop.</li>
 </ul>
 
 <h3>Warnings — examples</h3>

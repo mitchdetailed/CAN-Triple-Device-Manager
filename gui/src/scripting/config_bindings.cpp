@@ -219,9 +219,13 @@ QString checkChannelNameLength(lua_State *L, const QString &name)
     if (name.isEmpty()) {
         luaL_error(L, "a channel name cannot be empty");
     }
-    if (name.toUtf8().size() > MAX_CHANNEL_NAME_BYTES) {
+    // What the document's target keeps of a name: 32 bytes on a CAN Triple 2.0,
+    // 31 on a CAN Triple.
+    const Configuration *c = cfg(L);
+    const int limit = c ? c->capacity().channelNameBytes() : MAX_CHANNEL_NAME_BYTES;
+    if (name.toUtf8().size() > limit) {
         luaL_error(L, "channel name '%s' is longer than %d bytes",
-                   name.toUtf8().constData(), MAX_CHANNEL_NAME_BYTES);
+                   name.toUtf8().constData(), limit);
     }
     return name;
 }

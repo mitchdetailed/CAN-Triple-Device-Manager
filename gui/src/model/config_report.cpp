@@ -115,6 +115,12 @@ QString crc8Detail(const CommsSection &s)
                                    : QStringLiteral("ID>>%1").arg(e.value * 8));
         else if (e.type == CommsSection::CrcElement::Data)
             elems << QStringLiteral("Byte %1").arg(e.value);
+        else if (e.type == CommsSection::CrcElement::IdAll)
+            elems << (e.value == 0 ? QStringLiteral("ID (by frame)")
+                                   : QStringLiteral("ID (%1 bytes)").arg(e.value))
+                         + (e.lsbFirst ? QStringLiteral(" LSB first") : QString());
+        else if (e.type == CommsSection::CrcElement::DataRun)
+            elems << QStringLiteral("Bytes %1 to %2").arg(e.value).arg(e.last);
         else
             elems << hex(e.value);
     }

@@ -85,14 +85,16 @@ EditChannelDialog::EditChannelDialog(Configuration *config, const Channel &initi
     auto *nameForm = new QFormLayout(nameGroup);
 
     m_nameEdit = new QLineEdit(nameGroup);
-    // The device label holds MAX_CHANNEL_NAME_BYTES characters; cap typing here
-    // so the limit is felt rather than reported. validate() still checks the
-    // UTF-8 byte count, which a non-ASCII name can exceed within this cap.
-    // BYTES, not characters: setMaxLength counts QChars, and the two part
-    // company the moment a name is not ASCII. See name_limits.h.
-    ct::limitToUtf8Bytes(m_nameEdit, MAX_CHANNEL_NAME_BYTES);
-    m_nameEdit->setToolTip(tr("Up to %1 characters — the device stores a %2-byte label.")
-                               .arg(MAX_CHANNEL_NAME_BYTES).arg(SIGNAL_LABEL_LEN));
+    // The target unit keeps channelNameLimit() bytes of a name (32 on a CAN
+    // Triple 2.0, 31 on a CAN Triple); cap typing here so the limit is felt
+    // rather than reported. BYTES, not characters: setMaxLength counts QChars,
+    // and the two part company the moment a name is not ASCII. See
+    // name_limits.h.
+    ct::limitToUtf8Bytes(m_nameEdit, ct::channelNameLimit(m_config));
+    m_nameEdit->setToolTip(tr("Up to %1 characters — the most of a channel name the target "
+                              "unit keeps. Accented and non-Latin characters take 2-4 bytes "
+                              "of the %1.")
+                               .arg(ct::channelNameLimit(m_config)));
     nameForm->addRow(tr("Channel Name:"), m_nameEdit);
 
     // --- Channel Details group ------------------------------------------
@@ -306,10 +308,10 @@ bool EditChannelDialog::validate()
                              tr("The channel name must not be empty."));
         return false;
     }
-    if (name.toUtf8().size() > MAX_CHANNEL_NAME_BYTES) {
+    if (name.toUtf8().size() > ct::channelNameLimit(m_config)) {
         QMessageBox::warning(this, tr("Edit Custom Channel"),
-                             tr("Channel names are limited to %1 bytes on the device.")
-                                 .arg(MAX_CHANNEL_NAME_BYTES));
+                             tr("Channel names are limited to %1 bytes on the target unit.")
+                                 .arg(ct::channelNameLimit(m_config)));
         return false;
     }
     if (m_dataTypeCombo->currentText().isEmpty()) {

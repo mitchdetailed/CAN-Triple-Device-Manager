@@ -5,9 +5,12 @@
 #include <QMainWindow>
 #include <QPointer>
 
+#include <optional>
+
 #include "../model/configuration.h"
 #include "../model/secure_file.h"
 #include "../protocol/device_link.h"
+#include "../protocol/hardware.h"
 
 class QLabel;
 class QStackedWidget;
@@ -103,6 +106,7 @@ private:
     void onDeviceStatus();
     void onGetDeviceInfo();
     void onUpdateFirmware();
+    void onLedBrightness();
     // Open the manual at one page — context help for dialogs that emit
     // helpRequested(). See HelpWindow::showPage.
     void showHelpPage(const QString &pageFileName);
@@ -131,7 +135,11 @@ private:
     // Do these mapped tables fit the connected unit's reported capacity? Reads
     // CMD_GET_CAPACITY and, on a shortfall, names the tables in a warning
     // titled `title`. False means the caller must not send. See the definition.
-    bool tablesFitDevice(const DeviceTables &tables, const QString &title);
+    // `unit`, when given, gets the capacity the unit reported (builtIn() for
+    // firmware without the report): what tablesForUnit() needs to send in the
+    // unit's own record form.
+    bool tablesFitDevice(const DeviceTables &tables, const QString &title,
+                         DeviceCapacity *unit = nullptr);
 
     // Enables each Calculations item only when the target firmware has that
     // table at all: a variant built without integrators offers no Integrators
@@ -163,6 +171,18 @@ private:
     void updateWindowTitle();
     void updateConnectionStatus();
     bool ensureConnected(); // opens Connection Settings when offline
+    // Ask the unit just connected which board it is (CMD_GET_HARDWARE) and
+    // keep the answer for this connection; the status bar shows it. Quick to
+    // give up on a port with nothing behind it.
+    void identifyConnectedUnit();
+    // Whether the connected unit is its own USB device (the CAN Triple 2.0),
+    // whose port goes away whenever it restarts: its report says so, and a unit
+    // not yet identified is recognised by its port (usb_port.h).
+    bool unitIsUsbDevice() const;
+    // After a restart this window asked for, wait for such a unit's port to
+    // come back and reconnect, with a progress window titled `title`. False,
+    // having said why, when it does not come back.
+    bool reconnectAfterRestart(const QString &port, qint32 baud, const QString &title);
 
     Configuration m_config;
     DeviceLink m_link;
@@ -206,6 +226,10 @@ private:
     // almost always the answer.
     QString m_lastPort;
     qint32 m_lastBaud = 0;
+    // Which board is on the other end of the link, as it answered when this
+    // connection was made (identifyConnectedUnit). Empty while disconnected,
+    // and when the unit did not answer.
+    std::optional<DeviceHardware> m_deviceHardware;
     // Monitor Channels asked for with no document open: the user agreed to
     // read the device's configuration first, and the monitor opens when that
     // Get finishes (onMonitorChannels; runGetTransfer's finished handler).

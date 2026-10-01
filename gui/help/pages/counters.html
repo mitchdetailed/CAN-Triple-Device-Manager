@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Up/Down Counters</title>
-<link rel="stylesheet" href="help.css">
+<link rel="stylesheet" type="text/css" href="help.css">
 </head>
 <body>
 <h1>Up/Down Counters</h1>
@@ -165,19 +165,32 @@ holding a latch is usually the better gate.</p>
 <h2>Preserve value</h2>
 
 <p>Ticking <b>Preserve value</b> keeps the counter's value across power
-cycles. The value is written to a small flash store about once a minute, so up
-to a minute of counting can be lost on a sudden power cut, and the store is
-reset whenever you send a changed configuration — preserved values never
-reattach to a different counter.</p>
+cycles. How often it is saved, and how many can be kept, depends on the board
+the configuration is for (its <a href="files.html#target">target firmware</a>):</p>
 
-<p>At most <b>20</b> values can be preserved, and the store is <em>shared</em>
-between counters and <a href="integrators.html">integrators</a>. The label at
-the bottom of the dialog shows a running budget of the counters in this list
-("Preserved across power cycles: N of 20."); the combined counter + integrator
-total is enforced by <a href="validation-report.html">Check Channels</a>, which
-reports an error when the two together exceed 20.</p>
+<table>
+<tr><th></th><th>CAN Triple</th><th>CAN Triple 2.0</th></tr>
+<tr><td>Kept in</td><td>A small flash store</td><td>FRAM: memory with no write
+limit</td></tr>
+<tr><td>Written</td><td>About once a minute</td><td>Every 0.1&nbsp;s while the
+value changes</td></tr>
+<tr><td>A sudden power cut loses</td><td>Up to a minute of counting</td><td>At
+most 0.1&nbsp;s of counting</td></tr>
+<tr><td>How many</td><td><b>20</b> counters and integrators together</td><td>Every
+counter and integrator</td></tr>
+</table>
 
-<p class="warn">On a device whose flash has no room for the retained-value
+<p>On both, preserved values are reset whenever you send a changed
+configuration — they never reattach to a different counter.</p>
+
+<p>The limit is shared between counters and <a href="integrators.html">integrators</a>.
+The label at the bottom of the dialog counts both against it ("Preserved
+across power cycles: N of 20, counters and integrators together.").
+<a href="validation-report.html">Check Channels</a> reports an error when the
+total is over the target's limit, and <b>Send Configuration</b> refuses one that
+preserves more values than the connected unit keeps.</p>
+
+<p class="warn">On a CAN Triple whose flash has no room for the retained-value
 store, preserved counters still run but start from their reset value at every
 power-up. Without <b>Preserve value</b>, every counter starts from its reset
 value at power-up.</p>

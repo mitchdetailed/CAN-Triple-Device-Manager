@@ -121,6 +121,14 @@ QString settingsDirectory();
 // empty one to point at.
 QString firmwareImagesDirectory();
 
+// {app}\Firmware\CAN Triple 2.0, holding can-triple-2-<version>.ctf: the CAN
+// Triple 2.0's firmware, one folder down because beside the 1.x image it would
+// outrank it (cmake/stage_firmware.cmake says why; the folder name is spelled
+// there too, and in the installer's cleanup). Where Update Firmware opens when
+// the unit on the cable is a CAN Triple 2.0. Same rule as above: nothing
+// creates it, so a caller checks exists().
+QString firmwareImagesDirectoryV2();
+
 // Documents/CAN Triple Device Manager — the parent of the two user folders,
 // unchanged from the releases that created them.
 QString userFilesRoot();

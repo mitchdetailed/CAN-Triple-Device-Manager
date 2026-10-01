@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Constants</title>
-<link rel="stylesheet" href="help.css">
+<link rel="stylesheet" type="text/css" href="help.css">
 </head>
 <body>
 <h1>Constants</h1>
@@ -37,8 +37,8 @@ constants."</p>
 <p>The <b>Constant</b> editor holds two groups plus the Active tick:</p>
 
 <ul>
-<li><b>Channel Name</b> — <b>Channel Name:</b>, up to 31 characters (the device
-stores a 32-byte label). A new constant starts as "New Constant" with the name
+<li><b>Channel Name</b> — <b>Channel Name:</b>, up to 31 bytes (32 on a
+<a href="can-triple-2.html#names">CAN Triple 2.0</a>). A new constant starts as "New Constant" with the name
 selected for typing over.</li>
 <li><b>Constant Details</b>:
   <ul>
@@ -64,9 +64,11 @@ value is not written on the device.</li>
 <p>OK enforces the same rules as the other channel editors:</p>
 
 <ul>
-<li>The name must not be empty, and must fit the device's 31-byte label budget —
-a name with non-ASCII characters can exceed the byte limit within the character
-cap and is refused with "Names are limited to 31 bytes on the device."</li>
+<li>The name must not be empty, and must fit what the target unit keeps of a
+name: 31 bytes on a CAN Triple, 32 on a CAN Triple 2.0. A name with non-ASCII
+characters can exceed the byte limit within the character cap and is refused
+with "Names are limited to 31 bytes on the target unit." (32 for a CAN
+Triple 2.0).</li>
 <li>No two constants may share a name (case-insensitive): "A constant named
 &quot;X&quot; already exists."</li>
 <li>A constant may not take the name of an unrelated existing channel — it

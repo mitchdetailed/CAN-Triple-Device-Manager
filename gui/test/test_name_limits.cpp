@@ -169,6 +169,53 @@ void testAConstantsNameStopsToo()
     CHECK(probe.text().toUtf8().size() == MAX_CHANNEL_NAME_BYTES);
 }
 
+// A CAN Triple 2.0 keeps its names apart from its records, 32 bytes of every
+// one, so a document targeting one holds 32-byte channel AND message names; the
+// same fields on a 1.x document stop where they always did.
+void testA20TargetKeepsThirtyTwoBytes()
+{
+    DeviceCapacity cap20 = DeviceCapacity::builtIn();
+    cap20.labelBytes = LABEL_STORE_BYTES;
+    cap20.reported = true;
+    Configuration on20;
+    on20.clear();
+    on20.setCapacity(cap20);
+    Configuration onX;
+    onX.clear();
+    CHECK(channelNameLimit(&on20) == 32 && messageNameLimit(&on20) == 32);
+    CHECK(channelNameLimit(&onX) == MAX_CHANNEL_NAME_BYTES
+          && messageNameLimit(&onX) == MAX_MESSAGE_NAME_BYTES);
+    CHECK(channelNameLimit(nullptr) == MAX_CHANNEL_NAME_BYTES
+          && messageNameLimit(nullptr) == MAX_MESSAGE_NAME_BYTES);
+
+    CommsSection s;
+    s.device = SectionDevice::ReceiveMessage;
+    s.baseAddress = 0x640;
+    s.messageLengthBytes = 8;
+    SectionEditorDialog sectionDialog(&on20, s, 0, {}, -1);
+    QLineEdit *msg = sectionNameField(sectionDialog);
+    REQUIRE(msg != nullptr);
+    msg->setText(QStringLiteral("Engine Broadcast Frame Alpha")); // 28 bytes: whole
+    CHECK(msg->text() == QStringLiteral("Engine Broadcast Frame Alpha"));
+    msg->setText(QStringLiteral("Engine Broadcast Frame Alpha Bravo")); // 34 bytes
+    std::printf("  34 ASCII into a 2.0's name  : '%s' (%d bytes)\n",
+                qPrintable(msg->text()), int(msg->text().toUtf8().size()));
+    CHECK(msg->text().toUtf8().size() == 32);
+
+    EditChannelDialog channelDialog(&on20, Channel{}, true);
+    QLineEdit *chan = channelNameField(channelDialog);
+    REQUIRE(chan != nullptr);
+    chan->setText(QStringLiteral("Coolant Temperature Sensor Bank One")); // 35 bytes
+    CHECK(chan->text().toUtf8().size() == 32);
+    // Eleven 3-byte characters is 33 bytes: ten fit, never ten and a part.
+    QString wide;
+    for (int i = 0; i < 11; ++i)
+        wide += QString::fromUtf8("\xe6\xb8\xa9");
+    chan->setText(wide);
+    CHECK(chan->text().size() == 10 && chan->text().toUtf8().size() == 30);
+    CHECK(!chan->text().contains(QChar(0xFFFD)));
+}
+
 void testTypingCharacterByCharacterStopsAtTheBudget()
 {
     // Not just a paste: the cap has to hold while a name is typed, and the
@@ -199,6 +246,7 @@ int main(int argc, char **argv)
     testAMessageNameStopsAtSeventeenBytes();
     testAChannelNameStopsAtThirtyOneBytes();
     testAConstantsNameStopsToo();
+    testA20TargetKeepsThirtyTwoBytes();
     testTypingCharacterByCharacterStopsAtTheBudget();
 
     if (fails == 0)

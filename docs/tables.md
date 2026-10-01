@@ -21,7 +21,7 @@ To add a table, choose **Calculations → Tables…**. The dialog lists every ta
 ## Editing a 2x16 table
 
 The **2x16 Table** editor holds:
-- **Output Channel** — **Channel Name:** (up to 31 characters — the device stores a 32-byte label), **Data Type:** and **Decimal Places:**, exactly as for a [constant](constants.md). The type and decimals set the range and precision the output cells accept.
+- **Output Channel** — **Channel Name:** (up to 31 bytes, 32 on a CAN Triple 2.0), **Data Type:** and **Decimal Places:**, exactly as for a [constant](constants.md). The type and decimals set the range and precision the output cells accept.
 - **Input Axis** — **Input:** plus **Select…** picks the channel the table reads, and **Interpolated** / **Discrete (centered)** chooses how values between sites are resolved (see below). The axis cells take the picked channel's range and decimal places.
 - **Sites and Output Values** — a two-row grid, **Axis** above **Output**, with 16 numbered columns. As the dialog itself says: "Fill only the sites you need (left to right, up to 16) — they auto-sort ascending. Each site needs an output; Delete clears a cell. Values are limited to their channel's range/decimals."
 
@@ -66,7 +66,7 @@ Each axis resolves the live input independently, in one of two modes:
 In an 8x8 table the two axes may mix modes freely; the output blends bilinearly over the interpolated axes while a discrete axis contributes its nearest row or column. On both table types the input is **clamped to the end sites**: below the first site the first output applies, above the last site the last output applies — a table never extrapolates. On a partly filled table "the end sites" means the last site you filled, not the eighth column: an 8x8 using three X sites clamps at the third, and the unused cells are never read.
 
 ## Output channel name rules
-- The name must not be empty and must fit the 31-byte device label budget.
+- The name must not be empty and must fit what the target unit keeps of a name: 31 bytes on a CAN Triple, 32 on a CAN Triple 2.0.
 - "The output channel must differ from the axis input." — a table cannot write the channel it reads.
 - No two tables may output to the same channel: "A table already outputs to "X"."
 - The name may not collide with an unrelated existing channel: "A channel named "X" already exists. Choose a different name."

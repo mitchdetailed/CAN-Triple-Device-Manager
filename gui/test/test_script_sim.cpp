@@ -217,6 +217,48 @@ void testCostIsThisTick()
     CHECK(loopSim.step(symbols().signalIndex).cost == loop.cost);
 }
 
+void testTheCostModelFollowsTheTarget()
+{
+    // A document for a CAN Triple 2.0 is charged the 2.0's table, which the
+    // unit states in its capacity report, and the script editor holds a
+    // ScriptCostScope for its document's target. A table of 3s and a budget
+    // of 7000 make every charge visible against the 1.x model's 1s and 2000.
+    const QByteArray img = compileOrDie("function on_tick()\n"
+                                        "    setSig(\"Out A\", sig(\"Engine RPM\") * 2)\n"
+                                        "end\n");
+    ScriptSimulator sim;
+    CHECK(sim.load(img) == SCRIPT_OK);
+    CHECK(sim.budget() == SCRIPT_TICK_BUDGET);
+    const quint32 plain = sim.step(symbols().signalIndex).cost; // loads, a multiply, a store: 1 each
+    CHECK(plain > 0);
+
+    DeviceCapacity target = DeviceCapacity::builtIn();
+    target.scriptCosts = QByteArray(CAPACITY_SCRIPT_OPS, char(3));
+    target.scriptBudget = 7000;
+    {
+        const ScriptCostScope scope(target);
+        CHECK(sim.budget() == 7000);
+        const auto r = sim.step(symbols().signalIndex);
+        CHECK(r.fault == SCRIPT_FAULT_NONE);
+        CHECK(r.cost == 3 * plain);
+        const auto listed = ScriptCompiler::compile(
+            QStringLiteral("function on_tick()\n"
+                           "    setSig(\"Out A\", sig(\"Engine RPM\") * 2)\n"
+                           "end\n"),
+            symbols());
+        CHECK(listed.ok && listed.straightLineCost == 3 * quint32(listed.instructionCount));
+
+        // A tick stops at the target's budget, not the 1.x one.
+        DeviceCapacity tight = target;
+        tight.scriptBudget = int(3 * plain) - 1;
+        const ScriptCostScope tighter(tight);
+        CHECK(sim.step(symbols().signalIndex).fault == SCRIPT_FAULT_BUDGET);
+    }
+    CHECK(sim.budget() == SCRIPT_TICK_BUDGET);
+    CHECK(sim.load(img) == SCRIPT_OK); // the budget fault suspended it
+    CHECK(sim.step(symbols().signalIndex).cost == plain);
+}
+
 void testRunawayFaultsRatherThanHangs()
 {
     ScriptSimulator sim;
@@ -521,6 +563,51 @@ void testGetKeepsTheBytecodeAndSendsItBackByteForByte()
     const MappingResult third = mapWithScript(again);
     CHECK(third.ok());
     CHECK(chunkBytes(third.tables.scriptChunks) == chunkBytes(sent.tables.scriptChunks));
+}
+
+// A script that reads a Tx Dropped channel (firmware 1.0.15's extended device
+// channels) has to be noticed, because a sealed package carries the list those
+// channels are published through only when something reads them
+// (package_builder.cpp). The mapper cannot see a script's reads: the script
+// names the channel and the image holds a slot. So mapWithScript asks the
+// image, and it must answer for both kinds of document, one with source and
+// one read back off a device, which holds the image alone.
+void testAScriptReadingTxDroppedIsNoticed()
+{
+    Configuration plain;
+    buildConfig(plain, kEchoScript);
+    const MappingResult echo = mapWithScript(plain);
+    CHECK(echo.ok());
+    CHECK(!echo.readsExtendedDeviceChannels);
+
+    Configuration authored;
+    buildConfig(authored,
+                "function on_tick()\n"
+                "    setSig(\"Fan Request\", sig(\"Device CAN2 Tx Dropped\") > 0)\n"
+                "end\n");
+    const MappingResult sent = mapWithScript(authored);
+    CHECK(sent.ok());
+    CHECK(sent.readsExtendedDeviceChannels);
+    // The tables alone cannot tell: the script is the only reader.
+    CHECK(!mapToDevice(authored).readsExtendedDeviceChannels);
+
+    Configuration fresh;
+    mapFromDevice(asReadFromDevice(sent.tables), fresh, nullptr);
+    CHECK(!fresh.hasScriptSource());
+    CHECK(!fresh.scriptBytecode().isEmpty());
+    const MappingResult resent = mapWithScript(fresh);
+    CHECK(resent.ok());
+    CHECK(resent.readsExtendedDeviceChannels);
+
+    // A header-list device channel is not an extended one.
+    Configuration ontime;
+    buildConfig(ontime,
+                "function on_tick()\n"
+                "    setSig(\"Fan Request\", sig(\"Device OnTime\") > 10)\n"
+                "end\n");
+    const MappingResult o = mapWithScript(ontime);
+    CHECK(o.ok());
+    CHECK(!o.readsExtendedDeviceChannels);
 }
 
 void testASourceSupersedesTheRetainedBytecode()
@@ -950,6 +1037,7 @@ int main()
     testStatePersistsAcrossTicks();
     testResetRerunsInitialisers();
     testCostIsThisTick();
+    testTheCostModelFollowsTheTarget();
     testRunawayFaultsRatherThanHangs();
     testEmptyAndUnloadedAreQuiet();
 
@@ -960,6 +1048,7 @@ int main()
 
     testGetKeepsTheBytecodeAndSendsItBackByteForByte();
     testASourceSupersedesTheRetainedBytecode();
+    testAScriptReadingTxDroppedIsNoticed();
     testEveryWriterKeepsThePairInStep();
     testACorruptImageIsRefusedAtGet();
     testACorruptImageIsRefusedBeforeTheSendClearsTheDevice();

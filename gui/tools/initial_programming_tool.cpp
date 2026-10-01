@@ -68,8 +68,14 @@
 // separately, unless --yes or --unlock (which erases everything already) was
 // given.
 //
+// It also reads WHICH BOARD is attached, from the processor's package code, in
+// the same read-only probe. The images it carries are the CAN Triple (1.x)
+// board's, so a CAN Triple 2.0 — or anything that is not a CAN Triple — is
+// turned away before anything is erased or written.
+//
 // Exit 0 on success, 1 on any failure, so it can gate a provisioning script.
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -81,8 +87,23 @@
 #include <windows.h>
 
 #include "fw_image.h"
+#include "protocol.h"
 
 namespace {
+
+// Which board a chip is, from the STM32's own registers (RM0440 §47.6.1 and
+// §48.2): the debug ID of the G47x/G48x line, and the package code each
+// board's part reads. Kept here because the public tree's protocol.h carries
+// only what the device-core library needs; where the firmware's own protocol.h
+// is in reach (the private build), they are held to its values.
+constexpr uint32_t kDevIdStm32G47x = 0x469u;
+constexpr uint32_t kPackageLqfp100 = 0x02u; // CAN Triple 2.0 (STM32G474VET)
+constexpr uint32_t kPackageLqfp48 = 0x0Bu;  // CAN Triple (STM32G473CB)
+#ifdef HW_DEV_ID_STM32G47X
+static_assert(kDevIdStm32G47x == HW_DEV_ID_STM32G47X, "the firmware's G47x debug ID");
+static_assert(kPackageLqfp100 == HW_PACKAGE_LQFP100, "the firmware's 2.0 package code");
+static_assert(kPackageLqfp48 == HW_PACKAGE_LQFP48, "the firmware's 1.x package code");
+#endif
 
 // ---------------------------------------------------------------- utilities
 
@@ -287,6 +308,70 @@ int rdpLevelOf(uint32_t optr)
     return rdp == 0xAAu ? 0 : (rdp == 0xCCu ? 2 : 1);
 }
 
+// WHICH BOARD is on the other end of the cable. There are two, and each takes
+// its own firmware: the CAN Triple (1.x) carries a 48-pin STM32G473 and the
+// CAN Triple 2.0 a 100-pin STM32G474, whose pins this tool's images would
+// drive wrongly. ST writes the package code and the flash size into every part
+// at the factory, beside the debug ID code, so the processor names its board
+// with no code running on it.
+//
+// Read in the probe, AFTER the option register: on a protected part these
+// reads may be refused, OpenOCD stops at the first command that fails, and the
+// protection check needs the option register to be in the log first. OpenOCD
+// prints the addresses in lower case ("0x1fff7500: 0000000b"); the search
+// below does not depend on that.
+const char kIdcodeRead[] = "mdw 0xe0042000";    // DBGMCU_IDCODE
+const char kPackageRead[] = "mdw 0x1fff7500";   // package data, PKG[4:0]
+const char kFlashSizeRead[] = "mdw 0x1fff75e0"; // flash size in KB, low half
+
+// The value the LAST "mdw <address>" line printed, like optrIn.
+bool mdwValueIn(const std::string &text, const char *address, uint32_t *value)
+{
+    std::string lower(text);
+    for (char &c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    std::string key(address);
+    for (char &c : key)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    key += ": ";
+    const size_t at = lower.rfind(key);
+    if (at == std::string::npos)
+        return false;
+    const char *start = lower.c_str() + at + key.size();
+    char *end = nullptr;
+    const unsigned long v = std::strtoul(start, &end, 16);
+    if (end == start)
+        return false;
+    *value = static_cast<uint32_t>(v);
+    return true;
+}
+
+enum class Board { CanTriple, CanTriple2, Other, Unreadable };
+
+struct Chip {
+    uint32_t devId = 0;
+    uint32_t package = 0;
+    uint32_t flashKb = 0;
+};
+
+Board boardIn(const std::string &text, Chip *chip)
+{
+    uint32_t idcode = 0, pkg = 0, flash = 0;
+    if (!mdwValueIn(text, "0xe0042000", &idcode) || !mdwValueIn(text, "0x1fff7500", &pkg)
+        || !mdwValueIn(text, "0x1fff75e0", &flash))
+        return Board::Unreadable;
+    chip->devId = idcode & 0xFFFu;
+    chip->package = pkg & 0x1Fu;
+    chip->flashKb = flash & 0xFFFFu;
+    if (chip->devId != kDevIdStm32G47x)
+        return Board::Other;
+    if (chip->package == kPackageLqfp100)
+        return Board::CanTriple2;
+    if (chip->package == kPackageLqfp48)
+        return Board::CanTriple;
+    return Board::Other;
+}
+
 // "initial-programming-unlock.log" -> "initial-programming-unlock-probe.log":
 // a follow-up run's log sits beside the one it follows.
 std::string siblingLog(const std::string &logPath, const char *suffix)
@@ -427,14 +512,16 @@ int runLogged(const std::string &cmd, std::string &logPath, std::string &text)
 }
 
 // A read-only look at the chip: the flash driver's probe, which logs "RDP level
-// n" and "flash mode : dual-bank" for a person reading the log, and the option
-// register itself for the tool. Nothing is halted, erased or written, so it is
-// safe against a unit that is running.
+// n" and "flash mode : dual-bank" for a person reading the log, the option
+// register itself for the tool, and then the three reads that say which board
+// this is (boardIn). Nothing is halted, erased or written, so it is safe
+// against a unit that is running.
 int runOpenocdProbe(const std::string &ocd, const std::string &scripts,
                     std::string &logPath, std::string &text)
 {
     return runLogged(openocdPrefix(ocd, scripts) + " -c \"init\" -c \"flash probe 0\""
-                         + " -c \"" + kOptrRead + "\" -c \"shutdown\"",
+                         + " -c \"" + kOptrRead + "\" -c \"" + kIdcodeRead + "\" -c \""
+                         + kPackageRead + "\" -c \"" + kFlashSizeRead + "\" -c \"shutdown\"",
                      logPath, text);
 }
 
@@ -778,6 +865,40 @@ int main(int argc, char **argv)
     if (rdpLevelOf(optr) != 0) {
         // Only reachable without --unlock: the unlock's own check demands level 0.
         printProtectedStatement();
+        return finish(1, assumeYes);
+    }
+
+    // ------------------------------------------------- which board this is
+    //
+    // Before the bank switch and before programming, because both would put
+    // this tool's images, or erase a chip for them, on whatever is attached.
+    // The images here are the CAN Triple (1.x) board's; a CAN Triple 2.0 needs
+    // its own, and anything else is not a CAN Triple at all.
+    Chip chip;
+    switch (boardIn(probe, &chip)) {
+    case Board::CanTriple:
+        std::printf("  the processor is a 48-pin STM32G47x: a CAN Triple.\n");
+        break;
+    case Board::CanTriple2:
+        std::printf("\n  This unit is a CAN Triple 2.0 (a 100-pin STM32G474). This tool installs\n"
+                    "  firmware for the CAN Triple (1.x), which does not run on the 2.0.\n"
+                    "  Nothing was written.\n"
+                    "\n  Action Not Completed.\n");
+        return finish(1, assumeYes);
+    case Board::Other:
+        std::printf("\n  This does not look like a CAN Triple: its processor reports device ID\n"
+                    "  0x%03X, package code 0x%02X and %u KB of flash. Nothing was written.\n"
+                    "\n  Action Not Completed.\n",
+                    static_cast<unsigned>(chip.devId), static_cast<unsigned>(chip.package),
+                    static_cast<unsigned>(chip.flashKb));
+        return finish(1, assumeYes);
+    case Board::Unreadable:
+        std::printf("\n  FAILED  could not identify the processor (OpenOCD exit code %d), so\n"
+                    "  nothing was written. The tail of its log (%s):\n\n",
+                    probeExit, probeLog.c_str());
+        printLogTail(probe);
+        explainFailure(probe);
+        std::printf("\n  Nothing was programmed. Fix the cause above and run again.\n");
         return finish(1, assumeYes);
     }
 

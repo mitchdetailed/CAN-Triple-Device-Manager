@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Lookup Tables</title>
-<link rel="stylesheet" href="help.css">
+<link rel="stylesheet" type="text/css" href="help.css">
 </head>
 <body>
 <h1>Lookup Tables</h1>
@@ -50,8 +50,8 @@ most 8 2x16 tables" (or 8x8 tables).</p>
 <p>The <b>2x16 Table</b> editor holds:</p>
 
 <ul>
-<li><b>Output Channel</b> — <b>Channel Name:</b> (up to 31 characters — the
-device stores a 32-byte label), <b>Data Type:</b> and <b>Decimal Places:</b>,
+<li><b>Output Channel</b> — <b>Channel Name:</b> (up to 31 bytes, 32 on a
+CAN Triple 2.0), <b>Data Type:</b> and <b>Decimal Places:</b>,
 exactly as for a <a href="constants.html">constant</a>. The type and decimals
 set the range and precision the output cells accept.</li>
 <li><b>Input Axis</b> — <b>Input:</b> plus <b>Select…</b> picks the channel the
@@ -174,7 +174,8 @@ read.</p>
 <h2>Output channel name rules</h2>
 
 <ul>
-<li>The name must not be empty and must fit the 31-byte device label budget.</li>
+<li>The name must not be empty and must fit what the target unit keeps of a
+name: 31 bytes on a CAN Triple, 32 on a CAN Triple 2.0.</li>
 <li>"The output channel must differ from the axis input." — a table cannot
 write the channel it reads.</li>
 <li>No two tables may output to the same channel: "A table already outputs to

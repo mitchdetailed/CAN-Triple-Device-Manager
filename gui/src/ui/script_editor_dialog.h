@@ -110,6 +110,10 @@ private:
     void reportResult(const ScriptSimulator::TickResult &r, quint32 peak, int ranTicks);
 
     Configuration &m_config;
+    // The document's target's cost model, in force while the editor is open:
+    // its straight-line cost, the listing's charges and the simulator's budget
+    // are the unit's (a CAN Triple 2.0 charges its own table).
+    ScriptCostScope m_costs;
     ScriptSimulator m_sim;
     ScriptSymbols m_symbols;
     // False when the configuration itself will not map (so channel names cannot

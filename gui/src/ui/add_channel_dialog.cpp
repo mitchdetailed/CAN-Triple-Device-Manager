@@ -1,4 +1,5 @@
 #include "add_channel_dialog.h"
+#include "theme.h"
 #include "hex_input.h"
 
 #include <QCheckBox>
@@ -246,7 +247,7 @@ AddChannelDialog::AddChannelDialog(Configuration *config, const CommsChannelRow 
 
     m_errorLabel = new QLabel;
     m_errorLabel->setWordWrap(true);
-    m_errorLabel->setStyleSheet(QStringLiteral("color: #b00020;"));
+    m_errorLabel->setStyleSheet(colorRule(errorColor(palette())));
     layout->addWidget(m_errorLabel);
 
     m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);

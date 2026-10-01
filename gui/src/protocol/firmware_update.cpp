@@ -49,8 +49,11 @@ FirmwareUpdater::FirmwareUpdater(DeviceLink *link, QObject *parent)
 {
 }
 
-bool FirmwareUpdater::readStatus(FwUpdateStatus *out, QString *error)
+bool FirmwareUpdater::readStatus(FwUpdateStatus *out, QString *error,
+                                 std::optional<FwUpdateStatus2> *copies)
 {
+    if (copies)
+        copies->reset(); // until a reply says otherwise
     QByteArray reply;
     quint8 errCode = 0;
     if (!m_link->requestSync(CMD_FW_UPDATE_STATUS, QByteArray(), &reply, error,
@@ -68,7 +71,10 @@ bool FirmwareUpdater::readStatus(FwUpdateStatus *out, QString *error)
         }
         return false;
     }
-    if (reply.size() != sizeof(FwUpdateStatus)) {
+    // At least the 32 bytes every unit sends. A CAN Triple 2.0 appends its
+    // firmware copies, and this read used to demand exactly 32, which refused
+    // every 2.0 status as "unexpected".
+    if (reply.size() < int(sizeof(FwUpdateStatus))) {
         if (error) {
             *error = QCoreApplication::translate(
                 "FirmwareUpdater", "Unexpected status reply (%1 bytes, expected %2).")
@@ -78,7 +84,34 @@ bool FirmwareUpdater::readStatus(FwUpdateStatus *out, QString *error)
         return false;
     }
     std::memcpy(out, reply.constData(), sizeof(FwUpdateStatus));
+    if (copies) {
+        if (reply.size() >= int(sizeof(FwUpdateStatus) + sizeof(FwUpdateStatus2))) {
+            FwUpdateStatus2 ext {};
+            std::memcpy(&ext, reply.constData() + sizeof(FwUpdateStatus), sizeof(ext));
+            *copies = ext;
+        } else {
+            copies->reset();
+        }
+    }
     return true;
+}
+
+bool FirmwareUpdater::confirm(QString *error)
+{
+    quint8 errCode = 0;
+    // The unit writes a record to flash before it ACKs, so allow the flash
+    // timeout. A retry after a lost ACK is harmless: confirming twice keeps
+    // the same image twice.
+    if (m_link->requestSync(CMD_FW_CONFIRM, QByteArray(), nullptr, error,
+                            DeviceLink::kFlashTimeoutMs, DeviceLink::kDefaultRetries,
+                            &errCode)) {
+        return true;
+    }
+    if (errCode == ERR_INVALID_CMD)
+        return true; // the 1.x line: nothing is ever on trial
+    if (error)
+        *error = describeNack(errCode, *error);
+    return false;
 }
 
 bool FirmwareUpdater::upload(const FirmwareImage &image, QString *error)

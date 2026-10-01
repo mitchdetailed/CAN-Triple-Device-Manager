@@ -1,5 +1,6 @@
 // File > Check Channels — validation report dialog.
 #include "check_channels_dialog.h"
+#include "theme.h"
 #include "window_memory.h"
 
 #include <QDialogButtonBox>
@@ -161,13 +162,13 @@ void CheckChannelsDialog::recheck()
 
     if (errorCount == 0 && warningCount == 0) {
         m_summaryLabel->setText(tr("No problems found."));
-        m_summaryLabel->setStyleSheet(QStringLiteral("color: green;"));
+        m_summaryLabel->setStyleSheet(colorRule(okColor(palette())));
     } else {
         m_summaryLabel->setText(tr("%1 errors, %2 warnings.")
                                     .arg(errorCount)
                                     .arg(warningCount));
         m_summaryLabel->setStyleSheet(errorCount > 0
-                                          ? QStringLiteral("color: red;")
+                                          ? colorRule(errorColor(palette()))
                                           : QString());
     }
 }

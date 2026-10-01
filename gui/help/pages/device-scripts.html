@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Device Scripts</title>
-<link rel="stylesheet" href="help.css">
+<link rel="stylesheet" type="text/css" href="help.css">
 </head>
 <body>
 <h1>Device Scripts</h1>
@@ -101,13 +101,24 @@ tick — either by exhausting the budget or by hitting the device's cycle ceilin
 whichever comes first. Ordinary logic does not come close to the limit; if yours
 does, it is looping.</p>
 
-<p>Not every instruction costs the same, because on this processor floating-point
-work is done in software. A divide costs about three times an add, and
+<p>Not every instruction costs the same, because on the CAN Triple's processor
+floating-point work is done in software. A divide costs about three times an add, and
 <code>sqrt</code>, <code>floor</code>, <code>ceil</code>, <code>round</code>,
 <code>%</code>, <code>clamp</code> and <code>wrap</code>
 cost more still — so the budget charges them more. That is why replacing a
 divide with a multiply, or hoisting a <code>sqrt</code> out of a loop, buys more
 than it looks like it should.</p>
+
+<p>A <b>CAN Triple 2.0</b> does floating-point work in hardware and charges its
+own, finer-grained costs: a load, a move or a jump costs 1, arithmetic,
+comparisons and reading or writing a channel 2, <code>sqrt</code>,
+<code>floor</code>, <code>ceil</code>, <code>round</code> and the bitwise
+operations 3, <code>wrap</code> 4 and <code>%</code> 5, against a budget of
+2000. Its units are about half the size of the CAN Triple's, so the same script
+costs more of them for about the same time. The unit tells the Device Manager
+its costs, so when the document's target is a CAN Triple 2.0, the figures under
+the editor, the disassembly and the simulator all use them, and a script the
+simulator runs inside the budget runs inside it on the unit.</p>
 
 <h2>The two ways a script can be stopped</h2>
 

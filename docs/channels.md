@@ -141,7 +141,7 @@ state.</td></tr>
 
 ### Load
 
-Five channels, from firmware 1.0.13, say whether the device is keeping up with the traffic and the configuration it has been given.
+These channels say whether the device is keeping up with the traffic and the configuration it has been given. Rx Dropped, CPU Load and Loop Time need device firmware 1.0.13 or newer, and Tx Dropped needs 1.0.15. On older firmware they read 0. If you send a configuration that reads a Tx Dropped channel to a unit on older firmware, **Send Configuration** says so when it finishes.
 
 <table>
 <tr><th>Channel</th><th>Type</th><th>Meaning</th></tr>
@@ -149,6 +149,9 @@ Five channels, from firmware 1.0.13, say whether the device is keeping up with t
 <td>Frames bus <i>n</i> delivered that the device lost before it could act on
 them, since power-up. <b>At least</b> this many — see below. On a healthy unit
 it stays at 0.</td></tr>
+<tr><td>Device CAN<i>n</i> Tx Dropped</td><td>u32</td>
+<td>Frames the device was asked to send on bus <i>n</i> that never reached the
+bus, since power-up. On a healthy unit it stays at 0.</td></tr>
 <tr><td>Device CPU Load</td><td>u16, 1 dp, %</td>
 <td>The share of the last second the processor spent working, interrupts
 included. 0 on an idle unit.</td></tr>
@@ -164,11 +167,38 @@ Everything the device does — receiving, calculating, transmitting, answering t
 
 > **Warning:** **Saving a configuration adds to Rx Dropped on a busy bus, and that is a true reading.** Writing the device's flash stops the loop for about a second — Device Loop Time shows it — and a bus carrying more than a few dozen frames in that second overflows the receive buffer. Those frames really were lost. It is a reason to send configurations with the vehicle's buses quiet where that matters, not a fault.
 
-Like the other totals, Rx Dropped is kept **since power-up** and survives sending or clearing a configuration.
+**Tx Dropped** is the transmit side. Every frame the device is asked to send, by a transmit message, a relay or a frame injected from the CAN Viewer, waits in a queue for its bus. A frame is dropped when that queue is full, or when it is still waiting as its bus is stopped. The queue fills when the configuration asks a bus to carry more than it can, or when nothing on the bus acknowledges frames, so they cannot leave. A bus is stopped when it is switched off or reconfigured, and while it recovers from bus-off. Each dropped frame is counted, so unlike Rx Dropped this is not a floor. The one exception is a frame that finishes sending at the instant its bus is stopped: it can be counted even though it went out.
+
+On a **CAN Triple 2.0** a transmit message keeps no more than one frame waiting in that queue. If the frame from its last period is still waiting when the next period comes, it takes the new values instead of a second frame queueing behind it, and the values it held are counted as dropped. So while nothing acknowledges, Tx Dropped climbs by every frame the transmit messages on that bus would have sent, and when the bus recovers each message sends its newest values rather than a backlog. Frames still waiting when a new configuration takes over are dropped and counted too. Relayed frames and frames injected from the CAN Viewer queue one behind another as before.
+
+Like the other totals, Rx Dropped and Tx Dropped are kept **since power-up** and survive sending or clearing a configuration.
+
+### Supply (CAN Triple 2.0)
+
+The CAN Triple 2.0 measures its own supply; the CAN Triple (1.x) does not, and there these read 0. **Monitor Channels** leaves them out when it is connected to a unit that does not measure them, and **Send Configuration** says so when a configuration that reads them goes to one.
+
+<table>
+<tr><th>Channel</th><th>Type</th><th>Meaning</th></tr>
+<tr><td>Device Supply Voltage</td><td>u16, 2 dp, V</td>
+<td>The supply at the unit's power input, averaged over the last 0.1 s.</td></tr>
+<tr><td>Device Supply Voltage Minimum</td><td>u16, 2 dp, V</td>
+<td>The lowest single reading since power-up. Readings are taken every
+10 ms and this keeps the unaveraged one, so it catches a cranking dip the
+average smooths away.</td></tr>
+<tr><td>Device Supply Voltage Maximum</td><td>u16, 2 dp, V</td>
+<td>The highest single reading since power-up.</td></tr>
+<tr><td>Device USB Supply Voltage</td><td>u16, 2 dp, V</td>
+<td>The 5 V the USB port provides the unit: about 5.3 V with a computer
+connected, 0 without one.</td></tr>
+</table>
+
+The minimum and maximum count only while a supply is connected (1 V or more). A unit running from USB alone reads 0 for both until a supply is connected, and unplugging the supply does not record the fall to 0 V as a minimum. Both are kept since power-up, like the MCU's own excursions. See also [The CAN Triple 2.0](can-triple-2.md).
 
 A device channel cannot be edited or deleted: its type, resolution and range are fixed by the firmware, so the Channel Editor opens it read-only.
 
 You do not have to do anything to use one. Every device channel is sent to the device with every configuration, whether or not anything in your document reads it, so all of them appear in **Monitor Channels** as soon as you send a configuration and connect. That is the point: when a bus starts misbehaving you want the error counters in front of you, not a rebuild-and-resend cycle first.
+
+> **Note:** A secure package (`.ct3s`) is the one exception, and only for the Tx Dropped channels. A package carries them only when its configuration reads one, and such a package installs only on device firmware 1.0.15 or newer. A package whose configuration does not read them installs on older firmware as before, and on the unit it programs they read 0. See [Licensing](licensing.md).
 
 Because the device writes it, nothing else should. Pointing a calculation's output at a device channel raises the usual two-writers warning, and the device wins: it republishes the value on every 100 Hz evaluation, so the calculation would appear to do nothing.
 
@@ -196,10 +226,12 @@ The **Edit Custom Channel** dialog defines a channel:
 
 <table>
 <tr><th>Field</th><th>Meaning</th></tr>
-<tr><td><b>Channel Name:</b></td><td>Up to 31 characters — the device stores a
-32-byte label, and the dialog checks the UTF-8 byte count, which a non-ASCII name
-can exceed within the character cap (one accented or CJK character is 2-4 bytes,
-so 31 characters is not always 31 bytes). Names must be unique (case-insensitive).
+<tr><td><b>Channel Name:</b></td><td>Up to 31 bytes on a CAN Triple, 32 on a
+<a href="can-triple-2.md#names">CAN Triple 2.0</a> — the document's target
+decides. The limit is in UTF-8 bytes, not characters: one accented or CJK
+character is 2-4 bytes, so a name using them holds fewer characters, and the
+field stops taking them where the next one would not fit. Names must be unique
+(case-insensitive).
 Renaming an existing channel rewrites every reference to it — comms rows, math,
 conditions.</td></tr>
 <tr><td><b>Data Type:</b></td><td>The storage type — see the table below. Blank

@@ -1,4 +1,5 @@
 #include "firmware_update_dialog.h"
+#include "theme.h"
 
 #include <QCheckBox>
 #include <QCoreApplication>
@@ -45,6 +46,30 @@ void pump(int ms)
 QString versionText(quint16 major, quint16 minor, quint16 patch)
 {
     return QStringLiteral("%1.%2.%3").arg(major).arg(minor).arg(patch);
+}
+
+// A CAN Triple 2.0's firmware copies, one line: "A 2.0.1 (running), B 2.0.0
+// (previous), factory 2.0.0". The previous copy is the one a failed update
+// goes back to.
+QString slotSummary(const FwUpdateStatus2 &s)
+{
+    QStringList parts;
+    for (int slot = 0; slot < FW_SLOT_COUNT; ++slot) {
+        const QString name = slot == FW_SLOT_A   ? QCoreApplication::translate("FirmwareUpdateDialog", "A")
+                             : slot == FW_SLOT_B ? QCoreApplication::translate("FirmwareUpdateDialog", "B")
+                                                 : QCoreApplication::translate("FirmwareUpdateDialog", "factory");
+        QString part;
+        if (s.slots_valid & (1u << slot))
+            part = QStringLiteral("%1 %2").arg(name, FirmwareImage::packedVersionText(s.slot_version[slot]));
+        else
+            part = QCoreApplication::translate("FirmwareUpdateDialog", "%1 empty").arg(name);
+        if (slot == s.running_slot)
+            part += QCoreApplication::translate("FirmwareUpdateDialog", " (running)");
+        else if (slot == s.previous_slot && (s.slots_valid & (1u << slot)))
+            part += QCoreApplication::translate("FirmwareUpdateDialog", " (previous)");
+        parts << part;
+    }
+    return parts.join(QStringLiteral(", "));
 }
 
 // Where backups go. Documents rather than AppData — this is a file the user
@@ -208,8 +233,23 @@ void FirmwareUpdateDialog::say(const QString &text)
 
 void FirmwareUpdateDialog::refreshDeviceStatus()
 {
+    // Which board this is, first. It is ungated, so it answers even where the
+    // status read below is refused, and it decides whether this Manager has any
+    // firmware for the unit at all. Firmware without the command reads as a
+    // CAN Triple 1.x, which it is. A failed read is kept with its reason:
+    // updateReadiness() stops on it only if the status read then succeeds,
+    // which means the link is fine and the report itself was unreadable.
+    {
+        DeviceHardware hardware;
+        m_hardwareError.clear();
+        if (device_session::readHardware(m_link, &hardware, &m_hardwareError))
+            m_deviceHardware = hardware;
+        else
+            m_deviceHardware.reset();
+    }
+
     QString error;
-    m_statusValid = m_updater.readStatus(&m_status, &error);
+    m_statusValid = m_updater.readStatus(&m_status, &error, &m_slots);
     // The status read is gated on the GET password, and the device's reset
     // clears every proof — so on a unit that protects Get, the read that
     // confirms an install failed after a perfectly good update, which was then
@@ -217,12 +257,13 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
     // Prove it again, once, with the key MainWindow kept, and read again. A
     // link that is really gone fails the retry the same way.
     if (!m_statusValid && m_reproveGet && m_reproveGet())
-        m_statusValid = m_updater.readStatus(&m_status, &error);
+        m_statusValid = m_updater.readStatus(&m_status, &error, &m_slots);
     m_deviceCapacity.reset();
 
     if (!m_statusValid) {
-        m_deviceInfo->setText(
-            QStringLiteral("<span style='color:#c0392b'>%1</span>").arg(error.toHtmlEscaped()));
+        m_deviceInfo->setText(themedHtml(
+            QStringLiteral("<span style='color:#c0392b'>%1</span>").arg(error.toHtmlEscaped()),
+            palette()));
         return;
     }
 
@@ -240,6 +281,19 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
     }
 
     QStringList lines;
+    if (m_deviceHardware) {
+        QString board = m_deviceHardware->familyName();
+        const QString revision = m_deviceHardware->boardRevisionText();
+        if (!revision.isEmpty())
+            board += tr(" rev %1").arg(revision);
+        lines << tr("Board: <b>%1</b>").arg(board.toHtmlEscaped());
+        if (m_deviceHardware->siliconMismatch()) {
+            lines << tr("<span style='color:#c0392b'>Its processor (%1) is not the %2's — this "
+                        "unit is running firmware built for another board.</span>")
+                         .arg(m_deviceHardware->processorText().toHtmlEscaped(),
+                              m_deviceHardware->familyName().toHtmlEscaped());
+        }
+    }
     lines << tr("Running firmware: <b>%1</b>")
                  .arg(versionText(m_status.running_major, m_status.running_minor,
                                   m_status.running_patch));
@@ -252,11 +306,24 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
     }
     lines << tr("Configuration format: v%1").arg(m_status.running_store_version);
     lines << tr("Largest image accepted: %1 KB").arg(m_status.staging_capacity / 1024);
+    if (m_slots)
+        lines << tr("Firmware kept on the unit: %1").arg(slotSummary(*m_slots).toHtmlEscaped());
 
     // What the bootloader did last time. This is the only place a failed
     // install can explain itself — the failure happened while nothing was
-    // listening, so it was recorded rather than reported.
-    if (m_status.last_result != FW_RESULT_NONE && m_status.last_result != FW_RESULT_OK) {
+    // listening, so it was recorded rather than reported. A rollback and a
+    // repair are not failed installs and are not worded as one.
+    if (m_status.last_result == FW_RESULT_ROLLED_BACK) {
+        const QString failed = m_slots && m_slots->failed_version != 0
+                                   ? FirmwareImage::packedVersionText(m_slots->failed_version)
+                                   : tr("an update");
+        lines << tr("<span style='color:#c0392b'>Firmware %1 did not start properly, so the unit "
+                    "went back to the firmware it was running before.</span>")
+                     .arg(failed.toHtmlEscaped());
+    } else if (m_status.last_result == FW_RESULT_RECOVERED) {
+        lines << tr("<span style='color:#c0392b'>The installed firmware was found damaged at "
+                    "start-up and was written again from the unit's stored copy.</span>");
+    } else if (m_status.last_result != FW_RESULT_NONE && m_status.last_result != FW_RESULT_OK) {
         lines << tr("<span style='color:#c0392b'>Last install attempt failed: %1"
                     "</span> (%2 attempt(s))")
                      .arg(FirmwareImage::resultText(m_status.last_result).toHtmlEscaped())
@@ -265,8 +332,13 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
     if (m_status.state == FW_STATE_PENDING) {
         lines << tr("<b>An update is already staged and will install at the next restart.</b>");
     }
+    if (m_status.state == FW_STATE_TRIAL) {
+        lines << tr("<b>The running firmware is new and on trial.</b> The unit keeps it once it "
+                    "has run for a minute. If it restarts before then, it goes back to the "
+                    "previous firmware after a few tries.");
+    }
 
-    m_deviceInfo->setText(lines.join(QStringLiteral("<br>")));
+    m_deviceInfo->setText(themedHtml(lines.join(QStringLiteral("<br>")), palette()));
 }
 
 void FirmwareUpdateDialog::onBrowse()
@@ -283,6 +355,13 @@ void FirmwareUpdateDialog::onBrowse()
     // it nowhere. An empty string is QFileDialog's "no preference": the old
     // behaviour, kept for exactly the case it was right for.
     QString startDirectory = firmwareImagesDirectory();
+    // A CAN Triple 2.0's firmware is one folder down (firmwareImagesDirectoryV2
+    // says why): open there when that is the unit on the cable, so the image
+    // this Manager pairs with is the first thing offered.
+    if (m_deviceHardware && m_deviceHardware->family == BoardFamily::CanTriple2
+        && QDir(firmwareImagesDirectoryV2()).exists()) {
+        startDirectory = firmwareImagesDirectoryV2();
+    }
     if (!QDir(startDirectory).exists()) {
         startDirectory.clear();
     }
@@ -295,23 +374,32 @@ void FirmwareUpdateDialog::onBrowse()
     }
 
     QString error;
-    auto image = FirmwareImage::load(path, &error);
-    if (!image) {
-        m_image.reset();
-        m_pathEdit->clear();
-        m_imageInfo->clear();
+    if (!selectImage(path, &error)) {
         // The file was rejected by the DEVICE'S OWN validator, so this verdict
         // is the same one the bootloader would reach — reported here without
         // spending a transfer to discover it.
         QMessageBox::warning(this, tr("Update Firmware"), error);
+    }
+}
+
+bool FirmwareUpdateDialog::selectImage(const QString &path, QString *error)
+{
+    auto image = FirmwareImage::load(path, error);
+    if (!image) {
+        m_image.reset();
+        m_pathEdit->clear();
+        m_imageInfo->clear();
         updateReadiness();
-        return;
+        return false;
     }
 
     m_image = std::move(image);
     m_pathEdit->setText(QDir::toNativeSeparators(path));
 
     QStringList lines;
+    // Which board the file is for: the one check a user can make by eye before
+    // the Update button, below, makes it for them.
+    lines << tr("For: <b>%1</b>").arg(boardFamilyName(m_image->family()).toHtmlEscaped());
     lines << tr("Version: <b>%1</b>").arg(m_image->versionString());
     lines << tr("Size: %1 bytes").arg(m_image->size());
     lines << tr("Configuration format: v%1").arg(m_image->flashStoreVersion());
@@ -322,12 +410,40 @@ void FirmwareUpdateDialog::onBrowse()
     m_imageInfo->setText(lines.join(QStringLiteral("<br>")));
 
     updateReadiness();
+    return true;
 }
 
 void FirmwareUpdateDialog::updateReadiness()
 {
     QStringList warnings;
     bool blocked = false;
+
+    // Firmware only ever goes to the board it was built for. This Manager
+    // updates the CAN Triple (1.x) and the CAN Triple 2.0, so a unit that says
+    // it is some other board — one newer than this build knows — is refused
+    // here, with the reason, and so is an image built for the other board
+    // than the unit's, rather than offered to a bootloader that would reject
+    // it. A unit whose report could not be read while its status could is
+    // refused too: which board it is cannot be known.
+    if (m_deviceHardware) {
+        if (m_deviceHardware->family != BoardFamily::CanTriple
+            && m_deviceHardware->family != BoardFamily::CanTriple2) {
+            warnings << tr("This unit is a %1. This version of the Device Manager does not "
+                           "update that board — update the Device Manager to update this "
+                           "unit.")
+                            .arg(m_deviceHardware->familyName().toHtmlEscaped());
+            blocked = true;
+        } else if (m_image && m_image->family() != m_deviceHardware->family) {
+            warnings << tr("This image is firmware for the %1, and this unit is a %2.")
+                            .arg(boardFamilyName(m_image->family()).toHtmlEscaped(),
+                                 m_deviceHardware->familyName().toHtmlEscaped());
+            blocked = true;
+        }
+    } else if (m_statusValid && !m_hardwareError.isEmpty()) {
+        warnings << tr("Which board this unit is could not be read: %1")
+                        .arg(m_hardwareError.toHtmlEscaped());
+        blocked = true;
+    }
 
     if (!m_statusValid) {
         blocked = true;
@@ -388,10 +504,12 @@ void FirmwareUpdateDialog::updateReadiness()
     }
 
     if (warnings.isEmpty()) {
+        m_warnings->clear(); // not just hidden: nothing may read a warning that no longer holds
         m_warnings->setVisible(false);
     } else {
-        m_warnings->setText(QStringLiteral("<div style='color:#b9770e'>⚠ %1</div>")
-                                .arg(warnings.join(QStringLiteral("<br><br>⚠ "))));
+        m_warnings->setText(themedHtml(QStringLiteral("<div style='color:#b9770e'>⚠ %1</div>")
+                                           .arg(warnings.join(QStringLiteral("<br><br>⚠ "))),
+                                       palette()));
         m_warnings->setVisible(true);
     }
 
@@ -554,7 +672,10 @@ bool FirmwareUpdateDialog::waitForDeviceToReturn(QString *error)
     // The bootloader erases and copies the application slot before it hands
     // over — roughly a second for a typical image, and the serial port may also
     // disappear and re-enumerate. Poll rather than guessing a fixed delay.
-    constexpr int kTotalWaitMs = 25000;
+    // A CAN Triple 2.0 whose new image hangs is reset by its watchdog, a few
+    // times, and then rolled back: the unit answers again only after all of
+    // that, and the answer (the old version, and why) is worth waiting for.
+    const int kTotalWaitMs = m_slots ? 60000 : 25000;
     constexpr int kPollMs = 400;
 
     for (int waited = 0; waited < kTotalWaitMs; waited += kPollMs) {
@@ -578,6 +699,11 @@ bool FirmwareUpdateDialog::waitForDeviceToReturn(QString *error)
                 "It may still be installing. Wait a moment, then reconnect from the "
                 "Online menu and open this dialog again to see what happened.")
                  .arg(kTotalWaitMs / 1000);
+    if (m_slots) {
+        *error += tr("\n\nIf the new firmware does not start, the unit goes back to the "
+                     "firmware it had before on its own. Turning its power off and on again "
+                     "counts as one of the restarts that takes.");
+    }
     return false;
 }
 
@@ -640,9 +766,11 @@ void FirmwareUpdateDialog::offerConfigurationRestore(const QString &backupPath)
     // The unit is running the NEW firmware now, which may hold less than the
     // one the backup came from — the backup was sized against the old unit's
     // report. Refused here, before CLEAR_CONFIG, rather than discovered as an
-    // ERR_OUT_OF_BOUNDS half way through with the unit already erased.
+    // ERR_OUT_OF_BOUNDS half way through with the unit already erased. The same
+    // report says which record form it takes now (tablesForUnit): an update
+    // can move a CAN Triple 2.0's names out of its records.
+    DeviceCapacity capacity;
     {
-        DeviceCapacity capacity;
         QString capError;
         if (!device_session::readCapacity(m_link, &capacity, &capError)) {
             QMessageBox::warning(
@@ -683,7 +811,8 @@ void FirmwareUpdateDialog::offerConfigurationRestore(const QString &backupPath)
     bool ok = false;
     QString sendError;
     auto *transfer = ConfigTransfer::send(
-        m_link, mapped.tables, /*verify=*/true, busSetups, /*saveToFlash=*/true,
+        m_link, tablesForUnit(mapped.tables, capacity), /*verify=*/true, busSetups,
+        /*saveToFlash=*/true,
         // nullopt: restoring what the unit already ran is not a release, so the
         // version it was running stays exactly as it was.
         std::nullopt, restored.effectiveTitle(), /*resetAfter=*/false, this);
@@ -726,6 +855,10 @@ void FirmwareUpdateDialog::onUpdate()
                          "keeps running its current firmware until it restarts. If anything "
                          "goes wrong during the transfer, nothing is lost.")
                           .arg(m_image->versionString());
+    if (m_slots) {
+        confirm += tr("\n\nIf the new firmware does not start properly, the unit goes back to "
+                      "the version it is running now by itself.");
+    }
     if (formatChanges) {
         confirm += tr("\n\nThe device's stored configuration WILL be cleared by this update.");
     }
@@ -740,6 +873,19 @@ void FirmwareUpdateDialog::onUpdate()
 
     setBusy(true);
     m_progress->setValue(0);
+
+    // Whether the unit holds a configuration now, before anything changes. A
+    // unit that had none comes back with none, and that is not this update's
+    // doing: one never sent a configuration used to be told afterwards that
+    // "this update changed the configuration format or layout". A unit that
+    // cannot say counts as having one, which keeps the old wording.
+    bool hadConfig = true;
+    {
+        device_session::Identity before;
+        QString beforeError;
+        if (device_session::readIdentity(m_link, &before, &beforeError) && before.supported)
+            hadConfig = before.configStatus != CONFIG_STATUS_NONE;
+    }
 
     QString backupPath;
     if (m_backupCheck->isChecked()) {
@@ -799,6 +945,11 @@ void FirmwareUpdateDialog::onUpdate()
     refreshDeviceStatus();
     setBusy(false);
     m_progress->setVisible(false);
+    // And what that means for the file still selected. Its warnings were
+    // worked out against the firmware the unit ran BEFORE the update, and
+    // "OLDER than the firmware the device is running (2.0.1)" stayed on screen
+    // over a unit now running that very file.
+    updateReadiness();
 
     if (!m_statusValid) {
         say(QString());
@@ -811,6 +962,17 @@ void FirmwareUpdateDialog::onUpdate()
     const bool installed =
         m_image->compareVersion(m_status.running_major, m_status.running_minor,
                                 m_status.running_patch) == 0;
+    if (!installed && m_status.last_result == FW_RESULT_ROLLED_BACK) {
+        say(QString());
+        QMessageBox::warning(
+            this, tr("Update Firmware"),
+            tr("Firmware %1 was installed but did not start properly, so the unit went back "
+               "to the firmware it had before. It is running version %2.")
+                .arg(m_image->versionString(),
+                     versionText(m_status.running_major, m_status.running_minor,
+                                 m_status.running_patch)));
+        return;
+    }
     if (!installed) {
         say(QString());
         QMessageBox::warning(
@@ -824,6 +986,18 @@ void FirmwareUpdateDialog::onUpdate()
         return;
     }
 
+    // A CAN Triple 2.0 starts a new image on trial. The unit came back and
+    // answered, which is what the trial waits to hear, so say so now rather
+    // than leave it to the unit's own minute: a unit switched off inside that
+    // minute would count the next start against a perfectly good image. A
+    // confirmation that does not arrive is not a failed update, for the same
+    // reason, so it is not reported as one.
+    if (m_slots && m_status.state == FW_STATE_TRIAL) {
+        QString confirmError;
+        if (m_updater.confirm(&confirmError))
+            refreshDeviceStatus();
+    }
+
     say(tr("Firmware %1 installed.").arg(m_image->versionString()));
 
     // Only offer the restore when the configuration really is gone. Asking
@@ -832,8 +1006,8 @@ void FirmwareUpdateDialog::onUpdate()
     device_session::Identity identity;
     QString idError;
     const bool haveIdentity = device_session::readIdentity(m_link, &identity, &idError);
-    const bool configGone =
-        haveIdentity && identity.supported && identity.configStatus == CONFIG_STATUS_NONE;
+    const bool configGone = hadConfig && haveIdentity && identity.supported
+                            && identity.configStatus == CONFIG_STATUS_NONE;
 
     if (configGone && !backupPath.isEmpty()) {
         offerConfigurationRestore(backupPath);
@@ -844,6 +1018,9 @@ void FirmwareUpdateDialog::onUpdate()
                "update changed the configuration format or layout. Send a configuration to "
                "the device when you are ready.")
                 .arg(m_image->versionString()));
+    } else if (!hadConfig) {
+        QMessageBox::information(this, tr("Update Firmware"),
+                                 tr("Firmware %1 is installed.").arg(m_image->versionString()));
     } else {
         QMessageBox::information(this, tr("Update Firmware"),
                                  tr("Firmware %1 is installed and the device's configuration "

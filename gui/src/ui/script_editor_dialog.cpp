@@ -1,4 +1,5 @@
 #include "script_editor_dialog.h"
+#include "theme.h"
 #include "window_memory.h"
 #include "hex_input.h"
 
@@ -60,7 +61,7 @@ const char kStarterScript[] =
 } // namespace
 
 ScriptEditorDialog::ScriptEditorDialog(Configuration &config, QWidget *parent)
-    : QDialog(parent), m_config(config)
+    : QDialog(parent), m_config(config), m_costs(config.capacity())
 {
     setWindowTitle(tr("Device Script"));
     resize(940, 700);
@@ -445,9 +446,10 @@ void ScriptEditorDialog::rebuildChannelTable()
 void ScriptEditorDialog::say(const QString &text, bool isError)
 {
     m_status->setText(isError
-                          ? QStringLiteral("<span style='color:#c0392b'>%1</span>")
-                                .arg(text.toHtmlEscaped().replace(QStringLiteral("\n"),
-                                                                  QStringLiteral("<br>")))
+                          ? themedHtml(QStringLiteral("<span style='color:#c0392b'>%1</span>")
+                                           .arg(text.toHtmlEscaped().replace(
+                                               QStringLiteral("\n"), QStringLiteral("<br>"))),
+                                       palette())
                           : text.toHtmlEscaped().replace(QStringLiteral("\n"),
                                                          QStringLiteral("<br>")));
 }
@@ -601,11 +603,12 @@ void ScriptEditorDialog::reportResult(const ScriptSimulator::TickResult &r, quin
                      "wide range of magnitudes does")
                 : tr("it used the whole %1-unit budget in a single tick — look for a loop "
                      "that does not finish").arg(m_sim.budget());
-        m_costLabel->setText(
+        m_costLabel->setText(themedHtml(
             tr("<span style='color:#c0392b'><b>Faulted:</b> %1.</span> On the device the "
                "script would be suspended and would not run again until the configuration "
                "is reloaded. Press <b>Reset</b> to try again.")
-                .arg(why));
+                .arg(why),
+            palette()));
         return;
     }
     m_costLabel->setText(tr("Ran %1 tick(s). Peak cost %2 of %3 budget units (%4%).")
@@ -626,7 +629,7 @@ void ScriptEditorDialog::showTick(const ScriptSimulator::TickResult &r)
         }
         auto *item = m_channels->item(row, 1);
         item->setText(QString::number(double(cv.value), 'g', 7));
-        item->setBackground(cv.writtenByScript ? QColor(0xE8, 0xF5, 0xE9) : QBrush());
+        item->setBackground(cv.writtenByScript ? QBrush(okFill(palette())) : QBrush());
     }
 
     // Only the state registers the script DECLARED: showing all 64 would bury

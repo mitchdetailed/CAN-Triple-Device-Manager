@@ -64,6 +64,11 @@ public:
     // *out, so a half-typed entry filters by what is complete so far.
     static bool parseIdFilter(const QString &text, IdFilter *out, QString *error);
 
+protected:
+    // A theme chosen while this window is open (Tools → Theme): the colours
+    // this window sets rather than inherits follow by hand.
+    void changeEvent(QEvent *event) override;
+
 private:
     void onMonitorFrame(const ct::MonitorStreamPayload &frame);
     // The slot's button, or Enter in one of its fields. Starts a run, stops a

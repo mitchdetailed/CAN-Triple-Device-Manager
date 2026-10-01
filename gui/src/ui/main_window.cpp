@@ -22,6 +22,7 @@
 #include <QPlainTextEdit>
 #include <QProgressDialog>
 #include <QPushButton>
+#include <QActionGroup>
 #include <QSettings>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -36,10 +37,12 @@
 #include "../model/package_builder.h"
 #include "../model/sealed_stream.h"
 #include "../protocol/sealed_install.h"
+#include "../model/unit_target.h"
 #include "../model/user_paths.h"
 #include "../model/validation.h"
 #include "../protocol/config_transfer.h"
 #include "../protocol/device_session.h"
+#include "../protocol/usb_port.h"
 #include "../protocol/firmware_update.h" // FwUpdateStatus — the running store version
 #include "access_passwords_dialog.h"
 #include "can_viewer_dialog.h"
@@ -57,6 +60,8 @@
 #include "connection_settings_dialog.h"
 #include "firmware_update_dialog.h"
 #include "firmware_license_dialog.h"
+#include "led_brightness_dialog.h"
+#include "theme.h"
 #include "secure_builder_dialog.h"
 #include "help_window.h"
 #include "lua_console_dialog.h"
@@ -328,6 +333,9 @@ void MainWindow::buildMenus()
     // Get would invite exactly the confusion between the two that the warning
     // about the stored-configuration format exists to prevent.
     onlineMenu->addAction(tr("Update Fi&rmware…"), this, &MainWindow::onUpdateFirmware);
+    // A setting of the UNIT, like the firmware above it: a Send leaves it alone
+    // and a Get does not read it (a CAN Triple 2.0 keeps it itself).
+    onlineMenu->addAction(tr("LED &Brightness…"), this, &MainWindow::onLedBrightness);
     onlineMenu->addSeparator();
     // Set Access Passwords writes into the DEVICE, which is why it is here
     // rather than under File. The Firmware License Manager beside it is the
@@ -355,6 +363,21 @@ void MainWindow::buildMenus()
     toolsMenu->addSeparator();
     // Serial port settings belong to the app, not the document.
     toolsMenu->addAction(tr("Connection &Settings…"), this, &MainWindow::onConnectionSettings);
+    // So does how it looks: see theme.h. A choice applies at once, to every
+    // window, and is kept for this Windows account.
+    QMenu *themeMenu = toolsMenu->addMenu(tr("&Theme"));
+    auto *themeGroup = new QActionGroup(themeMenu);
+    for (const ThemeInfo &info : availableThemes()) {
+        QAction *action = themeMenu->addAction(info.name);
+        action->setCheckable(true);
+        action->setChecked(info.theme == currentTheme());
+        themeGroup->addAction(action);
+        const Theme theme = info.theme;
+        connect(action, &QAction::triggered, this, [theme]() {
+            applyTheme(theme);
+            saveTheme(theme);
+        });
+    }
 
     // Help
     QMenu *helpMenu = menuBar()->addMenu(tr("&Help"));
@@ -648,14 +671,24 @@ void MainWindow::updateWindowTitle()
 void MainWindow::updateConnectionStatus()
 {
     if (m_link.isOpen()) {
-        m_connectionLabel->setText(tr("Connected: %1 @ %2").arg(m_link.portName())
-                                       .arg(m_link.baudRate()));
+        // A USB unit has no baud rate to show: the number would be the one the
+        // dialog happened to hold, not anything the link runs at.
+        QString text = unitIsUsbDevice()
+                           ? tr("Connected: %1 (USB)").arg(m_link.portName())
+                           : tr("Connected: %1 @ %2").arg(m_link.portName()).arg(m_link.baudRate());
+        // Which board, once the unit has said: there are two now, and they
+        // take different firmware.
+        if (m_deviceHardware)
+            text += QStringLiteral(" — ") + m_deviceHardware->summary();
+        m_connectionLabel->setText(text);
         // Remembered for Online > Connect, for THIS session only — the port
         // is chosen fresh every run on purpose, but within a run "the port I
         // was just using" is almost always the answer.
         m_lastPort = m_link.portName();
         m_lastBaud = m_link.baudRate();
     } else {
+        // What was learned about the unit belongs to that connection.
+        m_deviceHardware.reset();
         m_connectionLabel->setText(tr("Not connected"));
     }
     // Null-guarded: the first call happens while the window is still being
@@ -664,6 +697,42 @@ void MainWindow::updateConnectionStatus()
         m_connectAction->setEnabled(!m_link.isOpen());
     if (m_disconnectAction)
         m_disconnectAction->setEnabled(m_link.isOpen());
+    // Monitor Channels shows only what the unit publishes. Only a report is
+    // passed on, never its absence: rows should not come and go because a link
+    // dropped.
+    if (m_monitorDialog && m_deviceHardware)
+        m_monitorDialog->setUnitHardware(m_deviceHardware);
+}
+
+bool MainWindow::unitIsUsbDevice() const
+{
+    if (m_deviceHardware && m_deviceHardware->reported)
+        return m_deviceHardware->hasFeature(HW_FEAT_USB_LINK);
+    return m_link.isOpen() && isCanTriple2Port(m_link.portName());
+}
+
+bool MainWindow::reconnectAfterRestart(const QString &port, qint32 baud, const QString &title)
+{
+    QProgressDialog progress(tr("Waiting for the unit to restart…"), QString(), 0, 0, this);
+    progress.setWindowTitle(title);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.show();
+    QString error;
+    const bool back = device_session::reopenAfterRestart(
+        &m_link, port, baud, 20000,
+        [this, &progress](int seconds) {
+            progress.setLabelText(tr("Waiting for the unit to restart… (%1 s)").arg(seconds));
+        },
+        &error);
+    progress.close();
+    updateConnectionStatus();
+    if (!back) {
+        QMessageBox::warning(this, title, error);
+        return false;
+    }
+    identifyConnectedUnit();
+    return true;
 }
 
 bool MainWindow::ensureDeviceAccess(AccessFunction fn)
@@ -741,7 +810,31 @@ bool MainWindow::ensureConnected()
     // (and the Connect/Disconnect pair) said "Not connected" until some other
     // path happened to refresh them.
     updateConnectionStatus();
+    if (m_link.isOpen())
+        identifyConnectedUnit();
     return m_link.isOpen();
+}
+
+void MainWindow::identifyConnectedUnit()
+{
+    m_deviceHardware.reset();
+    if (!m_link.isOpen())
+        return;
+    // One short round trip with a short patience: a unit answers in well under
+    // a millisecond, and a port with nothing behind it should cost a moment,
+    // not the full retry budget. A unit that does not answer is simply not
+    // identified — whatever the user was connecting for reports the link.
+    DeviceHardware hardware;
+    QString error;
+    bool ok = false;
+    {
+        BusyScope busy(this);
+        ok = device_session::readHardware(&m_link, &hardware, &error,
+                                          DeviceLink::kDefaultTimeoutMs, 1);
+    }
+    if (ok)
+        m_deviceHardware = hardware;
+    updateConnectionStatus();
 }
 
 void MainWindow::onConnect()
@@ -756,12 +849,15 @@ void MainWindow::onConnect()
         QString error;
         if (m_link.open(m_lastPort, m_lastBaud, &error)) {
             updateConnectionStatus();
+            identifyConnectedUnit();
             return;
         }
     }
     ConnectionSettingsDialog dialog(&m_link, this);
     dialog.exec();
     updateConnectionStatus();
+    if (m_link.isOpen())
+        identifyConnectedUnit();
 }
 
 void MainWindow::onDisconnect()
@@ -1163,7 +1259,8 @@ void MainWindow::onCommunications()
     // the prover asks, and "nothing connected" is an honest no rather than an
     // error the dialog has to guess at.
     CommunicationsDialog dialog(&m_config, this,
-                                [this]() { return proveProtectedCommsForEdit(); });
+                                [this]() { return proveProtectedCommsForEdit(); },
+                                m_deviceHardware);
     dialog.exec();
     // The session may have unlocked a section, so anything showing protected
     // detail has to be repainted, and the status line reads differently.
@@ -1398,8 +1495,22 @@ void MainWindow::onSendSecureConfiguration()
                                  .arg(mapped.errors.size()));
         return;
     }
-    if (!tablesFitDevice(mapped.tables, title))
+    DeviceCapacity unitCapacity;
+    if (!tablesFitDevice(mapped.tables, title, &unitCapacity))
         return;
+    // The package's target against this unit, as for a Send (unit_target.h).
+    // Counted, never listed: every line names a row of a package whose contents
+    // this command does not show.
+    const UnitTargetCheck target = checkUnitTarget(package, unitCapacity, mapWithScript);
+    if (!target.problems.isEmpty()) {
+        QMessageBox::warning(this, title,
+                             tr("This package was made for other firmware than the connected "
+                                "unit runs, and the unit cannot run all of it: %n problem(s)."
+                                "\n\nNothing has been sent. It has to be rebuilt for this unit "
+                                "by whoever built it.",
+                                "", int(target.problems.size())));
+        return;
+    }
 
     // THE CONFIRMATION — and everything above it left the device exactly as it
     // was. Everything below it changes something.
@@ -1409,6 +1520,10 @@ void MainWindow::onSendSecureConfiguration()
                           .arg(QFileInfo(path).fileName());
     if (policy.changesPasswords())
         confirm += tr("\n\nThis package also sets the device's access passwords.");
+    if (!target.changes.isEmpty())
+        confirm += tr("\n\nThis package was made for other firmware than this unit runs: %n "
+                      "thing(s) in it come out differently on this unit.",
+                      "", int(target.changes.size()));
     confirm += tr("\n\nThe package is not opened and its contents are not shown. The "
                   "configuration you have open stays as it is.");
     if (QMessageBox::question(this, title, confirm, QMessageBox::Yes | QMessageBox::No,
@@ -1505,7 +1620,8 @@ void MainWindow::onSendSecureConfiguration()
     progress->setMinimumDuration(0);
     // The version the package stamps on the unit comes from its policy — the
     // Builder's "Package version" — not from the document inside it.
-    auto *transfer = ConfigTransfer::send(&m_link, mapped.tables, /*verify=*/true, busSetups,
+    auto *transfer = ConfigTransfer::send(&m_link, tablesForUnit(mapped.tables, unitCapacity),
+                                          /*verify=*/true, busSetups,
                                           /*saveToFlash=*/true, policy.configVersion,
                                           package.effectiveTitle(), /*resetAfter=*/false, this);
     // The bar moves; the stage text does not. ConfigTransfer's stages read
@@ -1569,9 +1685,10 @@ bool MainWindow::checkPackagePolicy(const SecurePackagePolicy &policy, const QSt
             facts.serial = info.serialNumber;
         }
     }
-    // What the unit holds, for a package that recorded what it writes. Read
-    // only then: an older package makes no claim the capacity could refute.
-    if (!policy.tableCounts.isEmpty()) {
+    // What the unit holds, and where it keeps its names. Read for every
+    // package: even one from before the capacity report makes a claim the
+    // report can refute, that the names are in the records.
+    {
         BusyScope busy(this);
         DeviceCapacity capacity;
         QString ignored;
@@ -1589,6 +1706,18 @@ bool MainWindow::checkPackagePolicy(const SecurePackagePolicy &policy, const QSt
         if (device_session::readAccessState(&m_link, &access, &ignored))
             facts.viewerPasswordSupported =
                 access.supported && access.knows(AccessFunction::CanViewer);
+    }
+    // Whether the unit publishes the extended device channels, asked only for
+    // a package whose configuration reads them: a gate per board line. Firmware
+    // before 1.0.15 has no hardware report, and the builtIn() answer it gets
+    // says no.
+    if (policy.needsExtendedDeviceChannels) {
+        BusyScope busy(this);
+        DeviceHardware hardware;
+        QString ignored;
+        if (device_session::readHardware(&m_link, &hardware, &ignored))
+            facts.extendedDeviceChannelsSupported =
+                hardware.firmwareHas(firmware_since::kExtendedDeviceChannels);
     }
     const InstallVerdict verdict = packageInstallVerdict(policy, facts);
     if (verdict.noPolicy) {
@@ -1613,6 +1742,41 @@ bool MainWindow::checkPackagePolicy(const SecurePackagePolicy &policy, const QSt
             tr("This package sets a CAN Viewer password, which the connected unit's firmware "
                "cannot hold. That needs device firmware 1.0.14 or newer.\n\nIt has NOT been "
                "sent. Update the unit's firmware first."));
+        return false;
+    }
+    // Named by what the user put in the configuration: the extended device
+    // channels are the Tx Dropped counts and the supply readings.
+    if (verdict.extendedDeviceChannelsUnsupported) {
+        QMessageBox::critical(
+            this, title,
+            tr("This package's configuration reads a Tx Dropped count or a supply reading, "
+               "which the connected unit's firmware does not publish. That needs device "
+               "firmware 1.0.15 or newer.\n\nIt has NOT been sent. Update the unit's "
+               "firmware first."));
+        return false;
+    }
+    // Where the names go: the two kinds of unit take different records, so
+    // neither package installs on the other kind. A different package, not a
+    // different firmware, unless the unit is a CAN Triple 2.0 on firmware from
+    // before its names moved.
+    if (verdict.labelStoreMissing) {
+        QMessageBox::critical(
+            this, title,
+            tr("This package was built for a CAN Triple 2.0, which keeps the names of its "
+               "channels, messages and relays apart from the rest of its configuration. The "
+               "connected unit keeps them with it: a CAN Triple, or a CAN Triple 2.0 whose "
+               "firmware predates that.\n\nIt has NOT been sent. Build a package with this "
+               "unit as its target, or update a CAN Triple 2.0's firmware first."));
+        return false;
+    }
+    if (verdict.labelStoreUnexpected) {
+        QMessageBox::critical(
+            this, title,
+            tr("This package was built for a unit that keeps the names of its channels, "
+               "messages and relays with the rest of its configuration. The connected unit is "
+               "a CAN Triple 2.0 that keeps them apart, and takes that configuration in a "
+               "different form.\n\nIt has NOT been sent. Build a package with this unit as "
+               "its target."));
         return false;
     }
     if (!verdict.shortfalls.isEmpty()) {
@@ -1940,8 +2104,30 @@ void MainWindow::onSendConfiguration()
         box.exec();
         return;
     }
-    if (!tablesFitDevice(mapped.tables, tr("Send Configuration")))
+    DeviceCapacity unitCapacity;
+    if (!tablesFitDevice(mapped.tables, tr("Send Configuration"), &unitCapacity))
         return;
+
+    // THE TARGET. Everything above judged the document by its target, the
+    // firmware it was made for; the Send goes to this unit. When the unit is not
+    // that firmware, the configuration is judged again against it
+    // (unit_target.h): what the unit cannot run refuses the Send here, and what
+    // comes out differently on it goes in the confirmation below.
+    const UnitTargetCheck target = checkUnitTarget(m_config, unitCapacity, mapWithScript);
+    if (!target.problems.isEmpty()) {
+        QMessageBox box(QMessageBox::Warning, tr("Send Configuration"),
+                        tr("This configuration was made for %1, and the connected unit cannot "
+                           "run all of it: %n problem(s).\n\nNothing has been sent. To work on "
+                           "it for this unit, make the unit its target (File → Target "
+                           "Firmware…) and use File → Check Channels.\n\nSee Show Details for "
+                           "the list.",
+                           "", int(target.problems.size()))
+                            .arg(targetName(m_config.capacity())),
+                        QMessageBox::Ok, this);
+        box.setDetailedText(target.problems.join(QStringLiteral("\n")));
+        box.exec();
+        return;
+    }
 
     // Per-bus CONTROL_CAN setups from the Communications rate/mode settings
     // (v2 firmware applies them; v1 NACKs and the step is skipped).
@@ -1977,6 +2163,20 @@ void MainWindow::onSendConfiguration()
                          .arg(mapped.tables.timers.size());
     detail += tr("\n\nBus settings applied:\n%1").arg(busSummary.join(QStringLiteral("\n")));
     detail += tr("\n\nThe configuration is saved to flash so it reloads at every power-up.");
+    // Made for other firmware than this unit's: said in the confirmation, with
+    // what that changes, because the operator is deciding on this very Send.
+    if (target.differs) {
+        detail += target.changes.isEmpty()
+                      ? tr("\n\nThis configuration was made for %1, not for this unit's firmware. "
+                           "Nothing in it comes out differently on this unit.")
+                            .arg(targetName(m_config.capacity()))
+                      : tr("\n\nThis configuration was made for %1, not for this unit's firmware, "
+                           "and %n thing(s) in it come out differently on this unit (listed "
+                           "below). Make the unit its target (File → Target Firmware…) to work "
+                           "on it for this unit.",
+                           "", int(target.changes.size()))
+                            .arg(targetName(m_config.capacity()));
+    }
     // Said here rather than in a prompt of its own. It is worth knowing before
     // clicking OK, and it is not worth a question — the operator is looking at
     // the confirmation for this very send, which is exactly where a remark about
@@ -2036,6 +2236,19 @@ void MainWindow::onSendConfiguration()
     auto *detailLabel = new QLabel(detail, &dlg);
     detailLabel->setWordWrap(true);
     dlgLayout->addWidget(detailLabel);
+
+    // What comes out differently on this unit than on the document's target:
+    // unbounded like the warnings below (one line per name it keeps shorter),
+    // so it scrolls too.
+    if (!target.changes.isEmpty()) {
+        dlgLayout->addWidget(
+            new QLabel(tr("On this unit (%1):").arg(target.changes.size()), &dlg));
+        auto *changeView = new QPlainTextEdit(target.changes.join(QStringLiteral("\n")), &dlg);
+        changeView->setReadOnly(true);
+        changeView->setLineWrapMode(QPlainTextEdit::NoWrap);
+        changeView->setMaximumHeight(180);
+        dlgLayout->addWidget(changeView);
+    }
 
     // The warning list is unbounded (one line per mapper note), so it lives in
     // its own scrolling view instead of growing the dialog past the screen.
@@ -2142,7 +2355,9 @@ void MainWindow::onSendConfiguration()
     // a release: nullopt sends an empty Save-to-Flash payload, which the
     // firmware reads as "leave the stored version alone". Only a package —
     // through Send Secure Configuration — stamps a version on a unit.
-    auto *transfer = ConfigTransfer::send(&m_link, mapped.tables, /*verify=*/true, busSetups,
+    // In the unit's own record form, whatever the document targets.
+    auto *transfer = ConfigTransfer::send(&m_link, tablesForUnit(mapped.tables, unitCapacity),
+                                          /*verify=*/true, busSetups,
                                           /*saveToFlash=*/true, std::nullopt, configTitle,
                                           resetAfter, this);
     connect(transfer, &ConfigTransfer::progress, progress,
@@ -2154,11 +2369,30 @@ void MainWindow::onSendConfiguration()
     connect(progress, &QProgressDialog::canceled, transfer, &ConfigTransfer::cancel);
     const bool bound = bindCheck->isChecked() && !identity.uid.isEmpty();
     const QString boundTo = identity.uidText();
+    // Which extended device channels the configuration reads, for the notes
+    // below: each is said only when this unit does not publish it.
+    const auto readsAny = [&mapped](int first, int count) {
+        for (const int id : mapped.extendedDeviceChannelsRead)
+            if (id >= first && id < first + count)
+                return true;
+        return false;
+    };
+    const bool readsTxDropped = readsAny(DEVCH_TX_DROPPED_BASE, DEVCH_BUS_COUNT);
+    const bool readsSupply = readsAny(DEVCH_SUPPLY, DEVCH_USB_SUPPLY - DEVCH_SUPPLY + 1);
+    const bool unitMeasuresSupply =
+        m_deviceHardware && m_deviceHardware->hasFeature(HW_FEAT_SUPPLY_SENSE);
+    // A unit told to reset after the Send, that takes its port with it.
+    const bool reconnectAfter = resetAfter && unitIsUsbDevice();
+    const QString port = m_link.portName();
+    const qint32 baud = m_link.baudRate();
     connect(transfer, &ConfigTransfer::finished, this,
-            [this, progress, transfer, notApplied, bound, boundTo](bool ok, const QString &error) {
+            [this, progress, transfer, notApplied, bound, boundTo, readsTxDropped, readsSupply,
+             unitMeasuresSupply, reconnectAfter, port, baud](bool ok, const QString &error) {
         progress->close();
         progress->deleteLater();
         if (ok) {
+            const bool back = reconnectAfter
+                              && reconnectAfterRestart(port, baud, tr("Send Configuration"));
             QString text = transfer->flashSaveWasSkipped()
                 ? tr("Configuration sent and verified.\n\n"
                      "This firmware is too old to save to flash, so the configuration "
@@ -2173,6 +2407,17 @@ void MainWindow::onSendConfiguration()
             if (!transfer->skippedStages().isEmpty())
                 text += tr("\n\nSkipped (not accepted by this firmware):\n%1")
                             .arg(transfer->skippedStages().join(QStringLiteral("\n")));
+            // Said only when it matters: every unit before 1.0.15 lacks the
+            // list, and a configuration that never reads it loses nothing.
+            if (readsTxDropped && transfer->deviceLacked(CMD_WRITE_DEVICE_CHANNELS_EXT))
+                text += tr("\n\nThis configuration reads a Tx Dropped device channel, which "
+                           "this unit's firmware does not publish, so it reads 0 here. That "
+                           "needs device firmware 1.0.15 or newer.");
+            if (readsSupply && !unitMeasuresSupply)
+                text += tr("\n\nThis configuration reads the supply voltage, which only the CAN "
+                           "Triple 2.0 measures, so it reads 0 on this unit.");
+            if (back)
+                text += tr("\n\nThe device restarted and is connected again.");
             QMessageBox::information(this, tr("Send Configuration"), text);
         } else {
             QMessageBox::warning(this, tr("Send Configuration"), error);
@@ -2188,7 +2433,8 @@ void MainWindow::onSendConfiguration()
 // variant. Better refused here, with the unit untouched, than NACKed
 // ERR_OUT_OF_BOUNDS half way through a Send with CLEAR_CONFIG already done.
 // Firmware without the report holds what builtIn() says.
-bool MainWindow::tablesFitDevice(const DeviceTables &tables, const QString &title)
+bool MainWindow::tablesFitDevice(const DeviceTables &tables, const QString &title,
+                                 DeviceCapacity *unit)
 {
     DeviceCapacity capacity;
     QString error;
@@ -2202,6 +2448,8 @@ bool MainWindow::tablesFitDevice(const DeviceTables &tables, const QString &titl
     }
     if (!capacity.reported)
         capacity = DeviceCapacity::builtIn();
+    if (unit)
+        *unit = capacity;
     const QStringList over = tablesExceeding(tables, capacity);
     if (over.isEmpty())
         return true;
@@ -2480,6 +2728,7 @@ void MainWindow::onMonitorChannels()
     if (!m_monitorDialog) {
         m_monitorDialog = new MonitorChannelsDialog(&m_link, &m_config, this);
         m_monitorDialog->setAttribute(Qt::WA_DeleteOnClose);
+        m_monitorDialog->setUnitHardware(m_deviceHardware);
     }
     m_monitorDialog->show();
     m_monitorDialog->raise();
@@ -2536,17 +2785,32 @@ void MainWindow::onResetDevice()
                               QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
         != QMessageBox::Yes)
         return;
+    // Asked before the reset: afterwards the link is gone with the port.
+    const bool usbUnit = unitIsUsbDevice();
+    const QString port = m_link.portName();
+    const qint32 baud = m_link.baudRate();
     QString error;
     bool ok = false;
     {
         BusyScope busy(this);
         ok = m_link.requestSync(CMD_RESET_DEVICE, {}, nullptr, &error);
     }
-    if (ok)
-        QMessageBox::information(this, tr("Reset Device"),
-                                 tr("Reset command sent — the device is rebooting."));
-    else
+    if (!ok) {
         QMessageBox::warning(this, tr("Reset Device"), error);
+        return;
+    }
+    // The CAN Triple 2.0 is its own USB device: its restart takes the port
+    // away and brings it back. Wait for it and reconnect, as Update Firmware
+    // does, rather than leave this window disconnected from a unit that is
+    // running again. The 1.x unit sits behind an ST-LINK whose port stays.
+    if (usbUnit) {
+        if (reconnectAfterRestart(port, baud, tr("Reset Device")))
+            QMessageBox::information(this, tr("Reset Device"),
+                                     tr("The device restarted and is connected again."));
+        return;
+    }
+    QMessageBox::information(this, tr("Reset Device"),
+                             tr("Reset command sent — the device is rebooting."));
 }
 
 void MainWindow::onUpdateFirmware()
@@ -2591,8 +2855,11 @@ void MainWindow::onUpdateFirmware()
 
     // The device may be running different firmware now, and the open document
     // has not changed — but anything cached about the unit has. Re-read it
-    // rather than leaving stale protection state on screen.
+    // rather than leaving stale protection state on screen. The update closed
+    // and reopened the link, which forgot the board, so ask again: the version
+    // in the status bar is the thing most likely to have changed.
     updateProtectionState();
+    identifyConnectedUnit();
 }
 
 void MainWindow::onDeviceStatus()
@@ -2630,6 +2897,37 @@ void MainWindow::onDeviceStatus()
         text += tr("\n\nFirmware protocol: v1 (original — flash the firmware/ project "
                    "for live streams, transmit messages, and bus control)");
 
+    // Which board this is, and the firmware it runs. Asked again here rather
+    // than taken from what the unit said on connecting, so the dialog is right
+    // even if the unit behind the port has changed since.
+    {
+        DeviceHardware hardware;
+        QString hardwareError;
+        if (device_session::readHardware(&m_link, &hardware, &hardwareError)) {
+            m_deviceHardware = hardware;
+            updateConnectionStatus();
+            text += tr("\n\nBoard: %1").arg(hardware.familyName());
+            if (!hardware.reported) {
+                text += tr(" (firmware older than 1.0.15 cannot say more)");
+            } else {
+                const QString revision = hardware.boardRevisionText();
+                if (!revision.isEmpty())
+                    text += hardware.boardRevSource == HW_REV_SOURCE_DEFAULT
+                                ? tr(", revision %1 assumed").arg(revision)
+                                : tr(", revision %1").arg(revision);
+                text += tr("\nProcessor: %1").arg(hardware.processorText());
+                if (hardware.siliconMismatch())
+                    text += tr("\n⚠ That processor is not the %1's: this unit is running "
+                               "firmware built for another board.")
+                                .arg(hardware.familyName());
+                text += tr("\nFirmware: %1").arg(hardware.firmwareVersionText());
+                text += hardware.bootloaderVersion == 0
+                            ? tr(" (no bootloader)")
+                            : tr(" (bootloader %1)").arg(hardware.bootloaderVersion);
+            }
+        }
+    }
+
     // Identity, access and — the reason this is here — why a device that looks
     // inert is inert. "0 active messages" alone never explains a configuration
     // that belongs to a different unit.
@@ -2649,6 +2947,30 @@ void MainWindow::onDeviceStatus()
         default:
             text += tr("\nNo stored configuration — the device is running bus defaults.");
             break;
+        }
+    }
+
+    // A stored device script that is not running: stopped on an error, or
+    // refused when it loaded. The other reason the CAN Triple 2.0's PWR light
+    // flashes red, and otherwise visible nowhere without opening the script.
+    // Behind the Get password like any read; a unit that will not say, or
+    // firmware without scripts, adds nothing here.
+    {
+        QByteArray reply;
+        ScriptStatus script{};
+        if (m_link.requestSync(CMD_SCRIPT_STATUS, QByteArray(), &reply, nullptr)
+            && reply.size() >= int(offsetof(ScriptStatus, code_bytes))) {
+            std::memcpy(&script, reply.constData(),
+                        size_t(qMin(reply.size(), int(sizeof(script)))));
+            if (script.present && script.verify_result != 0)
+                text += tr("\n⚠ The stored device script was refused by this firmware "
+                           "(code %1), so it is not running.")
+                            .arg(script.verify_result);
+            else if (script.present && script.suspended)
+                text += tr("\n⚠ The device script stopped on an error (fault %1) and will not "
+                           "run again until the configuration is sent again or the unit "
+                           "restarts.")
+                            .arg(script.fault);
         }
     }
 
@@ -2774,6 +3096,37 @@ void MainWindow::onDeviceStatus()
 // Not gated by a password, like the MCU ID beside it and for the same reason:
 // nothing here describes a configuration. An RMA cannot be conditioned on
 // holding the password of the configuration being returned as faulty.
+void MainWindow::onLedBrightness()
+{
+    if (!ensureConnected())
+        return;
+    const QString title = tr("LED Brightness");
+    device_session::DeviceSettingsState state;
+    QString error;
+    bool ok = false;
+    {
+        BusyScope busy(this); // sync round trip on the main thread; block re-entry
+        ok = device_session::readDeviceSettings(&m_link, &state, &error);
+    }
+    if (!ok) {
+        QMessageBox::warning(this, title, error.isEmpty() ? tr("Unexpected response") : error);
+        return;
+    }
+    if (!state.supported) {
+        QMessageBox::information(
+            this, title,
+            tr("This unit has no brightness setting. It is a CAN Triple 2.0 setting, and needs "
+               "the CAN Triple 2.0 firmware that came with this Device Manager or later."));
+        return;
+    }
+    // The write is gated like a Send: prove the password now, if the unit has
+    // one, rather than have the first movement of the slider refused.
+    if (!ensureDeviceAccess(AccessFunction::SendConfiguration))
+        return;
+    LedBrightnessDialog dialog(&m_link, state.settings, this);
+    dialog.exec();
+}
+
 void MainWindow::onGetDeviceInfo()
 {
     if (!ensureConnected())
@@ -2836,6 +3189,22 @@ void MainWindow::onGetDeviceInfo()
             device_session::readIdentity(&m_link, &identity, &identityError) && identity.supported;
         text += haveIdentity ? tr("MCU ID: %1\n").arg(identity.uidText())
                              : tr("MCU ID: %1\n").arg(tr("not reported by this firmware"));
+    }
+    // Which board, from the silicon and the board's own record rather than
+    // from the Product text above: the text says what somebody burned, this
+    // says what the processor is. Firmware older than 1.0.15 cannot answer,
+    // and every unit running it is a CAN Triple 1.x.
+    {
+        DeviceHardware hardware;
+        QString hardwareError;
+        if (device_session::readHardware(&m_link, &hardware, &hardwareError)) {
+            const QString revision = hardware.boardRevisionText();
+            text += revision.isEmpty() ? tr("Board: %1\n").arg(hardware.familyName())
+                                       : tr("Board: %1, revision %2\n")
+                                             .arg(hardware.familyName(), revision);
+            if (hardware.reported)
+                text += tr("Processor: %1\n").arg(hardware.processorText());
+        }
     }
     if (info.dateText.isEmpty())
         text += tr("Manufactured: %1").arg(unknown);
@@ -2983,6 +3352,10 @@ void MainWindow::onConnectionSettings()
     ConnectionSettingsDialog dialog(&m_link, this);
     dialog.exec();
     updateConnectionStatus();
+    // The dialog can connect, or reconnect to another port: whatever is on the
+    // link now is asked which board it is.
+    if (m_link.isOpen())
+        identifyConnectedUnit();
 }
 
 // The manual is a window rather than a dialog, and a singleton like Monitor
@@ -3056,8 +3429,8 @@ void MainWindow::onAbout()
 {
     QMessageBox::about(this, tr("About CAN Triple Device Manager"),
                        tr("<h3>CAN Triple Device Manager %1</h3>"
-                          "<p>Configuration tool for the CAN Triple gateway "
-                          "(STM32G473, 3× CAN).</p>"
+                          "<p>Configuration tool for the CAN Triple gateways "
+                          "(3× CAN).</p>"
                           "<p>Copyright © 2026 Minton Performance.</p>"
                           "<p>This program is open-source software under the MIT "
                           "License. It comes with ABSOLUTELY NO WARRANTY, to the "

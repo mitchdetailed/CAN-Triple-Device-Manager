@@ -325,6 +325,12 @@ private:
     QComboBox *m_crcElemId[kCrcElementSlots] = {};
     QComboBox *m_crcElemData[kCrcElementSlots] = {};
     QLineEdit *m_crcElemRaw[kCrcElementSlots] = {};
+    // The CAN Triple 2.0's two kinds: ID (Whole) — how many bytes and which
+    // end first — and Data Run, first byte to last.
+    QComboBox *m_crcElemIdBytes[kCrcElementSlots] = {};
+    QComboBox *m_crcElemIdOrder[kCrcElementSlots] = {};
+    QComboBox *m_crcElemRunFirst[kCrcElementSlots] = {};
+    QComboBox *m_crcElemRunLast[kCrcElementSlots] = {};
 };
 
 } // namespace ct

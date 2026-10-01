@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Updating Firmware</title>
-<link rel="stylesheet" href="help.css">
+<link rel="stylesheet" type="text/css" href="help.css">
 </head>
 <body>
 <h1>Updating Firmware</h1>
@@ -29,6 +29,26 @@ kept intact until the new firmware is verified in place, so the device simply
 finishes the job the next time it powers up. It will retry the install up to
 three times; a unit interrupted that many times in a row needs an ST-Link.</p>
 
+<h2>On a CAN Triple 2.0</h2>
+
+<p>A CAN Triple 2.0 keeps copies of its firmware: the version it runs, the one
+before it, and the one it left the factory with. An update is stored beside the
+running version, never over it, and after the restart the new version runs
+<i>on trial</i>. <b>Update Firmware</b> ends the trial as soon as the unit
+answers again, and the unit ends it by itself after a minute of running.</p>
+
+<p>If the new version does not start properly, so that the unit keeps
+restarting before the trial ends, the unit goes back to the version it had
+before, by itself, after three starts. The <b>Device</b> panel then says so,
+naming the version that did not start. If the installed firmware is ever found
+damaged when the unit starts, the unit writes it again from its copy and says
+that too.</p>
+
+<p>The <b>Device</b> panel lists the copies:
+<i>Firmware kept on the unit: A 2.0.1 (running), B 2.0.0 (previous), factory
+2.0.0</i>. The previous copy is the one a failed update goes back to; the
+factory copy is the last resort.</p>
+
 <h2>Doing it</h2>
 
 <ol>
@@ -39,7 +59,10 @@ shows what is currently running.</li>
 <li><b>Browse…</b> and pick the <code>.ctf</code> file you were supplied. The
 program checks it immediately, using the same test the device itself
 applies — a damaged or wrong-product file is refused here, before anything is
-sent.</li>
+sent. The firmware that came with this Device Manager is in its install
+folder, under <code>Firmware</code>: the CAN Triple's there (its variants in
+<code>Variants</code>), and the CAN Triple 2.0's in <code>CAN Triple
+2.0</code>, where Browse… opens when a CAN Triple 2.0 is connected.</li>
 <li>Read the warnings, if any (see below).</li>
 <li>Leave <b>Save a copy of the device's configuration</b> ticked.</li>
 <li><b>Update Firmware</b>.</li>
@@ -105,6 +128,22 @@ from here like any other. <b>Update Firmware</b> stays disabled until then.</td>
 <tr><td>This image needs bootloader version …</td>
 <td>The file is newer than this unit's bootloader can install. You need either
 an older image or a bootloader update over ST-Link.</td></tr>
+
+<tr><td>This image is firmware for the CAN Triple 2.0, and this unit is a CAN
+Triple (or the reverse)</td>
+<td>There are two boards, the CAN Triple and the CAN Triple 2.0, and each takes
+its own firmware. The <b>Device</b> panel names the board, and the file's panel
+names the board the file is for. Pick the file for this unit's board.</td></tr>
+
+<tr><td>This unit is a … This version of the Device Manager does not update
+that board</td>
+<td>The unit is a board newer than this program. Update the Device
+Manager.</td></tr>
+
+<tr><td>… is firmware for the CAN Triple 2.0</td>
+<td>Shown when you pick the file, not as a warning: the file is for the other
+board. A unit installs only firmware built for its own board, and every version
+of this program and of the device's own firmware refuses the other's.</td></tr>
 </table>
 
 <h2>If something goes wrong</h2>
@@ -124,10 +163,29 @@ itself is probably damaged — get a fresh copy.</td></tr>
 <td>Same cause, caught after the restart. The previous firmware is still running
 and unharmed.</td></tr>
 
-<tr><td>The device did not come back within 25 seconds</td>
+<tr><td>The device did not come back within 25 seconds (60 for a CAN Triple
+2.0)</td>
 <td>Wait a little longer, then reconnect and reopen this dialog. The install
 either finished or was never started; either way the device is running valid
-firmware.</td></tr>
+firmware. A CAN Triple 2.0 whose new firmware does not start goes back to the
+firmware before it by itself; turning it off and on counts as one of the three
+starts that takes.</td></tr>
+
+<tr><td>Firmware … did not start properly, so the unit went back to the
+firmware it was running before</td>
+<td>CAN Triple 2.0 only. The previous firmware is running and unharmed. Do not
+install that file again; tell whoever supplied it.</td></tr>
+
+<tr><td>The installed firmware was found damaged at start-up and was written
+again from the unit's stored copy</td>
+<td>CAN Triple 2.0 only. Nothing to do: the unit repaired itself. If it keeps
+happening, the unit may have a hardware fault.</td></tr>
+
+<tr><td>… is early CAN Triple 2.0 firmware, from before the 2.0 firmware
+line</td>
+<td>Shown when you pick the file. It was made for the first CAN Triple 2.0
+boards before their firmware line began, and does not run on a unit that has
+the line. Use a 2.0.0 or later file.</td></tr>
 
 <tr><td>The device is password protected</td>
 <td>The update asks for the Send Configuration password and, on a unit that also
@@ -151,6 +209,15 @@ Configuration</b> and save it first, then Send it back afterwards.</td></tr>
 has no valid firmware to run and needs an ST-Link. This should not happen from a
 failed update — the running firmware is never touched until a replacement has
 been fully verified — but it is what a physically damaged unit looks like.</p>
+
+<p>Each board takes only its own firmware. The dialog shows which board a file
+is for, and a CAN Triple 2.0 file is refused for a CAN Triple, and the reverse,
+naming both. See <a href="can-triple-2.html">The CAN Triple 2.0</a>.</p>
+
+<p>The Initial Programming Tool reads which board is attached before it erases
+or writes anything. It programs the CAN Triple; on a CAN Triple 2.0, or on
+anything that is not a CAN Triple, it says what it found and stops with
+<i>Action Not Completed</i>.</p>
 
 <h2>See also</h2>
 

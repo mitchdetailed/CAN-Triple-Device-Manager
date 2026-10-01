@@ -1,9 +1,11 @@
 #include "help_window.h"
+#include "help_style.h"
 #include "window_memory.h"
 
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
 #include <QHelpContentWidget>
@@ -14,6 +16,7 @@
 #include <QHelpSearchQueryWidget>
 #include <QHelpSearchResultWidget>
 #include <QLineEdit>
+#include <QScrollBar>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStyle>
@@ -48,8 +51,12 @@ public:
 
     QVariant loadResource(int type, const QUrl &url) override
     {
-        if (url.scheme() == QLatin1String("qthelp"))
+        if (url.scheme() == QLatin1String("qthelp")) {
+            // The pages' one stylesheet, in the theme's colours: help_style.h.
+            if (url.path().endsWith(QLatin1String("/help.css")))
+                return themedHelpStyleSheet(m_engine->fileData(url), palette());
             return m_engine->fileData(url);
+        }
         return QTextBrowser::loadResource(type, url);
     }
 
@@ -61,6 +68,19 @@ protected:
             return;
         }
         QTextBrowser::doSetSource(url, type);
+    }
+
+    // Tools → Theme while a page is open: the page again, with the stylesheet
+    // the new palette gives it, where the reader was. Loading a page drops the
+    // document's copy of the old stylesheet, so the reload asks for it anew.
+    void changeEvent(QEvent *event) override
+    {
+        QTextBrowser::changeEvent(event);
+        if (event->type() != QEvent::PaletteChange || source().isEmpty())
+            return;
+        const int at = verticalScrollBar()->value();
+        reload();
+        verticalScrollBar()->setValue(at);
     }
 
 private:

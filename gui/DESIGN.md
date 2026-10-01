@@ -62,7 +62,8 @@ dash-manager layout and navigation.
   ceiling in §3), signals **1000**, math 100, conditions **200**, counters 50,
   timers **50**, constants 100, relays 32, 2x16 tables 8, 8x8 tables **8**
   (and therefore 64 grid-row records — table `t` owns rows `t*8 .. t*8+7`),
-  integrators 8, transmit-CRC8 rules 20, and 384 script chunks of 64 B. The GUI
+  integrators 8, transmit-CRC8 rules 20 (100 on a CAN Triple 2.0, which says so
+  in its capacity report), and 384 script chunks of 64 B. The GUI
   enforces each of these before a Send, so a configuration that would not fit is
   refused at the desk rather than part-written to a device. Since firmware
   1.0.10 the device also **reports** them — `CMD_GET_CAPACITY` (0x50), and the
@@ -100,7 +101,8 @@ READ/WRITE_LICENSE **0x46/0x47** + LICENSE_CHALLENGE **0x48** +
 LICENSE_RESPONSE **0x49** + LICENSE_KEY_PROVE **0x4A**, READ_CONFIG_VERSION
 **0x4B**, the sealed install tunnel SEAL_BEGIN/FRAME/END **0x4C-0x4E**,
 GET_PROTECTION **0x4F** (see "Readout protection") and GET_CAPACITY **0x50**
-(see "The capacity report"). Replies are ACK **0x80**, NACK **0x81**,
+(see "The capacity report"); on the CAN Triple 2.0 line, FW_CONFIRM **0x57**
+(see "Updating a CAN Triple 2.0"). Replies are ACK **0x80**, NACK **0x81**,
 MONITOR_STREAM **0x82**, VALUE_STREAM **0x83** and LOG **0x90**.
 
 **0x0B is retired**: it was LOAD_FROM_FLASH, which reloaded a stored BACKUP
@@ -244,6 +246,44 @@ mismatch between the two numbers is the point rather than an oversight.
   its whole geometry (`windows/main/geometry`, QWidget save/restoreGeometry,
   the first-run centring kept as the fallback); switched on by main() only, so
   the tests and the --screenshots helper never write it.
+- **Themes** — Tools → Theme (`src/ui/theme.h`/`.cpp`): Windows Default, the
+  program as it always looked (the native style and the platform's palette,
+  light or dark as Windows is set), and four of its own: Light, Dark, Midnight
+  Blue and Carbon Red, each Qt's Fusion style under a full palette (every role,
+  in all three colour groups, disabled text set back), so they look the same on
+  every Windows version and whatever the desktop is set to. `applyTheme` sets
+  the style, then the palette (a style change resets the palette), and applies
+  at once to open windows; Windows Default goes back to the style noted before
+  the first change and to an empty palette, which leaves the platform's. The
+  choice is kept per Windows account (`appearance/theme` in QSettings, like the
+  recent files) and applied in main() before the first window; `--theme <name>`
+  draws one run in a theme without keeping it (the --screenshots helper stays
+  on Windows Default unless one is named). Colours that carry a meaning are not
+  in any palette, so the dialogs ask theme.h for them with the palette they are
+  drawn in: `errorColor`, `warningColor`, `okColor`, `mutedColor`, `okFill`,
+  and `themedHtml`, which swaps the #c0392b/#b9770e the dialogs' rich text has
+  always spelled its errors and warnings in. Those are inline, so no test
+  program built from a dialog needs theme.cpp. The CAN Viewer and the Lua
+  console, which can be open while the theme changes, redo what they colour
+  themselves on `QEvent::PaletteChange`. The help follows the theme
+  (`src/ui/help_style.h`): every page links one stylesheet, help.css, and the
+  help browser serves it through `themedHelpStyleSheet` — as shipped on a light
+  palette, and on a dark one (the three dark themes, and Windows Default on a
+  dark desktop) with each of its twelve colours swapped in one pass for the
+  palette's: page and text from Base and Text, code, rules and table headers
+  blended between them, notes and warnings tinted blue and amber into the page,
+  and the link colour lifted until it reads at 4.5:1 (`readableOn`; Windows'
+  own dark palette gives links #0063b1 on #2d2d2d, 2.2:1). An open page is
+  reloaded on `PaletteChange`, where the reader was. The pages' links now carry
+  `type="text/css"`: QTextBrowser imports a linked stylesheet only with it, so
+  until 2026-09-28 the manual showed without help.css at all.
+  `test_help_theme` holds the served stylesheet (as shipped when light; every
+  colour mapped, readable and nothing else changed when dark; every page's link
+  typed) and drives the real help window through the themes.
+  `test_theme` holds every text colour of every theme to WCAG's
+  4.5:1 on each surface it is drawn on (7:1 for body text), the meaning colours
+  on every theme and on a plain light and dark desktop, and the switch, the way
+  back and the kept choice.
 ## Set Access Passwords
 
 **Online → Set Access Passwords…** (`src/model/access_keys.*`,
@@ -892,6 +932,85 @@ table for table, so a standard unit reporting anything else is a unit the two
 headers have drifted about; a variant reports its own numbers, which is the
 point.
 
+**Format 2 (the CAN Triple 2.0 line)** appends a `CapacityExtension` after the
+entries: its own `size` first, so a later firmware can lengthen it without
+another format, then what the unit holds besides its tables. Today that is its
+retained values: how many counters and integrators with Preserve value it keeps
+(together), how often it writes them while they change, and whether writing
+them wears anything (`CAPACITY_RETAINED_NO_WEAR`). A 2.0 keeps them in FRAM, so
+it keeps every counter and integrator, writes them every 0.1 s and wears
+nothing. The CAN Triple (1.x) sends format 1 and states none of this; the
+Manager then assumes its flash ring: 20 values, once a minute, with a wear
+budget (`kRetainedValuesBuiltIn`, held against the 1.x `PRESERVE_MAX` in
+`test_firmware_link`). The figures ride in `DeviceCapacity` and the document's
+target like the tables do, but are not part of `sameLayout()` or the layout
+identity: no table moves for them. They set the limit Check Channels enforces
+and the wear note it gives, the Counters and Integrators editors' budget and
+tooltips, a row in Target Firmware, and `tablesExceeding`, so a Send refuses a
+configuration that preserves more values than the unit on the cable keeps.
+`test_firmware_v2` parses the 2.0 firmware's own report initializer with the
+Manager's parser.
+
+The extension also carries the unit's **script cost model**: its tick budget
+and what each opcode costs (`script_budget`, `script_op_costs`). A 2.0 charges a
+table measured on its floating-point hardware, in units about half the size of
+the CAN Triple's, against a budget set so that a whole budget finishes inside
+the VM's cycle ceiling. The Manager reads them into
+`DeviceCapacity::scriptBudget` and `scriptCosts` (recorded in the document like
+the retained figures), and the script editor holds a `ScriptCostScope` for its
+document's target while it is open: the compiler's straight-line cost, the
+disassembly's per-line charge and the simulator's budget are then the unit's.
+The VM's C is the firmware's own, linked from `libct_device_core`, and keeps the
+model in two globals behind host-only hooks (`script_set_host_costs`,
+`script_set_host_budget`) that every firmware image compiles out; a scope puts
+the previous model back when it ends, so scopes nest. Format 1, and a 2.0
+extension that ends before these fields (the first 2.0 builds), state no model:
+such a unit charges the CAN Triple's table, and so does the Manager.
+`test_firmware_v2` puts the 2.0 report's model in force and checks every opcode
+and the budget against the firmware's own table; `test_script_sim` checks the
+simulator charges and stops per target.
+
+The extension ends with **`crc8_features`**: what the unit's Transmit CRC8 does
+beyond the CAN Triple's. A 2.0 states two bits, each also meaning byte positions
+0..63 for the stamp and a Data element (`DeviceCapacity::crc8MaxByte()`, 7
+without them):
+
+- `CAPACITY_CRC8_WHOLE_ID` is an element feeding the identifier's bytes in one
+  row. On the wire it is type 3, with the value's low three bits the count (0
+  means by frame, 2 or 4) and bit 7 meaning LSB first.
+- `CAPACITY_CRC8_DATA_RUNS` is an element feeding a run of frame bytes. On the
+  wire it is type 0x40 | first, with the value the last byte. It counts down
+  when the first is the higher, and leaves the stamp's own byte out.
+
+The model holds them as `CrcElement::IdAll` (value the count, `lsbFirst`) and
+`CrcElement::DataRun` (value the first, `last`). The mapper encodes and decodes
+them, and refuses a section that uses what the target does not state
+(`crc8Unsupported`). A firmware that does not know an element type feeds nothing
+for it, and a byte past 7 has nowhere to go, so the unit would stamp a different
+CRC and every receiver checking it would drop every frame. The same guard
+appears in three places:
+- Check Channels says it as errors naming the 2.0;
+- the section editor greys the two types and ends its byte lists at 7, or at
+  the highest byte the section already uses, so an existing recipe still shows;
+- `sameCrc8()` makes a target change that alters the features a document edit,
+  the way the other figures do.
+
+File schema 22 exists for these elements: an older build would read either one
+as a single Data byte.
+
+After it comes **`can_features`**, a word that was a reserved 0 until it had a
+meaning, so every earlier 2.0 build states none. `CAPACITY_CAN_FAST_DATA` says
+the unit runs CAN FD data phases of 4, 5 and 8 Mbit/s: its CAN clock divides
+them exactly and it compensates for the transceiver's loop delay. Without that
+compensation no node transmits a data phase much above 4 Mbit/s. The Manager
+reads it into `DeviceCapacity::canFeatures` / `fastData()`, recorded in the
+document like the other figures (`sameCan()`). Communications Setup lists 4M,
+5M and 8M after 2M, greyed on any other target. Check Channels calls a bus at
+one of them an error there, rather than the old quiet fall-back to 2M. On such a
+target the dialog still opens an old file's 4M or 5M as 2M, the fastest that
+target runs. Schema 22 covers these rates too: an older build would open them
+as 2M and Send them so.
+
 What the report does not make flexible: record shapes (CRC8 elements per rule,
 table sites, condition terms, name lengths) are fixed by the wire format; the
 channel pool is the signal table's capacity and every calculation still takes
@@ -1014,6 +1133,351 @@ PCAN channels found that 1.0.12 did not degrade under overload, it stopped.
   answering until its power was cycled.
 
 The firmware's own account of these changes is kept with the firmware.
+
+### The hardware report
+
+There are two boards now. The CAN Triple (1.x) carries a 48-pin STM32G473 and
+talks through an ST-LINK's serial port; the CAN Triple 2.0 carries a 100-pin
+STM32G474 with native USB, QSPI flash and FRAM. Each takes its own firmware. An
+image carries its board as the `product_id` in its header
+(`FW_PRODUCT_CAN_TRIPLE` 0x4333, `FW_PRODUCT_CAN_TRIPLE_2` 0x5632), and every
+bootloader, application and Manager already refuses a product ID that is not
+its own — so no version of anything installs a 2.0 image on a 1.x unit, or the
+reverse.
+
+What the product ID cannot do is tell a host which board it is talking TO.
+Firmware 1.0.15 answers `CMD_GET_HARDWARE` (0x54, ungated, fixed shape, empty
+request — a payload is refused) with a `HardwareReport`, three kinds of fact
+each read from where it is true. The *family* the running firmware was built
+for, and the product ID in its own header. The *silicon*: the package code and
+flash size ST writes into every part, and the debug ID code — a 1.x's part says
+48-pin, a 2.0's 100-pin, and a family that disagrees with its silicon
+(`DeviceHardware::siliconMismatch()`) is an image running on the wrong board.
+The *board revision* and its hardware options (`HW_FEAT_*`), from a
+machine-readable board descriptor burned into OTP after the manufacturing record
+when there is one, otherwise the family's first revision. It also carries the
+running firmware and bootloader versions, which until now only
+`FW_UPDATE_STATUS` gave, behind the Get password. A feature bit means the board
+has the hardware AND the running firmware drives it, so a host gates on the bit
+alone. Everything in the reply a host test can reach — the descriptor checks
+(magic, format, family and CRC; anything else reads as no descriptor), the fold
+of descriptor and defaults, the masking — is `hw_identity.c`, free of the HAL and
+compiled into `test_firmware_link`; only the register reads are in the board's
+glue.
+
+Firmware without the command NACKs `ERR_INVALID_CMD`, and the Manager reads
+that as a CAN Triple 1.x (`DeviceHardware::builtIn()`, `protocol/hardware.h`):
+every 2.0 ships with firmware that answers, so that reading is always right. The
+Manager asks on connecting — a short timeout and one retry, so a port with
+nothing behind it costs a moment — and shows the board in the status bar,
+Device Status and Get Device Info. Then it refuses by board. Update Firmware
+stops on a unit of a board this Manager does not know, on an image for the
+other board than the unit's, and on a report it cannot read while the status
+reads fine.
+`FirmwareImage::load` names another board's file ("firmware for the CAN Triple
+2.0") before any other check, so the wrong file is never called too large or
+corrupt. The Initial Programming Tool reads the package code and debug ID in
+its read-only probe, after the option register (a protected part may refuse
+the reads, and OpenOCD stops at the first refusal), and turns away a 2.0 or
+anything that is not a CAN Triple before it erases or writes.
+
+### The extended device channels
+
+Firmware 1.0.15 adds `Device CAN1..3 Tx Dropped`: frames each bus was asked to
+send, by a transmit message, a relay or an injected frame, that never reached
+the wire. Either the bus's transmit queue was full, or the frames were still
+waiting when the bus was stopped. On a CAN Triple 2.0 they also count a
+transmit message's data replaced by a newer period while its frame waited, and
+frames still waiting when a new configuration took over (see "Transmit
+messages on a CAN Triple 2.0"). They are counted since boot, saturate, and
+survive a configuration clear like the other totals.
+
+They could not join the header's list. `DeviceChannelsConfig` is part of the
+configuration header, so growing it again would cost a store version, and with
+it every unit's stored configuration. Every Manager up to 1.2.6 also discards a
+`CMD_READ_DEVICE_CHANNELS` reply longer than the 82 bytes it knows, so a longer
+list would break every Get those Managers make. So the ids continue past
+`DEVCH_COUNT` (`DEVCH_EXT_BASE` and `DEVCH_TOTAL` in `wire_structs.h`) into an
+*extended* list with a command pair of its own:
+`CMD_WRITE_DEVICE_CHANNELS_EXT` (0x55, Send password) and
+`CMD_READ_DEVICE_CHANNELS_EXT` (0x56, Get password, empty request). The list
+has its own stored record, committed with the configuration but outside its
+CRC, so a unit taken back to older firmware still loads its configuration. The
+write takes a shorter list as a prefix, as the header's pair does. It also
+takes a LONGER one and drops the entries it does not publish, because this list
+is meant to grow and a host one release ahead of the unit must still be able to
+Send. Half an entry is refused. `CMD_CLEAR_CONFIG` empties the list along with
+the tables it belonged to.
+
+The Manager maps the new channels like the others (every device channel gets a
+slot on every Send). It writes the list as an optional step after the header's
+list, and a Get reads it as an optional step. Firmware before 1.0.15 NACKs both
+with `ERR_INVALID_CMD`, and both steps take that quietly
+(`ConfigTransfer::deviceLacked`) instead of listing a skipped step. Every unit
+in the field before 1.0.15 answers that way, so the note would appear on every
+Send and Get. The Get reads the list as empty. A Send says the channels read 0
+only when the configuration reads one of them. Any other refusal of either step
+is listed as before.
+
+A sealed package cannot take that route. Every Manager's relay stops at the
+first refusal, and by the time the list's write arrives the unit has been
+cleared. So `buildSecurePackage` writes the list only when the configuration
+READS one of the channels. That is `MappingResult::readsExtendedDeviceChannels`:
+the mapper sets it for a table reference, and `mapWithScript` for a `LOADSIG`
+in the script image, which also covers a retained image with no source. Such a
+package records `needsExtendedDeviceChannels` in its policy, and the install
+verdict refuses a unit whose hardware report says older than 1.0.15. Its stream
+also opens with an empty write of the list, ahead of any password or table, so
+a Manager without that check is refused by the unit itself at frame 1 with
+nothing changed, and `SealedInstall::describeFailure` says so. A package whose
+configuration does not read the channels leaves the write out and installs on
+any firmware that takes sealed packages. On 1.0.15 the list is then empty,
+which is right for a configuration that never reads it.
+
+In `test_firmware_link`, `testTxDroppedDeviceChannels` pins the wire rules and
+the stored record, `testExtendedDeviceChannelsTransfer` the Send and Get round
+trip against units with and without the pair, and the Builder's end-to-end test
+the stream's shape, opened with the fleet key.
+
+### Sending to a CAN Triple 2.0
+
+A Send is the same commands on both boards, and the Manager sends it the same
+way. What differs is the unit's side: a CAN Triple 2.0 stages the Send beside
+the configuration it is running, which keeps running until the SAVE. A host
+sees three things. Reads during a Send answer what the Send wrote, not the
+running configuration, so a Verify still verifies the Send; that includes the
+name, version, message passwords, device channels and the bus setup, which
+CONTROL_CAN holds until the SAVE instead of applying. The SAVE takes longer,
+up to about a second for a large configuration, well inside the flash timeout,
+because it is where the new configuration replaces the old one; a retry after a
+timeout lands as a no-op commit. And a Send abandoned part way (the host went
+away) leaves the unit on its running configuration, not on an empty one: the
+unit gives up on a Send after a USB disconnect, or a minute without a Send
+command. Access keys, the CAN Viewer key and the chip binding behave as on the
+CAN Triple. Frames the running configuration queued and has not yet sent are
+dropped at the SAVE rather than sent under the new one, and count as Tx
+Dropped.
+
+### Transmit messages on a CAN Triple 2.0
+
+A cyclic message says what its channels are now, so a frame of it that has
+waited a whole period is out of date. On the CAN Triple a message queues a frame
+every period whether or not the last one has gone, and a bus that nothing
+acknowledged for a while receives the whole backlog, oldest first, when a node
+appears. A CAN Triple 2.0 keeps at most one period's frames of a message
+waiting: if they are still waiting when the message comes due again, they are
+given the new period's data where they stand and nothing new is queued. A
+message sent one variant a period refreshes the variant that is waiting and
+holds its rotation, so every variant still goes out in turn; one that sends
+every variant each period refreshes the variants of the batch still waiting,
+and queues the next batch only when all of this one has gone. The data a
+refresh replaces never reaches the wire, so it counts as Tx Dropped, and a
+refreshed frame is not a new one: it is not counted as transmitted again, sets
+no transmit event, and does not appear in the CAN Viewer a second time. While
+the unit is error passive, which is where a transmitter nothing acknowledges
+sits, its CAN controller is given one frame at a time, so what waits stays
+where it can still be refreshed. Relayed frames and injected frames are frames
+in their own right and are never refreshed. When the messages on a bus ask for
+more than it can carry, the shortfall is shared: every message sends the same
+share of its periods, rather than some keeping their full rate while others
+fall to half. Nothing about this reaches the Manager's side of the wire: the
+counts and the channels are the ones it already reads.
+
+### Names on a CAN Triple 2.0
+
+A CAN Triple 2.0 keeps the names of its messages, signals and relay rules apart
+from the records, in a label store: 32 bytes of UTF-8 each, zero-padded. Its
+capacity report says so (`CapacityExtension::label_bytes`, 32; zero or absent
+means the names are in the records, as on every 1.x and the 2.0 builds before),
+and `DeviceCapacity::labelsApart()` is the one question the Manager asks.
+
+**The records.** The three labelled records go to such a unit without their
+label fields, as one run of the 1.x struct each: a message is the 14 bytes
+before its label, a signal the 32 bytes after it (the label leads the 1.x
+signal record), a relay the 11 bytes before it (`V2_*_AT` / `V2_*_BYTES` in
+wire_structs.h). `sliceFor<T>()` in config_transfer.cpp encodes and decodes
+them from the 1.x structs, so the mapper, the plans and the Get parse stay
+single; a sliced record comes back into a zeroed struct, label fields empty.
+The unit refuses a record of the wrong size (ERR_INVALID_LEN), so a Manager
+that does not know the slices cannot half-write one. `test_firmware_v2` holds
+every field's offset in each slice to the 2.0's own `protocol.h`.
+
+**The names.** `CMD_WRITE_LABELS` (0x59) and `CMD_READ_LABELS` (0x5A) carry
+`u8 kind, u16 start, u16 count`, then `count` 32-byte names on a write and on
+a read's reply (the reply echoes the five bytes, which is why the write's
+payload is the verify's expected echo). Kinds: message 0, signal 1, relay 2,
+each indexed like its table. A write is taken only inside a Send (between
+CLEAR and SAVE; ERR_FLASH_WRITE otherwise) under the Send password; a read
+needs the Get password, like every read. The names switch with the
+configuration at the SAVE, so an abandoned Send leaves the running
+configuration's names, and a re-sent chunk that matches what is already there
+is accepted (a retransmit after a lost ACK).
+
+**The Manager.** `DeviceTables` carries a name list per labelled table beside
+the records (`messageLabels`, `signalLabels`, `relayLabels`). `mapToDevice`
+fills them for every target, clipped to what the target keeps
+(`channelNameBytes()` / `messageNameBytes()`: 32 on such a 2.0, 31 and 17
+otherwise), and still fills the records' own fields, so a 1.x Send is
+unchanged. A Send to a unit with names apart writes the sliced records, then
+every name slot the tables fill, and verifies both; a Get reads a name slot per
+record over each table's range, and `mapFromDevice` prefers the list's name
+over the field's. `settleLabels()` runs before every Send so that tables with
+names on one side only (a Get from the other kind of unit, restored as a
+backup) reach the target with them: the list from the fields, or the fields
+from the list, clipped on a character boundary.
+
+**The unit's form, not the document's.** The mapper judges the tables against
+the document's target, but the record form is the connected unit's: the Send
+command, an unsealed package install and the update window's restore all send
+`tablesForUnit(tables, unitCapacity)`, from the capacity they already read to
+check the counts. A document for a CAN Triple 2.0 sent to a CAN Triple goes as
+whole records (the names clipped to its fields), and the other way round as
+sliced records and names. Without it, the first case is refused by the CAN
+Triple at the first record, after its CLEAR has erased the configuration in
+place (`test_firmware_link` sends one both ways against the real firmware);
+and an update that moves a 2.0's names out of its records could not restore
+its own backup.
+
+**A unit that is not the target.** The form is not the whole story: a document
+made for a 2.0 may use what only a 2.0 runs (its CRC8 elements, FD data phases
+above 2 Mbit/s), and its 32-byte names come out shorter on a CAN Triple.
+`checkUnitTarget()` (model/unit_target.h) answers what the configuration
+becomes on the connected unit, when that unit is not the document's target
+(`DeviceCapacity::sameTarget`: the layout and every stated feature; the label
+and `reported` are left out, since they say where the numbers came from). It
+validates and maps the document twice, once against its target and once
+against the unit, and keeps what only the unit's run has: its errors are
+`problems` (the Send is refused, with the list), its warnings `changes` (the
+confirmation lists them under "On this unit"). Both runs are on copies
+(`copyContentTo`), and neither is ever sent, because a copy does not carry the
+message passwords the mapper reads; judging both sides on copies means what a
+copy lacks it lacks twice, and the difference is the unit's alone. The Send
+command and the unsealed package install ask it (the package path counts,
+never lists, since its contents are not shown); the update window's restore
+does not, since the unit it restores to is the one the backup came from.
+`test_roundtrip`'s `testUnitTarget` pins it, including a unit with the same
+layout and one feature fewer.
+
+**Sealed packages.** A package built from a document whose target keeps names
+apart carries the sliced records and the name writes, and a unit that keeps
+names in its records would refuse the first sliced record only after the
+stream's CLEAR, which on a CAN Triple erases the configuration in place. So the
+policy records `needsLabelStore`, and the install verdict refuses such a
+package on a unit whose capacity report does not say `labelsApart()`, or cannot
+be read (`labelStoreMissing`), and refuses a package without it on a unit that
+does (`labelStoreUnexpected`; its records are the wrong size there). For a
+Manager that predates the check, the stream leads with the label store's probe:
+`CMD_WRITE_LABELS` with a count of 0, which writes nothing, needs no Send, and
+is ACKed only by a unit that keeps names; to a unit that keeps them in its
+records the command is unknown, and the relay stops at frame 1 with nothing on
+the unit changed. `test_firmware_link` relays such a package to the real 1.x
+firmware to show exactly that.
+
+The name editors (`name_limits.h`: `channelNameLimit`, `messageNameLimit`),
+DBC import, the communications templates and the scripting `ct.addChannel`
+check take their limit from the document's target, so a 2.0 document holds
+32-byte names and a 1.x one stops where it always did.
+
+`test_roundtrip`'s `testLabelStore` runs a Send and a Get through
+`ConfigTransfer` against a model of such a unit (`LabelStoreUnit`: the 2.0's
+record sizes, refusing a 1.x-sized record), with a 32-byte name, a name cut on
+a two-byte character, a name the unit holds wrongly (the verify fails before
+the SAVE), and names crossing between the two formats both ways.
+
+### A CAN Triple 2.0's own settings (LED brightness)
+
+Some things belong to the unit rather than to any configuration. The first is
+how bright its LEDs are: one percent for every LED, 5 to 100, where 100 is the
+brightness the LEDs have always had and bright and dim scale together.
+`CMD_READ_DEVICE_SETTINGS` (0x5B, ungated) answers a `DeviceSettings` record
+(format, `led_brightness`, six reserved bytes); `CMD_WRITE_DEVICE_SETTINGS`
+(0x5C, gated by the Send password like a table write) takes that record and a
+`store` byte. The unit applies every write at once; `store` 1 also keeps it
+across restarts and firmware updates, `store` 0 is a preview it forgets at a
+restart. A Send never touches it, and a Get never reads it. The 1.x answers
+both `ERR_INVALID_CMD`, which `device_session::readDeviceSettings` turns into
+`supported == false` rather than an error.
+
+`LedBrightnessDialog` (Online → LED Brightness…) makes the unit's lights follow
+the slider: the first movement is previewed at once, and while the slider keeps
+moving the unit is shown where it is every `kPreviewIntervalMs` (40 ms) at most,
+ending with where it rests. It used to wait until the slider had rested for
+120 ms, so nothing changed during a drag. OK sends the value with `store` 1 and
+closes only once the unit has taken it; Cancel sends the value the unit showed
+when the dialog opened, as a preview, so what the unit keeps is untouched. The
+link waits for each reply in an event loop of its own, where the next mouse
+move or a click on Cancel can land, so a movement during a preview waits for
+the timer rather than sending inside it, and Cancel restores whenever a preview
+was asked for, not only when one is known to have landed. A refused preview is
+not repeated, and a unit that stops answering is not previewed again (each
+unanswered request holds the window for its retries); OK and Cancel still ask.
+Refusals are said in the dialog, which stays open: `ERR_LOCKED` wants the Send
+password (the menu command proves it first, when one is set), `ERR_FLASH_WRITE`
+means shown but not kept. `test_led_brightness` drives the real dialog
+offscreen against a model of the unit behind `FakeDeviceLink` (a drag's
+previews and their spacing, a move and a Cancel while a reply is out, a unit
+that stops answering); `test_firmware_v2` holds the command numbers, the range
+and the record to the 2.0's `protocol.h`.
+
+On the unit the PWM gained resolution so the setting could reach 5 % without
+bending colours: 40 steps per per mille at the same 1 kHz, and at 100 % every
+compare value is exactly the old per-mille value times 40.
+
+### Updating a CAN Triple 2.0
+
+The CAN Triple 2.0 has its own firmware line, numbered from 2.0.0, and its own
+bootloader (version 3). The wire side of an update is the 1.x one (BEGIN, DATA,
+END, STATUS, ABORT), but what the unit does with the image differs. It keeps
+copies of its firmware: the running version, the one before it and a factory
+copy written at its first start. An update goes in beside the running version.
+After the restart the new version runs *on trial*, and the unit goes back to the
+version before it when the new one restarts three times without being
+confirmed. A unit whose installed firmware fails its check at start-up is
+repaired from its copy.
+
+The installer carries the 2.0's image as `Firmware\CAN Triple 2.0\
+can-triple-2-<version>.ctf` (`cmake/stage_firmware.cmake`), one folder down
+because the initial-programming tool takes the highest-versioned
+`can-triple-*.ctf` beside itself, and 2.0.0 outranks every 1.x image: beside
+it, a blank CAN Triple would be given 2.0 firmware. Update Firmware's Browse…
+opens in that folder when the unit on the cable is a CAN Triple 2.0
+(`firmwareImagesDirectoryV2`), and in `Firmware` otherwise.
+
+`FW_UPDATE_STATUS` answers the 32 bytes every unit sends, followed on the 2.0
+line by `FwUpdateStatus2` (20 bytes): the copy the running image came from, the
+one a rollback would go to, the trial starts so far, which copies hold an image
+and their versions, and the version last rolled back from. Versions there are
+packed as major.minor.patch in bits 23-16, 15-8 and 7-0
+(`FirmwareImage::packedVersionText`). `FirmwareUpdater::readStatus` used to
+demand exactly 32 bytes and refused every 2.0 status; it now reads with >= on
+length and returns the copies when the reply carries them, which is how the
+Manager tells the two lines apart. The status gains `FW_STATE_TRIAL` and three
+results: `FW_RESULT_ROLLED_BACK`, `FW_RESULT_RECOVERED` and
+`FW_RESULT_NO_IMAGE`.
+
+`CMD_FW_CONFIRM` (0x57, ungated, empty request, always ACKed) ends a trial. The
+Update Firmware window sends it once the unit is back from an update, answers,
+and runs the image the window installed; the unit also confirms itself after a
+minute of running. Sending it at once matters, because a unit switched off
+inside that minute counts its next start against a perfectly good image. The
+window does not confirm a trial it merely finds on opening. A 1.x unit answers
+`ERR_INVALID_CMD`, which `FirmwareUpdater::confirm` takes as nothing to
+confirm. The window lists the copies ("Firmware kept on the unit: A 2.0.1
+(running), B 2.0.0 (previous), factory 2.0.0"), reports a rollback as one,
+naming the version that did not start, and not as a failed install, and waits
+longer for a 2.0 to come back, since a new image that hangs is restarted by the
+watchdog and rolled back before the unit answers again.
+
+`FirmwareImage` holds a file to its own board's numbers:
+`appSlotSize`, `newestBootloader` (what the file is validated against) and
+`oldestImageBootloader`. The last is new: a 2.0 file asking for a bootloader
+older than 3 predates the 2.0 line. It was built for the provisional firmware's
+layout, has a perfect header and CRC, and would not start, so the Manager
+refuses it by name when it is picked, and the unit refuses it at END.
+`test_firmware_v2` holds every one of these against the 2.0 line's own headers
+through `test/v2_wire_values.c`, a library of its own because the two lines'
+headers define the same names. It then drives the status read, the confirm and
+the file checks. It is built only beside a firmware tree that has the 2.0 line.
 
 ## Send Secure Configuration
 

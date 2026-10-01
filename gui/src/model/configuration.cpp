@@ -305,10 +305,16 @@ QJsonObject CommsSection::toJson() const
         QJsonArray elems;
         for (const CrcElement &e : crcElements) {
             QJsonObject eo;
-            eo["type"] = e.type == CrcElement::Id    ? "id"
-                         : e.type == CrcElement::Raw ? "raw"
-                                                     : "data";
+            eo["type"] = e.type == CrcElement::Id        ? "id"
+                         : e.type == CrcElement::Raw     ? "raw"
+                         : e.type == CrcElement::IdAll   ? "idAll"
+                         : e.type == CrcElement::DataRun ? "dataRun"
+                                                         : "data";
             eo["value"] = e.value;
+            if (e.type == CrcElement::DataRun)
+                eo["last"] = e.last;
+            if (e.type == CrcElement::IdAll && e.lsbFirst)
+                eo["lsbFirst"] = true;
             elems.append(eo);
         }
         o["crcElements"] = elems;
@@ -385,7 +391,7 @@ CommsSection CommsSection::fromJson(const QJsonObject &o, int fileVersion)
             return int(qBound(0u, t.toUInt(nullptr, 16), 255u));
         };
         s.crcChannel = o["crcChannel"].toString();
-        s.crcByteLocation = qBound(0, o["crcByteLocation"].toInt(0), 7);
+        s.crcByteLocation = qBound(0, o["crcByteLocation"].toInt(0), 63);
         s.crcPolynomial = hexByte("crcPolynomial");
         s.crcInitValue = hexByte("crcInitValue");
         s.crcFinalXor = hexByte("crcFinalXor");
@@ -395,12 +401,18 @@ CommsSection CommsSection::fromJson(const QJsonObject &o, int fileVersion)
             const QJsonObject eo = v.toObject();
             CrcElement e;
             const QString t = eo["type"].toString(QStringLiteral("data"));
-            e.type = t == "id" ? CrcElement::Id : t == "raw" ? CrcElement::Raw
-                                                             : CrcElement::Data;
-            const int cap = e.type == CrcElement::Id    ? 3
-                            : e.type == CrcElement::Data ? 7
-                                                         : 255;
+            e.type = t == "id"        ? CrcElement::Id
+                     : t == "raw"     ? CrcElement::Raw
+                     : t == "idAll"   ? CrcElement::IdAll
+                     : t == "dataRun" ? CrcElement::DataRun
+                                      : CrcElement::Data;
+            const int cap = e.type == CrcElement::Id      ? 3
+                            : e.type == CrcElement::IdAll ? 4
+                            : e.type == CrcElement::Raw   ? 255
+                                                          : 63; // Data, DataRun
             e.value = qBound(0, eo["value"].toInt(0), cap);
+            e.last = qBound(0, eo["last"].toInt(0), 63);
+            e.lsbFirst = eo["lsbFirst"].toBool(false);
             s.crcElements.append(e);
             if (s.crcElements.size() >= 15)
                 break; /* CRC8_MAX_ELEMENTS — extra hand-added rows are dropped */
@@ -1149,7 +1161,7 @@ void Configuration::setConfigTitle(const QString &title)
 
 void Configuration::setCapacity(const DeviceCapacity &capacity)
 {
-    const bool changed = !m_capacity.sameLayout(capacity) || m_capacity.label != capacity.label
+    const bool changed = !m_capacity.sameTarget(capacity) || m_capacity.label != capacity.label
                          || m_capacity.reported != capacity.reported;
     m_capacity = capacity;
     if (!changed)
@@ -1730,6 +1742,15 @@ bool Configuration::setCommsPassword(const QString &password)
 // HOLDS at the limit where the author asked it to wrap. A distance or fuel
 // total silently pinned at its ceiling is the same class of quiet behaviour
 // change that earned v19 its bump for clampToRange, so it earns one too.
+// 21 -> 22 adds the CAN Triple 2.0's CRC8 elements ("idAll", "dataRun" with
+// "last", "lsbFirst") and CRC8 byte positions past 7. Additive on the way in.
+// The bump is for the guard ABOVE: a build predating them reads either element
+// as a single Data byte and clamps a location to Byte 7, so it would Send a
+// recipe that stamps a different checksum, and a receiver that checks it drops
+// every frame. The quietest kind of misread there is, on a real bus. The same
+// release gives a CAN Triple 2.0 FD data rates of 4, 5 and 8 Mbit/s; a build
+// before them opens a bus at one of those as 2M and would Send it so, which is
+// the same class of silent change and the same bump covers it.
 //
 // "targetCapacity" (the firmware capacity a document is sized against, written
 // only once a target has been chosen) deliberately did NOT bump this, and the
@@ -1743,7 +1764,7 @@ bool Configuration::setCommsPassword(const QString &password)
 // changed in meaning; only a sizing assumption is, and the older build
 // recomputes it. A bump would refuse every file this version saves to a 1.2.x
 // build for the sake of information that build cannot use.
-static constexpr int kConfigSchemaVersion = 21;
+static constexpr int kConfigSchemaVersion = 22;
 
 // The one accessor, so nothing outside this file has to hold a second copy of
 // the number. Communications templates stamp it into the file they write and

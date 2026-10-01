@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.2.6 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.2.7 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -280,7 +280,9 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/protocol/device_session.cpp
     src/protocol/device_session.h
     src/protocol/capacity.cpp
+    src/protocol/hardware.cpp
     src/protocol/capacity.h
+    src/protocol/hardware.h
     src/protocol/framer.cpp
     src/protocol/framer.h
     src/protocol/firmware_image.cpp
@@ -346,6 +348,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/model/user_paths.h
     src/model/validation.cpp
     src/model/validation.h
+    src/model/unit_target.cpp
+    src/model/unit_target.h
     src/ui/access_passwords_dialog.cpp
     src/ui/access_passwords_dialog.h
     src/ui/add_channel_dialog.cpp
@@ -394,6 +398,12 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/ui/firmware_update_dialog.h
     src/ui/firmware_license_dialog.cpp
     src/ui/firmware_license_dialog.h
+    src/ui/led_brightness_dialog.cpp
+    src/ui/led_brightness_dialog.h
+    # Tools → Theme: the palettes and the switch. The colours with a meaning
+    # are inline in theme.h, so the dialogs' test programs need nothing more.
+    src/ui/theme.cpp
+    src/ui/theme.h
     src/ui/secure_builder_dialog.cpp
     src/ui/secure_builder_dialog.h
     src/ui/help_window.cpp
@@ -502,6 +512,7 @@ set(HELP_PAGES
     help.css
     index.html
     getting-started.html
+    can-triple-2.html
     files.html
     troubleshooting.html
     communications.html
@@ -579,6 +590,7 @@ qt_add_executable(test_roundtrip
     src/model/config_file.cpp
     src/model/user_paths.cpp
     src/model/validation.cpp
+    src/model/unit_target.cpp
     # THE DEVICE'S SCRIPT VERIFIER, here because device_mapper.cpp needs it and
     # not because this test asks for it. A Get now KEEPS the compiled script
     # image a device returns, and mapFromDevice validates it with the firmware's
@@ -621,6 +633,7 @@ qt_add_executable(test_firmware_link
     src/protocol/framer.cpp
     src/protocol/device_session.cpp
     src/protocol/capacity.cpp
+    src/protocol/hardware.cpp
     src/protocol/device_link.cpp
     src/model/access_keys.cpp
     src/model/channel_catalog.cpp
@@ -639,6 +652,8 @@ qt_add_executable(test_firmware_link
     # without the engine. engine_core.c calls into it too, so it travels with it.
     ${FIRMWARE_DIR}/src/engine_math.c
     ${FIRMWARE_DIR}/src/serial_proto.c
+    # CMD_GET_HARDWARE's reply is built here, from facts the glue reads.
+    ${FIRMWARE_DIR}/src/hw_identity.c
     ${FIRMWARE_DIR}/src/flash_store.c
     # The licence store, so serial_proto.c has something to link against and
     # so the record round-trips through the REAL device code in the tests.
@@ -849,6 +864,7 @@ qt_add_executable(test_help_access
     src/protocol/device_link.cpp
     src/protocol/device_session.cpp
     src/protocol/capacity.cpp
+    src/protocol/hardware.cpp
     src/protocol/framer.cpp
     src/protocol/cobs.cpp
     src/protocol/firmware_image.cpp
@@ -892,6 +908,7 @@ qt_add_executable(test_firmware_update_dialog
     src/protocol/device_link.cpp
     src/protocol/device_session.cpp
     src/protocol/capacity.cpp
+    src/protocol/hardware.cpp
     src/protocol/framer.cpp
     src/protocol/cobs.cpp
     src/protocol/firmware_image.cpp
@@ -921,6 +938,78 @@ qt_add_executable(test_firmware_update_dialog
 target_include_directories(test_firmware_update_dialog PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_firmware_update_dialog
     PRIVATE ct_lua Qt6::Widgets Qt6::SerialPort Qt6::Core Qt6::Network ct_device_core)
+
+# Online → LED Brightness… (a CAN Triple 2.0's own setting): the dialog's
+# preview, keep and cancel against a model of the unit behind a fake link, and
+# the session helpers under it.
+qt_add_executable(test_led_brightness
+    test/test_led_brightness.cpp
+    test/fake_device_link.h
+    src/ui/led_brightness_dialog.cpp
+    src/protocol/device_link.cpp
+    src/protocol/device_session.cpp
+    src/protocol/capacity.cpp
+    src/protocol/hardware.cpp
+    src/protocol/framer.cpp
+    src/protocol/cobs.cpp
+    src/model/config_lock.cpp
+    src/model/access_keys.cpp
+)
+target_include_directories(test_led_brightness PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_led_brightness
+    PRIVATE Qt6::Widgets Qt6::SerialPort Qt6::Core Qt6::Network ct_device_core)
+
+# Tools → Theme: the four palettes read the way a customer reads them (WCAG
+# contrast for every text colour on every surface it is drawn on, and the
+# colours with a meaning on every theme), then switching, putting Windows
+# Default back, and keeping the choice.
+qt_add_executable(test_theme
+    test/test_theme.cpp
+    src/ui/theme.cpp
+)
+target_link_libraries(test_theme PRIVATE Qt6::Widgets Qt6::Core)
+
+# The help in the theme: help.css as served on every palette (as shipped when
+# light; every colour swapped, readable and nothing else changed when dark),
+# then the real help window on the compiled manual built beside it, repainted
+# where the reader was when the theme changes.
+qt_add_executable(test_help_theme
+    test/test_help_theme.cpp
+    src/ui/help_window.cpp
+    src/ui/theme.cpp
+)
+target_compile_definitions(test_help_theme
+    PRIVATE CT_HELP_CSS="${CMAKE_CURRENT_SOURCE_DIR}/help/pages/help.css")
+target_link_libraries(test_help_theme PRIVATE Qt6::Widgets Qt6::Help Qt6::Core)
+add_dependencies(test_help_theme help_docs)
+
+# The CAN Triple 2.0 firmware line's update scheme: what the Manager mirrors of
+# it (the confirm command, the trial state, the rollback results, the copies in
+# the status reply, the 2.0's image limits) held against that line's own
+# headers, and what the Manager does with them. Built only beside a firmware
+# tree that has the 2.0 line. v2_wire_values.c is a library of its own because
+# the 2.0 headers and the 1.x ones define the same names and cannot share a
+# translation unit, or even an include path.
+if(EXISTS "${FIRMWARE_DIR}/v2/include/protocol.h")
+    add_library(ct_v2_wire_values STATIC test/v2_wire_values.c)
+    target_include_directories(ct_v2_wire_values PRIVATE ${FIRMWARE_DIR}/v2/include)
+    qt_add_executable(test_firmware_v2
+        test/test_firmware_v2.cpp
+        test/fake_device_link.h
+        src/protocol/device_link.cpp
+        src/protocol/framer.cpp
+        src/protocol/cobs.cpp
+        src/protocol/capacity.cpp
+        src/protocol/hardware.cpp
+        src/protocol/firmware_image.cpp
+        src/protocol/firmware_update.cpp
+        # ScriptCostScope: the 2.0's script cost model, read from its report
+        src/scripting/script_simulator.cpp
+    )
+    target_include_directories(test_firmware_v2 PRIVATE ${FIRMWARE_DIR}/include)
+    target_link_libraries(test_firmware_v2
+        PRIVATE ct_v2_wire_values Qt6::Core Qt6::SerialPort ct_device_core)
+endif()
 
 # Channel labels show the unit; channel IDENTITY stays the bare name. The
 # dialogs' read-only "Input :" boxes used to BE the identity — decorating them
@@ -1065,6 +1154,7 @@ add_dependencies(test_initial_programming CANTripleInitialProgramming fake_openo
 qt_add_executable(test_comms_multiselect
     test/test_comms_multiselect.cpp
     src/ui/communications_dialog.cpp
+    src/protocol/hardware.cpp
     src/ui/section_editor_dialog.cpp
     src/ui/import_dbc_dialog.cpp
     src/ui/select_channel_dialog.cpp
@@ -1247,6 +1337,7 @@ qt_add_executable(test_monitor_channels
     src/model/channel_list.cpp
     src/protocol/access_state.cpp
     src/protocol/capacity.cpp
+    src/protocol/hardware.cpp
     src/protocol/cobs.cpp
     src/protocol/framer.cpp
     src/protocol/device_link.cpp
@@ -1285,6 +1376,7 @@ qt_add_executable(test_license_dialogs
     src/protocol/firmware_image.cpp
     src/protocol/device_session.cpp
     src/protocol/capacity.cpp
+    src/protocol/hardware.cpp
     src/protocol/device_link.cpp
     src/protocol/access_state.cpp
     src/protocol/cobs.cpp
@@ -1470,6 +1562,7 @@ target_link_libraries(test_frame_layout PRIVATE Qt6::Core Qt6::Network Qt6::Widg
 qt_add_executable(test_comms_template
     test/test_comms_template.cpp
     src/ui/communications_dialog.cpp
+    src/protocol/hardware.cpp
     src/ui/section_editor_dialog.cpp
     src/ui/import_dbc_dialog.cpp
     src/ui/select_channel_dialog.cpp
@@ -1617,6 +1710,7 @@ qt_add_executable(test_protection
     test/test_protection.cpp
     src/protocol/access_state.cpp
     src/ui/communications_dialog.cpp
+    src/protocol/hardware.cpp
     src/ui/section_editor_dialog.cpp
     src/ui/import_dbc_dialog.cpp
     src/ui/select_channel_dialog.cpp

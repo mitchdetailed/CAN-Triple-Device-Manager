@@ -27,8 +27,12 @@ static ScriptSymbols symbolsFromTables(const DeviceTables &tables)
     out.signalSlots = tables.capacity.capacityOf(DeviceTable::Signals);
     for (int i = 0; i < tables.signalConfigs.size(); ++i) {
         const auto &sig = tables.signalConfigs[i];
+        // The label list when it has the name (the whole of it: a CAN Triple
+        // 2.0 keeps 32 bytes, the record's field 31), else the field.
         const QString name =
-            QString::fromUtf8(sig.label, qstrnlen(sig.label, SIGNAL_LABEL_LEN));
+            (i < tables.signalLabels.size() && !tables.signalLabels[i].isEmpty())
+                ? QString::fromUtf8(tables.signalLabels[i])
+                : QString::fromUtf8(sig.label, qstrnlen(sig.label, SIGNAL_LABEL_LEN));
         if (!name.isEmpty()) {
             out.signalIndex.insert(name, quint16(i));
         }
@@ -161,6 +165,38 @@ MappingResult mapWithScript(const Configuration &config)
     QString error;
     if (!ScriptCompiler::attachTo(config, symbols, &mapped.tables.scriptChunks, &error)) {
         mapped.errors.append(error);
+        return mapped;
+    }
+
+    // A script that reads an extended device channel reads it by slot, so the
+    // mapper's by-name answer (readsExtendedDeviceChannels) cannot have seen
+    // it. Asked of the IMAGE rather than the source, because a retained image
+    // has no source and reads channels all the same.
+    if (!mapped.tables.scriptChunks.isEmpty()) {
+        const QByteArray image =
+            scriptImageFromChunks(mapped.tables.scriptChunks, symbols.signalSlots).image;
+        if (image.size() >= int(sizeof(ScriptHeader))) {
+            ScriptHeader header{};
+            std::memcpy(&header, image.constData(), sizeof(header));
+            const int count = qMin(int(header.code_bytes),
+                                   int(image.size() - int(sizeof(ScriptHeader))))
+                              / int(SCRIPT_INSTR_SIZE);
+            for (int i = 0; i < count; ++i) {
+                ScriptInstr instr{};
+                std::memcpy(&instr,
+                            image.constData() + sizeof(ScriptHeader) + i * SCRIPT_INSTR_SIZE,
+                            sizeof(instr));
+                if (instr.op != SCRIPT_OP_LOADSIG)
+                    continue;
+                for (int k = 0; k < DEVCH_EXT_COUNT; ++k) {
+                    if (mapped.tables.deviceChannelsExt.signal_idx[k] != instr.imm)
+                        continue;
+                    mapped.readsExtendedDeviceChannels = true;
+                    if (!mapped.extendedDeviceChannelsRead.contains(DEVCH_EXT_BASE + k))
+                        mapped.extendedDeviceChannelsRead.append(DEVCH_EXT_BASE + k);
+                }
+            }
+        }
     }
     return mapped;
 }

@@ -125,6 +125,13 @@ uint32_t script_crc32(const void *data, uint32_t len);
 
 uint32_t script_op_cost(uint8_t op);
 
+#if !defined(CT_TARGET_STM32)
+
+void script_set_host_costs(const uint8_t *costs, uint32_t count);
+
+const uint8_t *script_host_costs(uint32_t *count);
+#endif
+
 uint8_t script_verify(const void *base, uint32_t avail, uint16_t max_signals);
 
 static inline const ScriptHeader *script_header(const void *base, uint32_t avail)

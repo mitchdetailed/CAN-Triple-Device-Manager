@@ -1,5 +1,6 @@
 // Calculations > Up / Down Counters — grid editor for Configuration::counterRows.
 #include "counters_dialog.h"
+#include "theme.h"
 #include "window_memory.h"
 
 #include <QCheckBox>
@@ -27,10 +28,6 @@
 namespace ct {
 
 namespace {
-
-// Retained-counter budget: the device's preserve store holds this many values
-// (PRESERVE_MAX in the firmware's preserve_store.h). Mirrored in validation.cpp.
-constexpr int kMaxPreservedCounters = 20;
 
 // This dialog's working rows as a patch over the document. The grid writes back
 // only on OK, so mid-session the document both lacks rows just added and still
@@ -119,15 +116,30 @@ public:
 
         m_rollCheck = new QCheckBox(QObject::tr("Roll at limits"), optionsGroup);
         m_preserveCheck = new QCheckBox(QObject::tr("Preserve value"), optionsGroup);
-        m_preserveCheck->setToolTip(QObject::tr(
-            "Keep this counter's value across power cycles.\n\n"
-            "The value is written to a small flash store about once a minute, so up "
-            "to a minute of counting can be lost on a sudden power cut, and it is "
-            "reset whenever you send a changed configuration.\n\n"
-            "At most %1 counters can be preserved. Requires a device whose flash "
-            "has room for the retained-value store — where it does not, counters "
-            "still run but start from their reset value at every power-up.")
-                                        .arg(kMaxPreservedCounters));
+        // What the document's target keeps (DeviceCapacity): the CAN
+        // Triple's flash ring, or a 2.0's FRAM, which states its own numbers.
+        const DeviceCapacity &target = m_config->capacity();
+        m_preserveCheck->setToolTip(
+            target.retainedWearLimited()
+                ? QObject::tr(
+                      "Keep this counter's value across power cycles.\n\n"
+                      "The value is written to a small flash store about once a minute, so up "
+                      "to a minute of counting can be lost on a sudden power cut, and it is "
+                      "reset whenever you send a changed configuration.\n\n"
+                      "At most %1 counters and integrators together can be preserved. "
+                      "Requires a device whose flash has room for the retained-value store — "
+                      "where it does not, counters still run but start from their reset value "
+                      "at every power-up.")
+                      .arg(target.retainedLimit())
+                : QObject::tr(
+                      "Keep this counter's value across power cycles.\n\n"
+                      "The value is written to the unit's retained-value memory every %1 "
+                      "while it changes, so at most that much counting can be lost on a sudden "
+                      "power cut, and it is reset whenever you send a changed "
+                      "configuration.\n\n"
+                      "Up to %2 counters and integrators together can be preserved.")
+                      .arg(retainedIntervalText(target.retainedEveryMs()))
+                      .arg(target.retainedLimit()));
         optionsForm->addRow(QString(), m_rollCheck);
         optionsForm->addRow(QString(), m_preserveCheck);
         mainLayout->addWidget(optionsGroup);
@@ -574,29 +586,33 @@ CountersDialog::CountersDialog(Configuration *config, QWidget *parent)
 
 void CountersDialog::updatePreserveBudget()
 {
+    // The limit is the target's, and it is shared with the integrators, so
+    // theirs count too: they are the ones a unit drops past it.
     int used = 0;
     for (const CounterRow &row : m_rows)
         if (row.active && row.preserveValue)
             ++used;
+    for (const IntegratorRow &row : m_config->integratorRows)
+        if (row.active && row.preserveValue)
+            ++used;
+    const int limit = m_config->capacity().retainedLimit();
     if (used == 0) {
-        m_preserveLabel->setText(
-            tr("No counters are preserved across power cycles (up to %1 can be).")
-                .arg(kMaxPreservedCounters));
+        m_preserveLabel->setText(tr("Nothing is preserved across power cycles (up to %1 "
+                                    "counters and integrators can be).")
+                                     .arg(limit));
         m_preserveLabel->setStyleSheet(QString());
         return;
     }
-    m_preserveLabel->setText(tr("Preserved across power cycles: %1 of %2.%3")
-                                 .arg(used)
-                                 .arg(kMaxPreservedCounters)
-                                 .arg(used > kMaxPreservedCounters
-                                          ? tr("  ⚠ Over the limit — the device keeps only %1, "
-                                               "so turn Preserve off on %2 of them.")
-                                                .arg(kMaxPreservedCounters)
-                                                .arg(used - kMaxPreservedCounters)
-                                          : QString()));
-    m_preserveLabel->setStyleSheet(used > kMaxPreservedCounters
-                                       ? QStringLiteral("color: #C03000;")
-                                       : QString());
+    m_preserveLabel->setText(
+        tr("Preserved across power cycles: %1 of %2, counters and integrators together.%3")
+            .arg(used)
+            .arg(limit)
+            .arg(used > limit ? tr("  ⚠ Over the limit — the device keeps only %1, "
+                                   "so turn Preserve off on %2 of them.")
+                                    .arg(limit)
+                                    .arg(used - limit)
+                              : QString()));
+    m_preserveLabel->setStyleSheet(used > limit ? colorRule(warningColor(palette())) : QString());
 }
 
 void CountersDialog::rebuild()

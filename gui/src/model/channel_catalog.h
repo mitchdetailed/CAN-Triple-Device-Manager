@@ -50,13 +50,16 @@ public:
     // number of times the bus has been recovered from bus-off; and the MCU
     // health block: die temperature and analogue supply, their since-boot
     // excursions, and why the unit last reset (an enumerated value — the
-    // catalogue carries the labels, Channel::enumLabels).
+    // catalogue carries the labels, Channel::enumLabels); the load block: frames
+    // each bus received and lost, CPU load and loop time; and, from firmware
+    // 1.0.15, frames each bus was asked to transmit and could not (the first
+    // extended device channels, DEVCH_EXT_BASE onward).
     //
     // Every device channel is mapped on a Send whether the document reads it or
-    // not, so all 36 are always live and always visible in Monitor Channels.
-    // They are diagnostics: the moment you want them is a bus fault, and that is
-    // the worst possible moment to find out you had to have referenced them in
-    // advance. The cost is DEVCH_COUNT of MAX_SIGNALS plus 6 bytes each per tick
+    // not, so all DEVCH_TOTAL are always live and always visible in Monitor
+    // Channels. They are diagnostics: the moment you want them is a bus fault,
+    // and that is the worst possible moment to find out you had to have
+    // referenced them in advance. The cost is DEVCH_TOTAL of MAX_SIGNALS plus 6 bytes each per tick
     // on the value stream while a monitor is open — see the reasoning in
     // mapToDevice, which is where the allocation happens.
     static const QList<Channel> &deviceChannels();

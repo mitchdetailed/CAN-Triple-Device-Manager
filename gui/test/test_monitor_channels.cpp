@@ -223,6 +223,40 @@ void testSelectionSurvivesRebuildAndSkipsUnmappedNames()
 
 } // namespace
 
+// The rows follow what the connected unit publishes: a 1.x unit's grid has no
+// supply readings (it measures none), one on firmware older than 1.0.15 no Tx
+// Dropped counts either, and a CAN Triple 2.0's has both. Without a report,
+// every row.
+void testRowsFollowTheUnit()
+{
+    QSettings().remove(QLatin1String(kSelectionKey));
+    ct::Configuration config;
+    buildDocument(config);
+    ct::DeviceLink link;
+    ct::MonitorChannelsDialog d(&link, &config);
+    const auto has = [&d](const QString &name) { return rowOf(grid(&d), name) >= 0; };
+    const QString supply = QStringLiteral("Device Supply Voltage");
+    const QString txDropped = QStringLiteral("Device CAN1 Tx Dropped");
+    CHECK(has(supply) && has(txDropped));
+    const int all = grid(&d)->rowCount();
+
+    d.setUnitHardware(ct::DeviceHardware::builtIn());
+    CHECK(!has(supply) && !has(txDropped));
+    CHECK(has(QStringLiteral("RPM")) && has(QStringLiteral("Device MCU VDDA")));
+    CHECK(grid(&d)->rowCount() == all - 4 - 3);
+
+    ct::DeviceHardware v2 = ct::DeviceHardware::builtIn();
+    v2.family = ct::BoardFamily::CanTriple2;
+    v2.reported = true;
+    v2.fwMajor = 1;
+    v2.fwMinor = 0;
+    v2.fwPatch = 15;
+    v2.features = ct::HW_FEAT_USB_LINK | ct::HW_FEAT_SUPPLY_SENSE;
+    d.setUnitHardware(v2);
+    CHECK(has(supply) && has(txDropped));
+    CHECK(grid(&d)->rowCount() == all);
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -237,6 +271,7 @@ int main(int argc, char **argv)
     testDefaultIsNameOrder();
     testSelectionOrdersAndHides();
     testSelectionSurvivesRebuildAndSkipsUnmappedNames();
+    testRowsFollowTheUnit();
 
     if (fails == 0) {
         std::printf("test_monitor_channels: all checks passed\n");

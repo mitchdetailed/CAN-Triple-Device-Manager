@@ -349,22 +349,31 @@ struct CommsSection {
     // fields and the mapper's transmit path all apply unchanged; these fields
     // add the checksum on top. Schema 16.
     //
-    // The CRC is computed over crcElements IN ORDER — each element one byte:
-    // a byte of the CAN identifier (type Id, value = shift index 0..3), a
-    // byte of the composed frame (type Data, value = byte index 0..7), or a
-    // literal (type Raw, value = the byte) — then stamped into
-    // crcByteLocation after every other byte of the frame is final, and
+    // The CRC is computed over crcElements IN ORDER: a byte of the CAN
+    // identifier (type Id, value = shift index 0..3), a byte of the composed
+    // frame (type Data, value = byte index), or a literal (type Raw, value =
+    // the byte); and where the target is a CAN Triple 2.0 (its capacity says
+    // so) the whole identifier (IdAll: value = 1..4 bytes, 0 = by the frame,
+    // lsbFirst for the order) or a run of frame bytes (DataRun: value = the
+    // first byte, last = the last, rising or falling, the CRC's own byte left
+    // out) — then stamped into crcByteLocation after every other byte of the
+    // frame is final, and
     // published to crcChannel so the wire's checksum is watchable like any
     // other channel. Polynomial/init/xor are the standard CRC-8
     // parameterisation (x^8 implicit): SAE J1850 is 0x1D/0xFF/0xFF with no
     // reflection, plain CCITT is 0x07/0x00/0x00.
     struct CrcElement {
-        enum Type { Id = 0, Data = 1, Raw = 2 }; // the wire encoding (CRC8_ELEM_*)
+        // The model's numbering. The first four are the wire's CRC8_ELEM_*
+        // values too; a run is spelt on the wire as CRC8_ELEM_DATA_RUN | first,
+        // which device_mapper.cpp does.
+        enum Type { Id = 0, Data = 1, Raw = 2, IdAll = 3, DataRun = 4 };
         int type = Data;
         int value = 0;
+        int last = 0;          // DataRun: the last byte, 0..63
+        bool lsbFirst = false; // IdAll: the least significant byte first
     };
     QString crcChannel;
-    int crcByteLocation = 0;   // 0..7
+    int crcByteLocation = 0;   // 0..7; 0..63 on a CAN Triple 2.0
     int crcPolynomial = 0x00;  // 0x00..0xFF
     int crcInitValue = 0x00;
     int crcFinalXor = 0x00;
@@ -739,7 +748,8 @@ struct IntegratorRow {
     // freezes at a garbage value, which is worse than holding at the limit.
     bool rollover = false;
     // Retain the running total across power cycles. Shares the device's
-    // 20-entry preserve ring with counters — see CounterRow::preserveValue.
+    // retained-value limit with counters (DeviceCapacity::retainedLimit) — see
+    // CounterRow::preserveValue.
     bool preserveValue = false;
     bool active = true;
 

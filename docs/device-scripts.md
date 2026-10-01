@@ -43,7 +43,9 @@ That is a safety net, not a design target. After **Run**, the figure under the s
 
 For scale, measured on a device: the fan example above costs **23 of 2000 units — 37 microseconds, or 0.4% of a tick**. A script deliberately written to run away and be killed is stopped inside about a millisecond — a tenth of a tick — either by exhausting the budget or by hitting the device's cycle ceiling, whichever comes first. Ordinary logic does not come close to the limit; if yours does, it is looping.
 
-Not every instruction costs the same, because on this processor floating-point work is done in software. A divide costs about three times an add, and `sqrt`, `floor`, `ceil`, `round`, `%`, `clamp` and `wrap` cost more still — so the budget charges them more. That is why replacing a divide with a multiply, or hoisting a `sqrt` out of a loop, buys more than it looks like it should.
+Not every instruction costs the same, because on the CAN Triple's processor floating-point work is done in software. A divide costs about three times an add, and `sqrt`, `floor`, `ceil`, `round`, `%`, `clamp` and `wrap` cost more still — so the budget charges them more. That is why replacing a divide with a multiply, or hoisting a `sqrt` out of a loop, buys more than it looks like it should.
+
+A **CAN Triple 2.0** does floating-point work in hardware and charges its own, finer-grained costs: a load, a move or a jump costs 1, arithmetic, comparisons and reading or writing a channel 2, `sqrt`, `floor`, `ceil`, `round` and the bitwise operations 3, `wrap` 4 and `%` 5, against a budget of 2000. Its units are about half the size of the CAN Triple's, so the same script costs more of them for about the same time. The unit tells the Device Manager its costs, so when the document's target is a CAN Triple 2.0, the figures under the editor, the disassembly and the simulator all use them, and a script the simulator runs inside the budget runs inside it on the unit.
 
 ## The two ways a script can be stopped
 

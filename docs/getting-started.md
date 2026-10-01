@@ -8,6 +8,8 @@ Every window remembers the size you left it at — the editors for a single row 
 
 ## 1. Connect to the device
 
+A **CAN Triple 2.0** connects by its own USB port, with no ST-LINK and no baud rate: see [The CAN Triple 2.0](can-triple-2.md). The rest of this section describes the CAN Triple, reached through an ST-LINK.
+
 To open the serial link, choose **Connect to Device…** on the start page or **Tools → Connection Settings…**:
 - **Port:** lists every serial port with its Windows description. The highest-numbered ST-LINK port is preselected (or the highest-numbered port when none is an ST-LINK), because Windows numbers a newly attached device after every port it already knows. Click **Refresh** after plugging the cable in.
 - **Baud rate:** defaults to **7372800 (CAN Triple default — ST-Link V3)**. The field is editable, and slower standard rates down to 115200 are listed, but the device firmware runs its UART at 7,372,800 baud — an ST-Link **V3** is required at that rate.

@@ -17,9 +17,47 @@
 #include <QString>
 #include <QVector>
 
+#include "../protocol/capacity.h"
 #include "../protocol/wire_structs.h"
 
 namespace ct {
+
+// THE SCRIPT COST MODEL of the firmware a document is for: what each opcode
+// costs and the tick budget, which the compiler (a script's straight-line
+// cost), the disassembler (each line's charge) and the simulator (what a tick
+// spends, and where it stops) all charge. The CAN Triple 1.x's is compiled
+// into the VM's C (script_vm.c, script_exec.c). A CAN Triple 2.0 charges its
+// own, measured on its FPU, and states it in its capacity report
+// (DeviceCapacity::scriptCosts and scriptBudget).
+//
+// That C is the firmware's own and holds the model in globals, so a
+// capacity's model is put in force for a scope, and the one before it put back
+// when the scope ends:
+//
+//     const ScriptCostScope costs(config.capacity());
+//     ... compile, disassemble, simulate ...
+//
+// A capacity that states no model (the CAN Triple 1.x, builtIn(), the first
+// 2.0 builds) puts the 1.x one in force, which is what such a unit charges.
+class ScriptCostScope
+{
+public:
+    explicit ScriptCostScope(const DeviceCapacity &target);
+    ~ScriptCostScope();
+    ScriptCostScope(const ScriptCostScope &) = delete;
+    ScriptCostScope &operator=(const ScriptCostScope &) = delete;
+
+private:
+    QByteArray m_costs; // the VM keeps a pointer into this, not a copy
+    const quint8 *m_previousCosts = nullptr;
+    quint32 m_previousCount = 0;
+    quint32 m_previousBudget = 0;
+};
+
+// What the VM charges now, under whichever model is in force: one opcode, and
+// the tick budget a tick stops at.
+quint32 scriptOpCost(quint8 op);
+quint32 scriptTickBudget();
 
 class ScriptSimulator
 {
@@ -66,6 +104,8 @@ public:
     void reset();
 
     int tickCount() const { return m_tick; }
+    // The tick budget a tick stops at: the CAN Triple 1.x's, or the target's
+    // while a ScriptCostScope (script_cost_model.h) is in force.
     quint32 budget() const;
 
 private:

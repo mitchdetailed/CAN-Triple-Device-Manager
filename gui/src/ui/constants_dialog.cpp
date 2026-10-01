@@ -99,9 +99,10 @@ class ConstantRowEditor : public QDialog
 {
 public:
     ConstantRowEditor(const QList<ConstantRow> &siblings, int editingIndex,
-                      const QStringList &reservedNames, const ConstantRow &row, QWidget *parent)
+                      const QStringList &reservedNames, const ConstantRow &row, int nameLimit,
+                      QWidget *parent)
         : QDialog(parent), m_siblings(siblings), m_editingIndex(editingIndex),
-          m_reserved(reservedNames), m_row(row)
+          m_reserved(reservedNames), m_row(row), m_nameLimit(nameLimit)
     {
         setWindowTitle(QObject::tr("Constant"));
         setModal(true);
@@ -111,10 +112,11 @@ public:
         m_nameEdit = new QLineEdit(nameGroup);
         // The device label budget, in BYTES - see name_limits.h for why
         // setMaxLength was not it.
-        ct::limitToUtf8Bytes(m_nameEdit, MAX_CHANNEL_NAME_BYTES);
+        ct::limitToUtf8Bytes(m_nameEdit, m_nameLimit);
         m_nameEdit->setToolTip(
-            QObject::tr("Up to %1 characters — the device stores a %2-byte label.")
-                .arg(MAX_CHANNEL_NAME_BYTES).arg(SIGNAL_LABEL_LEN));
+            QObject::tr("Up to %1 characters — the most of a channel name the target unit "
+                        "keeps.")
+                .arg(m_nameLimit));
         nameForm->addRow(QObject::tr("Channel Name:"), m_nameEdit);
 
         auto *detailsGroup = new QGroupBox(QObject::tr("Constant Details"), this);
@@ -213,10 +215,10 @@ private:
                                  QObject::tr("The constant name must not be empty."));
             return;
         }
-        if (name.toUtf8().size() > MAX_CHANNEL_NAME_BYTES) {
+        if (name.toUtf8().size() > m_nameLimit) {
             QMessageBox::warning(this, windowTitle(),
-                                 QObject::tr("Names are limited to %1 bytes on the device.")
-                                     .arg(MAX_CHANNEL_NAME_BYTES));
+                                 QObject::tr("Names are limited to %1 bytes on the target unit.")
+                                     .arg(m_nameLimit));
             return;
         }
         if (m_dataTypeCombo->currentText().isEmpty()) {
@@ -255,6 +257,7 @@ private:
     int m_editingIndex;
     QStringList m_reserved;
     ConstantRow m_row;
+    int m_nameLimit; // what the target keeps of a name (name_limits.h)
     QLineEdit *m_nameEdit = nullptr;
     QComboBox *m_dataTypeCombo = nullptr;
     QSpinBox *m_decimalsSpin = nullptr;
@@ -398,7 +401,7 @@ void ConstantsDialog::onAdd()
         return;
     }
     ConstantRowEditor editor(m_rows, -1, reservedNames(m_config, m_rows, m_originalNames),
-                             ConstantRow(), this);
+                             ConstantRow(), ct::channelNameLimit(m_config), this);
     if (editor.exec() == QDialog::Accepted) {
         m_rows.append(editor.result());
         m_originalNames.append(QString()); // new this session — no prior name
@@ -417,7 +420,7 @@ void ConstantsDialog::onChange()
     if (index < 0 || index >= m_rows.size())
         return;
     ConstantRowEditor editor(m_rows, index, reservedNames(m_config, m_rows, m_originalNames),
-                             m_rows.at(index), this);
+                             m_rows.at(index), ct::channelNameLimit(m_config), this);
     if (editor.exec() == QDialog::Accepted) {
         m_rows[index] = editor.result();
         rebuild();

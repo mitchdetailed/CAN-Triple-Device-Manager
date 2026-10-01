@@ -78,6 +78,10 @@ const void *fw_flash_ptr(uint32_t addr);
 
 #define FW_PRODUCT_CAN_TRIPLE  0x4333u
 
+#define FW_PRODUCT_CAN_TRIPLE_2  0x5632u
+
+#define FW_PRODUCT_THIS_BOARD    FW_PRODUCT_CAN_TRIPLE
+
 #define FW_IMAGE_ALIGN              8u
 
 typedef struct {
@@ -167,6 +171,12 @@ uint32_t fw_crc32_update(uint32_t crc, const void *data, uint32_t len);
 static inline uint32_t fw_crc32_final(uint32_t crc) { return crc ^ 0xFFFFFFFFu; }
 
 uint8_t fw_image_validate(const void *base, uint32_t avail, uint32_t bl_version);
+
+#if !defined(__arm__)
+
+uint8_t fw_image_validate_product(const void *base, uint32_t avail, uint32_t bl_version,
+                                  uint16_t product);
+#endif
 
 static inline const FwImageHeader *fw_image_header(const void *base, uint32_t avail)
 {

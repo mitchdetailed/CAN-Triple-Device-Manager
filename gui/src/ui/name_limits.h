@@ -16,6 +16,8 @@
 #include <QLineEdit>
 #include <QString>
 
+#include "../model/configuration.h"
+
 namespace ct {
 
 // The longest prefix of `text` that fits `budget` UTF-8 bytes, never splitting
@@ -59,6 +61,20 @@ inline void limitToUtf8Bytes(QLineEdit *edit, int budget)
         edit->setText(clipped);
         edit->setCursorPosition(qMin(cursor, clipped.size()));
     });
+}
+
+// The longest names the document's TARGET keeps whole, in UTF-8 bytes: a CAN
+// Triple 2.0 whose names are in its label store keeps 32 of every one, the CAN
+// Triple 1.x 31 of a channel's and 17 of a message's or relay's (in its
+// records). A dialog with no document is held to the 1.x's.
+inline int channelNameLimit(const Configuration *config)
+{
+    return config ? config->capacity().channelNameBytes() : MAX_CHANNEL_NAME_BYTES;
+}
+
+inline int messageNameLimit(const Configuration *config)
+{
+    return config ? config->capacity().messageNameBytes() : MAX_MESSAGE_NAME_BYTES;
 }
 
 } // namespace ct

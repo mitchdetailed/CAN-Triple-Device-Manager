@@ -156,6 +156,53 @@ if(NOT _staged_variants AND EXISTS "${_variant_dir}")
     file(REMOVE_RECURSE "${_variant_dir}")
 endif()
 
+# THE CAN TRIPLE 2.0 (firmware/v2: its own firmware line, numbered on its own
+# from 2.0.0), one image, can-triple-2-<version>.ctf. One folder down, in
+# "CAN Triple 2.0", for the variants' reason and a sharper one: 2.0.0 outranks
+# every 1.x version, so beside the 1.x image this is what the initial-
+# programming tool would give a blank CAN Triple. Out of that glob, it is
+# inside the installer's recursive [Files], and Online -> Update Firmware
+# opens straight into it when the unit on the cable is a CAN Triple 2.0
+# (firmwareImagesDirectoryV2 in the Manager, which spells the folder name too,
+# as does the installer's cleanup).
+#
+# The private tree builds it under v2/.pio/build/CANTriple2/, and a tree with
+# the 2.0 line but no build fails like the 1.x image does. A tree without the
+# line (the public one, until the 2.0 ships) would carry released binaries
+# beside the 1.x one, and with none it stages nothing and leaves no folder.
+set(_v2_dir "${DEPLOY_DIR}/Firmware/CAN Triple 2.0")
+set(_v2_staged)
+if(EXISTS "${FIRMWARE_DIR}/v2/VERSION")
+    file(READ "${FIRMWARE_DIR}/v2/VERSION" _v2_version)
+    string(STRIP "${_v2_version}" _v2_version)
+    file(MAKE_DIRECTORY "${_v2_dir}")
+    set(_v2_dest "${_v2_dir}/can-triple-2-${_v2_version}.ctf")
+    stage_one("can-triple-2-${_v2_version}.ctf (CAN Triple 2.0)"
+        "${FIRMWARE_DIR}/v2/.pio/build/CANTriple2/firmware.ctf"
+        "${FIRMWARE_DIR}/can-triple-2-${_v2_version}.ctf"
+        "${_v2_dest}")
+    list(APPEND _v2_staged "${_v2_dest}")
+else()
+    file(GLOB _v2_released "${FIRMWARE_DIR}/can-triple-2-*.ctf")
+    foreach(_ctf ${_v2_released})
+        get_filename_component(_name "${_ctf}" NAME)
+        file(MAKE_DIRECTORY "${_v2_dir}")
+        stage_one("${_name} (CAN Triple 2.0)" "" "${_ctf}" "${_v2_dir}/${_name}")
+        list(APPEND _v2_staged "${_v2_dir}/${_name}")
+    endforeach()
+endif()
+file(GLOB _stale_v2 "${_v2_dir}/can-triple-2-*.ctf")
+if(_v2_staged)
+    list(REMOVE_ITEM _stale_v2 ${_v2_staged})
+endif()
+if(_stale_v2)
+    file(REMOVE ${_stale_v2})
+    message(STATUS "deploy: removed stale CAN Triple 2.0 image(s): ${_stale_v2}")
+endif()
+if(NOT _v2_staged AND EXISTS "${_v2_dir}")
+    file(REMOVE_RECURSE "${_v2_dir}")
+endif()
+
 # The bootloader image the initial-programming tool writes to a blank part.
 stage_one("bootloader.bin"
     "${FIRMWARE_DIR}/bootloader/.pio/build/bootloader/firmware.bin"

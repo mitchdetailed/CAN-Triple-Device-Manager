@@ -1,4 +1,5 @@
 #include "target_firmware_dialog.h"
+#include "theme.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -56,7 +57,9 @@ TargetFirmwareDialog::TargetFirmwareDialog(Configuration *config, DeviceLink *li
     m_targetLabel = new QLabel(this);
     m_targetLabel->setWordWrap(true);
 
-    m_table = new QTableWidget(int(sizeof(kRows) / sizeof(kRows[0])), 3, this);
+    // One row per table, then the retained values: not a table, but a limit
+    // the target sets all the same.
+    m_table = new QTableWidget(int(sizeof(kRows) / sizeof(kRows[0])) + 1, 3, this);
     m_table->setHorizontalHeaderLabels({tr("Table"), tr("Target holds"), tr("This document uses")});
     m_table->verticalHeader()->setVisible(false);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -198,8 +201,42 @@ void TargetFirmwareDialog::refresh()
         usesItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         if (uses > holds) {
             // Over: the mapper has refused these rows; say so where the number is.
-            usesItem->setForeground(Qt::red);
+            usesItem->setForeground(errorColor(palette()));
             usesItem->setToolTip(tr("More than the target holds — see File > Check Channels."));
+        }
+        m_table->setItem(r, 0, name);
+        m_table->setItem(r, 1, holdsItem);
+        m_table->setItem(r, 2, usesItem);
+    }
+
+    // Counters and integrators with Preserve value, together: how many the
+    // target keeps across power cycles, and how often it writes them.
+    {
+        int preserved = 0;
+        for (const CounterRow &c : m_config->counterRows)
+            if (c.active && c.preserveValue)
+                ++preserved;
+        for (const IntegratorRow &g : m_config->integratorRows)
+            if (g.active && g.preserveValue)
+                ++preserved;
+        const int r = int(sizeof(kRows) / sizeof(kRows[0]));
+        const int holds = cap.retainedLimit();
+        auto *name = new QTableWidgetItem(tr("values kept across power cycles"));
+        auto *holdsItem = new QTableWidgetItem(QString::number(holds));
+        auto *usesItem = new QTableWidgetItem(QString::number(preserved));
+        const QString how = tr("Counters and integrators with Preserve value, together. "
+                               "Written every %1%2.")
+                                .arg(retainedIntervalText(cap.retainedEveryMs()),
+                                     cap.retainedWearLimited()
+                                         ? tr(" to a flash store")
+                                         : tr(" to memory with no write limit"));
+        name->setToolTip(how);
+        holdsItem->setToolTip(how);
+        holdsItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        usesItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        if (preserved > holds) {
+            usesItem->setForeground(errorColor(palette()));
+            usesItem->setToolTip(tr("More than the target keeps — see File > Check Channels."));
         }
         m_table->setItem(r, 0, name);
         m_table->setItem(r, 1, holdsItem);

@@ -51,6 +51,20 @@ QString SealedInstall::describeFailure(quint8 cmd, quint8 errCode, const QString
             .arg(frameIndex + 1)
             .arg(frameCount);
     }
+    // A sealed frame's command the firmware does not have: the package needs
+    // newer firmware. A package that needs it leads with that command
+    // (package_builder.cpp), so a refusal of the first frame means nothing on
+    // the unit changed, and that is worth saying.
+    if (cmd == CMD_SEAL_FRAME && errCode == ERR_INVALID_CMD) {
+        QString text = QStringLiteral("The device's firmware does not have a command this "
+                                      "package uses (frame %1 of %2), so it needs a firmware "
+                                      "update before this package will install.")
+                           .arg(frameIndex + 1)
+                           .arg(frameCount);
+        if (frameIndex == 0)
+            text += QStringLiteral(" Nothing on the unit was changed.");
+        return text;
+    }
     if (errCode != 0)
         return QStringLiteral("The device refused frame %1 of %2: %3.")
             .arg(frameIndex + 1)
