@@ -16,7 +16,7 @@ To open the serial link, choose **Connect to Device…** on the start page or **
 - Click **Connect**. The label below the buttons changes to "Connected to COM5 @ 7372800", and the main window's status bar shows "Connected: COM5 @ 7372800" on the right. The button becomes **Disconnect**.
 - Click **Test** to confirm the device answers: it requests the device status and shows uptime, per-bus receive/transmit counters, and how many messages, signals, math channels and User Conditions are active.
 
-> **Note:** You do not have to visit this dialog first. Any **Online** command that needs a device — Send, Get, Monitor Channels and the rest — opens Connection Settings automatically when no link is open.
+> **Note:** You do not have to visit this dialog first. Any **Online** command that needs a device — Send, Get, Monitor Channels and the rest — opens Connection Settings automatically when no link is open, and closes it again once you have connected. **Tools → Options…** can remember the last connection, so Connect stops asking.
 
 If the port refuses to open or the Test fails, see [Troubleshooting](troubleshooting.md).
 

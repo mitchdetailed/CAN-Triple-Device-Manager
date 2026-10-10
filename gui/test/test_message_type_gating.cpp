@@ -35,6 +35,9 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QGroupBox>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QStringList>
 #include <QTabWidget>
@@ -124,6 +127,32 @@ QComboBox *deviceCombo(QWidget &w)
 
 // OK, through the dialog's own button box — accept() is private, and clicking
 // OK is what a user does anyway.
+// A warning box the dialog puts up waits for a click that never comes under
+// the offscreen platform. While the watch runs, a modal box that comes up is
+// closed within a moment and its text kept, so a refused section fails its
+// check instead of hanging the run.
+QString g_refusal;
+QTimer *g_refusalWatch = nullptr;
+void watchRefusals(bool on)
+{
+    if (!g_refusalWatch) {
+        g_refusalWatch = new QTimer(qApp);
+        g_refusalWatch->setInterval(200);
+        QObject::connect(g_refusalWatch, &QTimer::timeout, [] {
+            if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                std::puts(qPrintable(QStringLiteral("  refused: ") + box->text()));
+                g_refusal += box->text() + QLatin1String(" | ");
+                box->close();
+            }
+        });
+    }
+    g_refusal.clear();
+    if (on)
+        g_refusalWatch->start();
+    else
+        g_refusalWatch->stop();
+}
+
 bool clickOk(QDialog &d)
 {
     auto *box = d.findChild<QDialogButtonBox *>();
@@ -149,6 +178,7 @@ const char *deviceName(SectionDevice d)
     case SectionDevice::TransmitMessage: return "Transmit Message";
     case SectionDevice::TransmitCrc8: return "Transmit CRC8";
     case SectionDevice::MessageRelay: return "Message Relay";
+    case SectionDevice::UdsRequest: return "UDS Request";
     }
     return "?";
 }
@@ -174,6 +204,7 @@ void testTheChannelsTabFollowsTheMessageType()
         {SectionDevice::TransmitMessage, true},
         {SectionDevice::MessageRelay, false},
         {SectionDevice::TransmitCrc8, true},
+        {SectionDevice::UdsRequest, true}, // its response's channels
         {SectionDevice::Off, false}, // and again, arriving from the other side
     };
     for (const Case &c : cases) {
@@ -259,6 +290,140 @@ void testARelayStillDropsItsChannels()
     REQUIRE(clickOk(dialog));
     CHECK(dialog.result() == QDialog::Accepted);
     CHECK(dialog.section().rows.isEmpty());
+}
+
+// ---------------------------------------------------------------- the BRS box
+
+// THE BIT RATE SWITCH beside CAN FD frame (Mitch, 2026-10-08): on Transmit
+// Message and Transmit CRC8 only, live while CAN FD frame is ticked, where the
+// target honours it; unticked and saved, the section says so, and ticked again
+// after a trip through classic the choice comes back. On a target that cannot
+// send FD without it, the box shows ticked and stays greyed.
+QCheckBox *checkNamed(QWidget &w, const QString &text)
+{
+    for (QCheckBox *b : w.findChildren<QCheckBox *>())
+        if (b->text() == text)
+            return b;
+    return nullptr;
+}
+
+void testBrsFollowsCanFd()
+{
+    Configuration config;
+    buildConfig(config);
+    config.bus[0].dataRateKbps = 2000;
+    DeviceCapacity cap = DeviceCapacity::builtIn();
+    cap.canFeatures |= CAPACITY_CAN_BRS_PER_MESSAGE;
+    config.setCapacity(cap);
+    CommsSection s = twoRowMessage(SectionDevice::TransmitMessage);
+    s.fd = true;
+    SectionEditorDialog dialog(&config, s, 0, {}, -1);
+    QComboBox *combo = deviceCombo(dialog);
+    QCheckBox *fd = checkNamed(dialog, QStringLiteral("CAN FD frame"));
+    QCheckBox *brs = checkNamed(dialog, QStringLiteral("BRS"));
+    REQUIRE(combo && fd && brs);
+    struct Case { SectionDevice device; bool shown; };
+    const Case cases[] = {
+        {SectionDevice::ReceiveMessage, false}, {SectionDevice::TransmitCrc8, true},
+        {SectionDevice::MessageRelay, false},   {SectionDevice::Off, false},
+        // The UDS request before the last Transmit Message, which the OK below
+        // accepts as the frame this test is about.
+        {SectionDevice::UdsRequest, true},       {SectionDevice::TransmitMessage, true},
+    };
+    for (const Case &c : cases) {
+        combo->setCurrentIndex(combo->findData(int(c.device)));
+        std::printf("  %-17s BRS %s\n", deviceName(c.device),
+                    brs->isHidden() ? "hidden" : brs->isEnabled() ? "live" : "grayed");
+        CHECK(brs->isHidden() == !c.shown);
+    }
+    CHECK(fd->isChecked() && brs->isEnabled() && brs->isChecked()); // on by default
+    brs->setChecked(false);
+    fd->setChecked(false); // classic: no switch to choose
+    CHECK(!brs->isEnabled() && !brs->isChecked());
+    fd->setChecked(true); // FD again: the choice comes back
+    CHECK(brs->isEnabled() && !brs->isChecked());
+    REQUIRE(clickOk(dialog));
+    CHECK(dialog.result() == QDialog::Accepted);
+    CHECK(dialog.section().fd && !dialog.section().brs);
+
+    // A target that cannot: greyed, showing what the frame will do.
+    Configuration older;
+    buildConfig(older);
+    older.bus[0].dataRateKbps = 2000;
+    SectionEditorDialog oldDialog(&older, s, 0, {}, -1);
+    QCheckBox *oldBrs = checkNamed(oldDialog, QStringLiteral("BRS"));
+    REQUIRE(oldBrs);
+    CHECK(!oldBrs->isHidden() && !oldBrs->isEnabled() && oldBrs->isChecked());
+}
+
+// ---------------------------------------------------------------- UDS Request
+
+// The UDS Request group: shown for that message type alone, with the Base
+// Address and Message Length relabelled; the Received Channels tab live; and
+// OK keeps what was typed — the request's bytes parsed from hex, the response's
+// identifier, the timeouts and the flow control.
+void testUdsRequestControls()
+{
+    Configuration config;
+    buildConfig(config);
+    watchRefusals(true);
+    DeviceCapacity cap = DeviceCapacity::builtIn();
+    cap.canFeatures |= CAPACITY_CAN_UDS_REQUESTS;
+    cap.tables.resize(int(DeviceTable::Uds) + 1); // the 1.x layout stops at the CRC8 rules
+    cap.tables[int(DeviceTable::Uds)] = TableCapacity{32, int(sizeof(UdsConfig))};
+    config.setCapacity(cap);
+    CommsSection s = twoRowMessage(SectionDevice::UdsRequest);
+    s.baseAddress = 0x7E0;
+    s.udsResponseAddress = 0x7E8;
+    s.udsRequest = QByteArray::fromHex("22F190");
+    s.messageLengthBytes = 20;
+    SectionEditorDialog dialog(&config, s, 0, {}, -1);
+    QComboBox *combo = deviceCombo(dialog);
+    REQUIRE(combo != nullptr);
+    std::puts("  UDS Request       editor built");
+    QGroupBox *group = nullptr;
+    for (QGroupBox *g : dialog.findChildren<QGroupBox *>())
+        if (g->title() == QStringLiteral("UDS Request"))
+            group = g;
+    QLabel *lengthLabel = nullptr;
+    for (QLabel *l : dialog.findChildren<QLabel *>())
+        if (l->text() == QStringLiteral("Response Length :"))
+            lengthLabel = l;
+    REQUIRE(group != nullptr);
+    CHECK(!group->isHidden() && lengthLabel != nullptr);
+    auto *tabs = dialog.findChild<QTabWidget *>();
+    REQUIRE(tabs != nullptr);
+    CHECK(tabs->isTabEnabled(1) && tabs->tabText(1) == QStringLiteral("Received Channels"));
+    for (SectionDevice d : {SectionDevice::ReceiveMessage, SectionDevice::TransmitMessage,
+                            SectionDevice::MessageRelay, SectionDevice::TransmitCrc8}) {
+        combo->setCurrentIndex(combo->findData(int(d)));
+        CHECK(group->isHidden());
+    }
+    combo->setCurrentIndex(combo->findData(int(SectionDevice::UdsRequest)));
+    CHECK(!group->isHidden());
+    std::puts("  UDS Request       group follows the kind");
+    // Typed: the bytes, the identifier, the length.
+    QLineEdit *request = nullptr, *response = nullptr;
+    for (QLineEdit *e : group->findChildren<QLineEdit *>()) {
+        if (e->placeholderText() == QStringLiteral("22 F1 90"))
+            request = e;
+        else if (e->text().startsWith(QStringLiteral("0x7E8")))
+            response = e;
+    }
+    REQUIRE(request != nullptr && response != nullptr);
+    CHECK(request->text() == QStringLiteral("22 F1 90"));
+    request->setText(QStringLiteral("2e f1 90 01 02"));
+    response->setText(QStringLiteral("18DAF110"));
+    std::puts("  UDS Request       accepting");
+    REQUIRE(clickOk(dialog));
+    watchRefusals(false);
+    if (!g_refusal.isEmpty())
+        std::puts(qPrintable(QStringLiteral("  refused: ") + g_refusal));
+    CHECK(dialog.result() == QDialog::Accepted);
+    CHECK(dialog.section().device == SectionDevice::UdsRequest
+          && dialog.section().udsRequest == QByteArray::fromHex("2EF1900102")
+          && dialog.section().udsResponseAddress == 0x18DAF110
+          && dialog.section().messageLengthBytes == 20 && dialog.section().rows.size() == 2);
 }
 
 // ---------------------------------------------------------------- the picker
@@ -410,12 +575,15 @@ int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    watchRefusals(true); // every refusal box of the run closed and printed, none waited on
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     testTheChannelsTabFollowsTheMessageType();
     testOffOpensWithTheTabAlreadyGrayed();
     testOffKeepsItsChannels();
     testARelayStillDropsItsChannels();
+    testBrsFollowsCanFd();
+    testUdsRequestControls();
     testATransmitRowCannotInventAChannel();
     testAReceiveRowStillCan();
     testTheCrcChannelPickerStillOffersNew();

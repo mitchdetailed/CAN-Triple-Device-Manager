@@ -132,7 +132,14 @@ struct CompoundIdentifier {
     static CompoundIdentifier fromJson(const QJsonObject &o);
 };
 
-enum class SectionDevice { Off, ReceiveMessage, TransmitMessage, MessageRelay, TransmitCrc8 };
+enum class SectionDevice {
+    Off,
+    ReceiveMessage,
+    TransmitMessage,
+    MessageRelay,
+    TransmitCrc8,
+    UdsRequest // a diagnostic request the unit makes, and its response (a CAN Triple 2.0)
+};
 enum class SectionAlignment { Normal, WordSwap }; // Normal = big-endian, WordSwap = little-endian
 
 // Cadence for a compound (multiplexed) TRANSMIT section (v10 firmware):
@@ -178,7 +185,29 @@ struct CommsSection {
 
     bool extended = false;
     bool fd = false;                  // CAN FD frame (allows 12/16/20/24/32/48/64-byte lengths)
+    // CAN FD transmit only: the bit rate switch (BRS), the frame's data at the
+    // bus's FD data rate. False sends the whole frame at the base rate, which a
+    // target honours where DeviceCapacity::brsPerMessage says so (Check
+    // Channels refuses it elsewhere). A receive message and a classic frame
+    // ignore it.
+    bool brs = true;
     quint32 baseAddress = 0;
+    // UDS REQUEST (SectionDevice::UdsRequest; a CAN Triple 2.0 from firmware
+    // 2.0.4). baseAddress is the request's identifier and the transmit fields
+    // its timing (cyclic, or triggered on a User Condition); udsResponseAddress
+    // the response's identifier, whose reassembled bytes `rows` decode (byte 0
+    // the response's service byte) and messageLengthBytes the bytes of it kept
+    // (1..4,095); receiveTimeoutMs and defaultValueOnTimeout are the response's.
+    // The unit's protocol.h, "UDS REQUESTS", has the rest.
+    quint32 udsResponseAddress = 0x7E8;
+    QByteArray udsRequest;        // the request's bytes, the service first, 1..64
+    bool udsAwaitResponse = true; // false: none is awaited (suppressPosRspMsgIndication)
+    int udsTimeoutMs = 1000;      // P2: the wait for the response
+    int udsPendingMs = 5000;      // P2*: the wait after a response-pending (7F xx 78)
+    int udsPadByte = 0;           // frames padded to 8 bytes with this; -1: not padded
+    int udsBlockSize = 0;         // the flow control the unit sends: block size (0: all)
+    int udsStMin = 0;             // ... and STmin, ms (0..127)
+    QString udsResultChannel;     // told how each request ended; empty: none
     bool routeEnable = false;         // CAN Triple extra: gateway this message
     int routeBusMask = 0;             // bit0=CAN1 bit1=CAN2 bit2=CAN3
     bool cyclic = true;               // transmit only: false = Triggered
@@ -385,6 +414,7 @@ struct CommsSection {
     bool isTransmit() const
     { return device == SectionDevice::TransmitMessage || device == SectionDevice::TransmitCrc8; }
     bool isCrc8() const { return device == SectionDevice::TransmitCrc8; }
+    bool isUds() const { return device == SectionDevice::UdsRequest; }
     bool isRelay() const { return device == SectionDevice::MessageRelay; }
     // Compound sections carry channels only inside identifiers. Fold any legacy
     // always-present `rows` (from an older file or device image) into every used

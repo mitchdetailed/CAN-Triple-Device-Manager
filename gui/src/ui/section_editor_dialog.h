@@ -11,6 +11,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QGridLayout;
 class QGroupBox;
 class QLabel;
 class QLineEdit;
@@ -19,6 +20,7 @@ class QPushButton;
 class QRadioButton;
 class QSpinBox;
 class QStackedWidget;
+class QStandardItemModel;
 class QTabWidget;
 class QTreeWidget;
 
@@ -84,6 +86,13 @@ private:
     // Transmit Rate. One answer to "what would this control be if nothing were
     // protected?", so the two passes cannot disagree.
     void applyDeviceKindEnablement(bool editable);
+    // The BRS box beside CAN FD frame: a transmit message's, live while CAN FD
+    // frame is ticked, on a target that honours it, and `editable`.
+    void updateBrsCheck(bool editable);
+    // The UDS Request group and the labels a UDS request relabels (Request ID,
+    // Response Length): shown for a UDS Request alone, live with `editable`.
+    void updateUdsControls(bool editable);
+    void onSelectUdsResultChannel();
     void updateTxModeControls(); // show Transmit Mode only for compound transmit
     // Show the Transmit Condition row only for a Triggered transmit message. A
     // separate pass from updateTxModeControls, which despite its name governs
@@ -166,12 +175,11 @@ private:
     // Configuration::setCommsPassword states for the document.
     bool identityFieldsEnabled() const;
 
-    // CRC8 tab (device == TransmitCrc8 only). One slot per possible checksum
-    // element; mirrors CRC8_MAX_ELEMENTS in protocol/wire_structs.h rather than
-    // including the wire header here — buildCrcTab static_asserts the two equal,
-    // so the mirror cannot drift silently.
-    static constexpr int kCrcElementSlots = 15;
+    // CRC8 tab (device == TransmitCrc8 only).
     void buildCrcTab(QWidget *page);
+    // Builds the element rows up to `count`, each the first time the count
+    // reaches it; built rows are kept (m_crcRows).
+    void ensureCrcRows(int count);
     void onSelectCrcChannel();
     // The CRC widgets' enabled state, tier and element count together. The tier
     // is a parameter (not re-derived) for the same reason as
@@ -211,6 +219,12 @@ private:
     int m_sectionIndex;
     ProtectedCommsProver m_prover; // for the Protected untick only; may be empty
     bool m_fdAllowed = false; // whether the CAN FD frame box may be enabled
+    // The bit rate switch (Mitch, 2026-10-08). Allowed where the target sends
+    // CAN FD without it (DeviceCapacity::brsPerMessage). m_brsChoice is the
+    // section's choice, kept while the box shows a classic frame's state, so
+    // ticking CAN FD frame again brings it back.
+    bool m_brsAllowed = false;
+    bool m_brsChoice = true;
 
     // The working tier. m_section.protection is only written from it in
     // syncParametersFromUi, so a cancelled dialog leaves the section untouched.
@@ -261,6 +275,20 @@ private:
     QRadioButton *m_standardRadio;
     QRadioButton *m_extendedRadio;
     QCheckBox *m_fdCheck;
+    QCheckBox *m_brsCheck = nullptr;
+    QLabel *m_addressLabel = nullptr; // "Base Address :", or a UDS request's "Request ID :"
+    // UDS Request (SectionDevice::UdsRequest): the group and its fields.
+    QGroupBox *m_udsGroup = nullptr;
+    QLineEdit *m_udsResponseEdit = nullptr;
+    QLineEdit *m_udsRequestEdit = nullptr;
+    QCheckBox *m_udsAwaitCheck = nullptr;
+    QSpinBox *m_udsTimeoutSpin = nullptr;
+    QSpinBox *m_udsPendingSpin = nullptr;
+    QComboBox *m_udsPadCombo = nullptr;
+    QSpinBox *m_udsBlockSpin = nullptr;
+    QSpinBox *m_udsStMinSpin = nullptr;
+    QLineEdit *m_udsResultEdit = nullptr;
+    QPushButton *m_udsResultButton = nullptr;
     QLineEdit *m_addressEdit;
     QLabel *m_addressDecLabel;
     QLabel *m_lengthLabel;
@@ -315,22 +343,33 @@ private:
     QCheckBox *m_crcRefInCheck = nullptr;
     QCheckBox *m_crcRefOutCheck = nullptr;
     QSpinBox *m_crcCountSpin = nullptr;
-    // The 15 element rows, pre-built once. A fixed grid with a per-row stack for
-    // the value side, instead of add/remove churn: rows past Element Count are
-    // merely disabled, so a count lowered by accident and raised again hands the
-    // user their elements back instead of fifteen fresh defaults.
-    QLabel *m_crcElemLabel[kCrcElementSlots] = {};
-    QComboBox *m_crcElemType[kCrcElementSlots] = {};
-    QStackedWidget *m_crcElemStack[kCrcElementSlots] = {};
-    QComboBox *m_crcElemId[kCrcElementSlots] = {};
-    QComboBox *m_crcElemData[kCrcElementSlots] = {};
-    QLineEdit *m_crcElemRaw[kCrcElementSlots] = {};
-    // The CAN Triple 2.0's two kinds: ID (Whole) — how many bytes and which
-    // end first — and Data Run, first byte to last.
-    QComboBox *m_crcElemIdBytes[kCrcElementSlots] = {};
-    QComboBox *m_crcElemIdOrder[kCrcElementSlots] = {};
-    QComboBox *m_crcElemRunFirst[kCrcElementSlots] = {};
-    QComboBox *m_crcElemRunLast[kCrcElementSlots] = {};
+    // The element rows: a grid with a per-row stack for the value side, instead
+    // of add/remove churn. A row is built when Element Count first reaches it
+    // and kept after, merely hidden past the count, so a count lowered by
+    // accident and raised again hands the user their elements back instead of
+    // fresh defaults. Up to the target's elements a rule — 15, or 70 on a CAN
+    // Triple 2.0 with long rules — built as needed rather than all up front.
+    struct CrcRow {
+        QLabel *label = nullptr;
+        QComboBox *type = nullptr;
+        QStackedWidget *stack = nullptr;
+        QComboBox *id = nullptr;
+        QComboBox *data = nullptr;
+        QLineEdit *raw = nullptr;
+        // The CAN Triple 2.0's two kinds: ID (Whole) — how many bytes and which
+        // end first — and Data Run, first byte to last.
+        QComboBox *idBytes = nullptr;
+        QComboBox *idOrder = nullptr;
+        QComboBox *runFirst = nullptr;
+        QComboBox *runLast = nullptr;
+    };
+    QVector<CrcRow> m_crcRows;
+    QGridLayout *m_crcRowsGrid = nullptr;
+    // "Byte 0" .. "Byte N", one list every row's byte combos share.
+    QStandardItemModel *m_crcByteModel = nullptr;
+    int m_crcMaxByte = 7;
+    int m_crcMaxElements = 15; // the target's elements a rule (buildCrcTab)
+    int m_crcStretchRow = 0;   // the empty grid row the spare height pools in
 };
 
 } // namespace ct

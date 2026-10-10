@@ -50,4 +50,13 @@ UnitTargetCheck checkUnitTarget(const Configuration &config, const DeviceCapacit
 // numbers when no firmware was chosen.
 QString targetName(const DeviceCapacity &target);
 
+// Whether a document takes the connected unit's sizing on its own, with nobody
+// asking: the unit is a CAN Triple 2.0 that sizes a configuration by its
+// memory, and the document was born in this session (no file yet), is still on
+// this program's built-in numbers, and nobody has chosen its target (File >
+// Target Firmware; `picked`). Then the unit's numbers only add room: every
+// table's ceiling there is at least the built-in capacity. A document opened
+// from a file keeps the target it was saved with.
+bool adoptsUnitTarget(const Configuration &config, const DeviceCapacity &unit, bool picked);
+
 } // namespace ct

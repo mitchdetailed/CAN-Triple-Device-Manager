@@ -7,13 +7,18 @@
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QSet>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTableWidget>
 #include <QVBoxLayout>
 
+#include <climits>
 #include <cmath>
 
 #include "../model/channel_catalog.h"
@@ -151,6 +156,55 @@ EditChannelDialog::EditChannelDialog(Configuration *config, const Channel &initi
     detailsForm->addRow(tr("Range Minimum:"), m_minSpin);
     detailsForm->addRow(tr("Range Maximum:"), m_maxSpin);
 
+    // --- Value Names group (phase 4, step 3b) -----------------------------
+    // A name for each of some of the channel's values. Wherever the live value
+    // is shown it reads "Park (0)" rather than 0, and a CAN Triple 2.0 that
+    // keeps value names keeps them with the configuration, so a Get brings them
+    // back. Whole values only: a value name names a count, as a DBC's VAL_
+    // lines name a raw value.
+    auto *valuesGroup = new QGroupBox(tr("Value Names"), this);
+    auto *valuesLayout = new QVBoxLayout(valuesGroup);
+    m_valueNames = new QTableWidget(0, 2, valuesGroup);
+    m_valueNames->setObjectName(QStringLiteral("valueNames"));
+    m_valueNames->setHorizontalHeaderLabels({tr("Value"), tr("Name")});
+    m_valueNames->horizontalHeader()->setStretchLastSection(true);
+    m_valueNames->verticalHeader()->setVisible(false);
+    m_valueNames->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_valueNames->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_valueNames->setMinimumHeight(110);
+    m_valueNames->setToolTip(
+        tr("Names for particular values of this channel, such as \"Park\" for 0. The "
+           "Monitor shows a named value as \"Park (0)\". A CAN Triple 2.0 keeps them with "
+           "the configuration (up to %1 bytes a name).")
+            .arg(VALUE_NAME_BYTES));
+    m_addValueName = new QPushButton(tr("Add"), valuesGroup);
+    m_addValueName->setObjectName(QStringLiteral("addValueName"));
+    m_removeValueName = new QPushButton(tr("Remove"), valuesGroup);
+    m_removeValueName->setObjectName(QStringLiteral("removeValueName"));
+    auto *valueButtons = new QHBoxLayout;
+    valueButtons->addWidget(m_addValueName);
+    valueButtons->addWidget(m_removeValueName);
+    valueButtons->addStretch(1);
+    valuesLayout->addWidget(m_valueNames);
+    valuesLayout->addLayout(valueButtons);
+    connect(m_addValueName, &QPushButton::clicked, this, [this]() {
+        // The next value after the highest named one, or 0 for the first.
+        int next = 0;
+        const QMap<int, QString> names = valueNames();
+        for (auto it = names.constBegin(); it != names.constEnd(); ++it)
+            next = qMax(next, it.key() < INT_MAX ? it.key() + 1 : it.key());
+        addValueNameRow(next, QString());
+        const int row = m_valueNames->rowCount() - 1;
+        m_valueNames->setCurrentCell(row, 1);
+        if (QWidget *name = m_valueNames->cellWidget(row, 1))
+            name->setFocus();
+    });
+    connect(m_removeValueName, &QPushButton::clicked, this, [this]() {
+        const int row = m_valueNames->currentRow();
+        if (row >= 0)
+            m_valueNames->removeRow(row);
+    });
+
     // --- Buttons ----------------------------------------------------------
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
                                          Qt::Horizontal, this);
@@ -186,6 +240,7 @@ EditChannelDialog::EditChannelDialog(Configuration *config, const Channel &initi
     }
     mainLayout->addWidget(nameGroup);
     mainLayout->addWidget(detailsGroup);
+    mainLayout->addWidget(valuesGroup);
     mainLayout->addWidget(buttons);
 
     // --- Signal wiring ----------------------------------------------------
@@ -226,6 +281,9 @@ EditChannelDialog::EditChannelDialog(Configuration *config, const Channel &initi
         m_maxSpin->setValue(initial.maxValue);
     }
 
+    for (auto it = initial.enumLabels.constBegin(); it != initial.enumLabels.constEnd(); ++it)
+        addValueNameRow(it.key(), it.value());
+
     if (m_isNew) {
         const QString defaultName =
             initial.name.isEmpty() ? tr("New Channel") : initial.name;
@@ -244,7 +302,8 @@ EditChannelDialog::EditChannelDialog(Configuration *config, const Channel &initi
         // back door while looking like a typo fix.
         const QList<QWidget *> locked{m_nameEdit,      m_quantityCombo,  m_unitsCombo,
                                       m_dataTypeCombo, m_decimalsSpin,   m_resolutionSpin,
-                                      m_minSpin,       m_maxSpin};
+                                      m_minSpin,       m_maxSpin,        m_valueNames,
+                                      m_addValueName,  m_removeValueName};
         for (QWidget *w : locked)
             w->setEnabled(false);
         // With OK disabled the dialog has exactly one exit, so channel() is
@@ -328,6 +387,22 @@ bool EditChannelDialog::validate()
         return false;
     }
 
+    // One name a value: two rows naming the same value would leave which one
+    // the channel keeps to chance.
+    QSet<int> named;
+    for (int row = 0; row < m_valueNames->rowCount(); ++row) {
+        const auto *value = qobject_cast<const QSpinBox *>(m_valueNames->cellWidget(row, 0));
+        const auto *text = qobject_cast<const QLineEdit *>(m_valueNames->cellWidget(row, 1));
+        if (!value || !text || text->text().trimmed().isEmpty())
+            continue;
+        if (named.contains(value->value())) {
+            QMessageBox::warning(this, tr("Edit Custom Channel"),
+                                 tr("Value %1 has more than one name.").arg(value->value()));
+            return false;
+        }
+        named.insert(value->value());
+    }
+
     const bool sameAsOriginal =
         !m_isNew && name.compare(m_originalName, Qt::CaseInsensitive) == 0;
     if (m_config && !sameAsOriginal) {
@@ -359,7 +434,37 @@ Channel EditChannelDialog::channel() const
     c.maxValue = m_maxSpin->value();
     c.category = QStringLiteral("User Channels");
     c.userDefined = true;
+    c.enumLabels = valueNames();
     return c;
+}
+
+void EditChannelDialog::addValueNameRow(int value, const QString &name)
+{
+    const int row = m_valueNames->rowCount();
+    m_valueNames->insertRow(row);
+    auto *valueSpin = new QSpinBox(m_valueNames);
+    valueSpin->setRange(INT_MIN, INT_MAX);
+    valueSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    valueSpin->setValue(value);
+    auto *nameEdit = new QLineEdit(name, m_valueNames);
+    // A CAN Triple 2.0 keeps VALUE_NAME_BYTES of a value name: capped here, as
+    // a channel's name is, so the limit is felt rather than clipped later.
+    ct::limitToUtf8Bytes(nameEdit, VALUE_NAME_BYTES);
+    nameEdit->setText(ct::clipToUtf8Bytes(name, VALUE_NAME_BYTES));
+    m_valueNames->setCellWidget(row, 0, valueSpin);
+    m_valueNames->setCellWidget(row, 1, nameEdit);
+}
+
+QMap<int, QString> EditChannelDialog::valueNames() const
+{
+    QMap<int, QString> out;
+    for (int row = 0; row < m_valueNames->rowCount(); ++row) {
+        const auto *value = qobject_cast<const QSpinBox *>(m_valueNames->cellWidget(row, 0));
+        const auto *text = qobject_cast<const QLineEdit *>(m_valueNames->cellWidget(row, 1));
+        if (value && text && !text->text().trimmed().isEmpty())
+            out.insert(value->value(), text->text().trimmed());
+    }
+    return out;
 }
 
 QString EditChannelDialog::createOrEdit(Configuration *config, const Channel &initial,

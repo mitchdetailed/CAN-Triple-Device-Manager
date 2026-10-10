@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.2.7 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.2.8 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -339,6 +339,7 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/model/dbc_import.cpp
     src/model/dbc_import.h
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/model/device_mapper.h
     src/model/secure_file.cpp
     src/model/secure_file.h
@@ -390,6 +391,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/ui/integrators_dialog.h
     src/ui/connection_settings_dialog.cpp
     src/ui/connection_settings_dialog.h
+    src/ui/options_dialog.cpp
+    src/ui/options_dialog.h
     src/ui/target_firmware_dialog.cpp
     src/ui/target_firmware_dialog.h
     src/ui/edit_channel_dialog.cpp
@@ -585,6 +588,7 @@ qt_add_executable(test_roundtrip
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -643,6 +647,7 @@ qt_add_executable(test_firmware_link
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -748,6 +753,7 @@ qt_add_executable(scriptc
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -774,6 +780,7 @@ qt_add_executable(test_script_compiler
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -806,6 +813,7 @@ qt_add_executable(test_script_sim
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -838,6 +846,7 @@ qt_add_executable(test_script_editor
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -886,6 +895,7 @@ qt_add_executable(test_help_access
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -930,6 +940,7 @@ qt_add_executable(test_firmware_update_dialog
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -968,6 +979,16 @@ qt_add_executable(test_theme
     src/ui/theme.cpp
 )
 target_link_libraries(test_theme PRIVATE Qt6::Widgets Qt6::Core)
+
+# Tools → Options…: the theme goes live as the combo changes and Cancel puts
+# the old one back; "Remember last connection" is off by default, kept by OK
+# and not by Cancel, and turning it off forgets the connection it kept.
+qt_add_executable(test_options_dialog
+    test/test_options_dialog.cpp
+    src/ui/options_dialog.cpp
+    src/ui/theme.cpp
+)
+target_link_libraries(test_options_dialog PRIVATE Qt6::Widgets Qt6::Core)
 
 # The help in the theme: help.css as served on every palette (as shipped when
 # light; every colour swapped, readable and nothing else changed when dark),
@@ -1011,6 +1032,37 @@ if(EXISTS "${FIRMWARE_DIR}/v2/include/protocol.h")
         PRIVATE ct_v2_wire_values Qt6::Core Qt6::SerialPort ct_device_core)
 endif()
 
+# The plan's arithmetic (phase 4): what the Manager works out a configuration
+# takes of a CAN Triple 2.0 that takes a plan (DeviceCapacity::planCost over
+# its report, planReferences over the records) held against what the unit
+# itself answers, from the 2.0 line's real store and engine compiled for the
+# host (v2_plan_oracle.c, test_engine_plan.c's harness). The oracle is a
+# library of its own, with only the 2.0 include directory, and the test links
+# nothing of the 1.x firmware: the two lines define the same C names.
+if(EXISTS "${FIRMWARE_DIR}/v2/src/engine_core.c")
+    add_library(ct_v2_plan_oracle STATIC
+        test/v2_plan_oracle.c
+        ${FIRMWARE_DIR}/v2/src/engine_core.c
+        ${FIRMWARE_DIR}/v2/src/engine_math.c
+        ${FIRMWARE_DIR}/v2/src/flash_store.c
+        ${FIRMWARE_DIR}/v2/src/fw_image.c
+        ${FIRMWARE_DIR}/v2/src/signal_scaling.c
+        ${FIRMWARE_DIR}/v2/src/crc8_rule.c
+        ${FIRMWARE_DIR}/v2/src/can_field.c
+        ${FIRMWARE_DIR}/v2/src/script_exec.c
+        ${FIRMWARE_DIR}/v2/src/script_vm.c
+        ${FIRMWARE_DIR}/v2/src/script_cycles.c
+        ${FIRMWARE_DIR}/v2/src/label_store.c
+    )
+    target_include_directories(ct_v2_plan_oracle PRIVATE ${FIRMWARE_DIR}/v2/include)
+    qt_add_executable(test_plan_v2
+        test/test_plan_v2.cpp
+        src/protocol/capacity.cpp
+        src/model/plan_budget.cpp
+    )
+    target_link_libraries(test_plan_v2 PRIVATE ct_v2_plan_oracle Qt6::Core)
+endif()
+
 # Channel labels show the unit; channel IDENTITY stays the bare name. The
 # dialogs' read-only "Input :" boxes used to BE the identity — decorating them
 # without separating the two jobs rewrites the configuration to name a channel
@@ -1036,6 +1088,7 @@ qt_add_executable(test_channel_labels
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1074,6 +1127,7 @@ qt_add_executable(test_calc_order
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1099,7 +1153,10 @@ qt_add_executable(ct3check
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
+    src/protocol/firmware_image.cpp     # --target: a firmware image's capacity report
+    src/protocol/hardware.cpp           # the board families the image loader names
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1171,6 +1228,7 @@ qt_add_executable(test_comms_multiselect
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1214,6 +1272,7 @@ qt_add_executable(test_message_type_gating
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1246,6 +1305,7 @@ qt_add_executable(test_add_channel_preview
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1283,6 +1343,7 @@ qt_add_executable(test_name_limits
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1351,6 +1412,7 @@ qt_add_executable(test_monitor_channels
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1390,6 +1452,7 @@ qt_add_executable(test_license_dialogs
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
     src/model/user_paths.cpp
@@ -1427,6 +1490,7 @@ qt_add_executable(test_dbc_names
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1465,6 +1529,7 @@ qt_add_executable(test_channel_source
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1497,6 +1562,7 @@ qt_add_executable(test_json_format
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1535,6 +1601,7 @@ qt_add_executable(test_frame_layout
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1579,6 +1646,7 @@ qt_add_executable(test_comms_template
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1623,6 +1691,7 @@ qt_add_executable(test_script_examples
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1653,6 +1722,7 @@ qt_add_executable(test_tables
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1679,6 +1749,7 @@ qt_add_executable(test_lua
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp
@@ -1728,6 +1799,7 @@ qt_add_executable(test_protection
     src/model/configuration.cpp
     src/model/dbc_import.cpp
     src/model/device_mapper.cpp
+    src/model/plan_budget.cpp
     src/protocol/capacity.cpp
     src/model/secure_file.cpp
     src/model/config_file.cpp

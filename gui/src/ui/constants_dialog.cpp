@@ -394,7 +394,7 @@ static QStringList reservedNames(Configuration *config, const QList<ConstantRow>
 
 void ConstantsDialog::onAdd()
 {
-    const int limit = m_config->capacity().capacityOf(DeviceTable::Constants);
+    const int limit = m_config->capacity().limitOf(DeviceTable::Constants);
     if (m_rows.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
                              tr("The device supports at most %1 constants.").arg(limit));
@@ -494,8 +494,13 @@ void ConstantsDialog::commit()
         if (!old.name.isEmpty() && !newNames.contains(old.name.toLower()))
             m_config->catalog().removeUserChannel(old.name);
     for (const ConstantRow &k : m_rows)
-        if (!k.name.isEmpty())
-            m_config->catalog().addOrUpdateUserChannel(channelForConstant(k));
+        if (!k.name.isEmpty()) {
+            // The value names it was given (Edit Custom Channel) stay with it:
+            // the row says nothing about them.
+            Channel ch = channelForConstant(k);
+            ch.enumLabels = m_config->catalog().findByName(k.name).enumLabels;
+            m_config->catalog().addOrUpdateUserChannel(ch);
+        }
 
     m_config->constantRows = m_rows;
     m_config->setDirty();

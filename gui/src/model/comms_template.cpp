@@ -110,7 +110,7 @@ QStringList mentionedChannels(const CommsSection &s)
         names << s.diagnosticChannel;
     if (s.isCrc8() && !s.crcChannel.isEmpty())
         names << s.crcChannel;
-    if (s.isTransmit() && !s.cyclic && !s.transmitCondition.isEmpty())
+    if ((s.isTransmit() || s.isUds()) && !s.cyclic && !s.transmitCondition.isEmpty())
         names << s.transmitCondition;
     return names;
 }
@@ -148,7 +148,7 @@ Channel findUserChannel(const ChannelCatalog &catalog, const QString &name)
 // clue on screen. Left dangling instead, and reported.
 bool isConditionReference(const CommsSection &s, const QString &name)
 {
-    return s.isTransmit() && !s.cyclic
+    return (s.isTransmit() || s.isUds()) && !s.cyclic
            && s.transmitCondition.compare(name, Qt::CaseInsensitive) == 0;
 }
 
@@ -161,7 +161,7 @@ QSet<QString> conditionReferences(const QList<CommsSection> &sections)
 {
     QSet<QString> names;
     for (const CommsSection &s : sections)
-        if (s.isTransmit() && !s.cyclic && !s.transmitCondition.isEmpty())
+        if ((s.isTransmit() || s.isUds()) && !s.cyclic && !s.transmitCondition.isEmpty())
             names.insert(s.transmitCondition.toLower());
     return names;
 }

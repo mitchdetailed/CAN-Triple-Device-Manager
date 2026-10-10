@@ -20,6 +20,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QHash>
 #include <QList>
 #include <QPair>
 #include <QString>
@@ -56,6 +57,8 @@ public:
 
     // ---- what the caller sent, for assertions ---------------------------
     QList<QPair<quint8, QByteArray>> sent;
+    // The timeout each command was last asked with, by command.
+    QHash<quint8, int> timeoutOf;
 
     int countOf(quint8 cmd) const
     {
@@ -88,8 +91,8 @@ public:
     void request(quint8 cmd, const QByteArray &payload, ResponseHandler handler,
                  int timeoutMs = kDefaultTimeoutMs, int retries = kDefaultRetries) override
     {
-        Q_UNUSED(timeoutMs);
         Q_UNUSED(retries);
+        timeoutOf.insert(cmd, timeoutMs);
         const Reply r = answer(cmd, payload);
         // POSTED, not called here. ConfigTransfer's step handler calls runNext()
         // which issues the next request, so answering inline would recurse one

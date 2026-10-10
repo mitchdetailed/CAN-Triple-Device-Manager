@@ -8,6 +8,7 @@
 
 #include "configuration.h"
 #include "dbc_import.h" // storageTypeForRange — one sizing rule for both directions
+#include "plan_budget.h"
 
 // The DEVICE's script verifier, compiled in — not a host-side reimplementation
 // of the format. A retained image is sent back to a unit unchanged, so the only
@@ -315,6 +316,42 @@ static void fillLabel(CanSignalConfig &sig, const QString &name, QVector<QByteAr
     keepLabel(labels, idx, clipToLabel(name, budget));
 }
 
+// The unit of a record's channel, as a CAN Triple 2.0 keeps it beside the name
+// (LABEL_KIND_UNIT; phase 4, step 3b): its catalogue unit, empty for none,
+// clipped to a slot. Kept for every target, like the names.
+static void fillUnit(QVector<QByteArray> &units, int idx, const Channel &ch)
+{
+    keepLabel(units, idx, ch.isValid() ? clipToLabel(ch.unit, LABEL_STORE_BYTES) : QByteArray());
+}
+
+QByteArray valueNameSlot(int signal, qint32 value, const QString &name)
+{
+    ValueNameLabel v{};
+    v.signal = quint16(qBound(0, signal, 0xFFFF));
+    v.value = value;
+    const QByteArray utf8 = clipToLabel(name, VALUE_NAME_BYTES);
+    std::memcpy(v.name, utf8.constData(), size_t(utf8.size()));
+    return QByteArray(reinterpret_cast<const char *>(&v), int(sizeof(v)));
+}
+
+bool readValueNameSlot(const QByteArray &slot, int *signal, qint32 *value, QString *name)
+{
+    if (slot.size() < int(sizeof(ValueNameLabel)))
+        return false;
+    ValueNameLabel v;
+    std::memcpy(&v, slot.constData(), sizeof(v));
+    const QString text = QString::fromUtf8(v.name, int(qstrnlen(v.name, sizeof(v.name))));
+    if (text.isEmpty())
+        return false;
+    if (signal)
+        *signal = int(v.signal);
+    if (value)
+        *value = v.value;
+    if (name)
+        *name = text;
+    return true;
+}
+
 // The same for a MESSAGE's name, into the narrower field (store v18). Written
 // for every message including a concealed one: the device already holds that
 // message's id, timing and every channel label belonging to it, so withholding
@@ -410,6 +447,10 @@ static void noteIfNameClipped(MappingResult &r, int busIdx, const QString &name,
 // Validation says the same at Check Channels, as an error per element.
 static QString crc8Unsupported(const CommsSection &section, const DeviceCapacity &cap)
 {
+    // More elements than a rule takes there: 15 in a CAN Triple's one record,
+    // up to 70 on a CAN Triple 2.0 whose rules run on into more (long rules).
+    if (int(section.crcElements.size()) > cap.crc8MaxElements())
+        return QStringLiteral("a CRC recipe of %1 elements").arg(section.crcElements.size());
     if (section.crcByteLocation > cap.crc8MaxByte())
         return QStringLiteral("CRC byte location %1").arg(section.crcByteLocation);
     for (const CommsSection::CrcElement &el : section.crcElements) {
@@ -421,6 +462,149 @@ static QString crc8Unsupported(const CommsSection &section, const DeviceCapacity
             return QStringLiteral("CRC element frame byte %1").arg(el.value);
     }
     return QString();
+}
+
+// A CRC element in a record's two bytes (wire_structs.h, CRC8_ELEM_*), and back.
+static void crc8Encode(const CommsSection::CrcElement &el, quint8 *type, quint8 *value)
+{
+    if (el.type == CommsSection::CrcElement::DataRun) {
+        *type = quint8(CRC8_ELEM_DATA_RUN | (el.value & CRC8_RUN_FIRST_MASK));
+        *value = quint8(el.last & CRC8_RUN_LAST_MASK);
+    } else if (el.type == CommsSection::CrcElement::IdAll) {
+        *type = CRC8_ELEM_ID_ALL;
+        *value = quint8((qBound(0, el.value, 4) & CRC8_IDALL_BYTES_MASK)
+                        | (el.lsbFirst ? CRC8_IDALL_LSB_FIRST : 0));
+    } else {
+        *type = quint8(el.type);
+        *value = quint8(el.value & 0xFF);
+    }
+}
+
+static CommsSection::CrcElement crc8Decode(quint8 t, quint8 v)
+{
+    CommsSection::CrcElement el;
+    if ((t & CRC8_ELEM_RUN_MASK) == CRC8_ELEM_DATA_RUN) {
+        el.type = CommsSection::CrcElement::DataRun;
+        el.value = t & CRC8_RUN_FIRST_MASK;
+        el.last = v & CRC8_RUN_LAST_MASK;
+    } else if (t == CRC8_ELEM_ID_ALL) {
+        el.type = CommsSection::CrcElement::IdAll;
+        el.value = qMin(int(v & CRC8_IDALL_BYTES_MASK), 4);
+        el.lsbFirst = (v & CRC8_IDALL_LSB_FIRST) != 0;
+    } else {
+        el.type = t == CRC8_ELEM_ID    ? CommsSection::CrcElement::Id
+                  : t == CRC8_ELEM_RAW ? CommsSection::CrcElement::Raw
+                                       : CommsSection::CrcElement::Data;
+        el.value = v;
+    }
+    return el;
+}
+
+// The records a CRC8 rule of `elements` elements takes on `cap`: one, or where
+// a record holds 8 (crc8LongRules, a CAN Triple 2.0 from its store v22), one
+// per 8 of them.
+static int crc8RecordsFor(int elements, const DeviceCapacity &cap)
+{
+    if (!cap.crc8LongRules() || elements <= CRC8_V2_RECORD_ELEMENTS)
+        return 1;
+    return (elements + CRC8_V2_RECORD_ELEMENTS - 1) / CRC8_V2_RECORD_ELEMENTS;
+}
+
+// A rule's records, appended to `out`: its own (`head`'s fields, the whole
+// rule's element count and its first elements), then in the long form a record
+// per CRC8_V2_RECORD_ELEMENTS more, flagged CRC8FLAG_CONTINUATION alone, with
+// the rule's message and the count it holds (wire_structs.h, LONG RULES). The
+// short form is one record of up to CRC8_MAX_ELEMENTS; a longer rule never
+// reaches it (crc8Unsupported, validation), and would be cut to it here.
+static void appendCrc8Rule(QVector<Crc8Config> *out, Crc8Config head, const QVector<quint8> &types,
+                           const QVector<quint8> &values, bool longForm)
+{
+    const int n = qMin(int(types.size()), longForm ? CRC8_MAX_RULE_ELEMENTS : CRC8_MAX_ELEMENTS);
+    const int per = longForm ? CRC8_V2_RECORD_ELEMENTS : CRC8_MAX_ELEMENTS;
+    head.element_count = quint8(n);
+    for (int e = 0; e < CRC8_MAX_ELEMENTS; ++e)
+        head.elem_type[e] = head.elem_value[e] = 0;
+    for (int e = 0; e < qMin(n, per); ++e) {
+        head.elem_type[e] = types[e];
+        head.elem_value[e] = values[e];
+    }
+    out->append(head);
+    for (int first = per; first < n; first += per) {
+        Crc8Config more{};
+        more.msg_idx = head.msg_idx;
+        more.flags = CRC8FLAG_CONTINUATION;
+        const int held = qMin(per, n - first);
+        more.element_count = quint8(held);
+        for (int k = 0; k < held; ++k) {
+            more.elem_type[k] = types[first + k];
+            more.elem_value[k] = values[first + k];
+        }
+        out->append(more);
+    }
+}
+
+// The elements of the rule whose own record is records[at]: from it and, in the
+// long form, the continuation records after it. False when those do not add up
+// (one missing, or not this rule's continuation): what was read comes back,
+// which is all that can be said of it.
+static bool crc8RuleElements(const QVector<Crc8Config> &records, int at, bool longForm,
+                             QVector<quint8> *types, QVector<quint8> *values)
+{
+    types->clear();
+    values->clear();
+    const Crc8Config &head = records.at(at);
+    const int per = longForm ? CRC8_V2_RECORD_ELEMENTS : CRC8_MAX_ELEMENTS;
+    const int total = qMin(int(head.element_count),
+                           longForm ? CRC8_MAX_RULE_ELEMENTS : CRC8_MAX_ELEMENTS);
+    for (int e = 0; e < qMin(total, per); ++e) {
+        types->append(head.elem_type[e]);
+        values->append(head.elem_value[e]);
+    }
+    for (int k = 1, first = per; first < total; ++k, first += per) {
+        const int held = qMin(per, total - first);
+        if (at + k >= records.size())
+            return false;
+        const Crc8Config &more = records.at(at + k);
+        if (more.flags != CRC8FLAG_CONTINUATION || more.msg_idx != head.msg_idx
+            || more.element_count != held)
+            return false;
+        for (int e = 0; e < held; ++e) {
+            types->append(more.elem_type[e]);
+            values->append(more.elem_value[e]);
+        }
+    }
+    return true;
+}
+
+// Notes text into the label store's slots (LABEL_KIND_NOTE): UTF-8, cut at
+// 16 KB on a character's boundary, LABEL_STORE_BYTES a slot, the last
+// zero-padded. And back: the slots joined, to the first zero byte.
+static QVector<QByteArray> noteSlotsOf(const QString &notes)
+{
+    QByteArray bytes = notes.toUtf8();
+    const int most = LABEL_NOTE_SLOTS_MAX * LABEL_STORE_BYTES;
+    if (bytes.size() > most) {
+        int cut = most;
+        while (cut > 0 && (quint8(bytes[cut]) & 0xC0) == 0x80)
+            --cut; // never inside a character
+        bytes.truncate(cut);
+    }
+    QVector<QByteArray> out;
+    for (int at = 0; at < bytes.size(); at += LABEL_STORE_BYTES) {
+        QByteArray slot = bytes.mid(at, LABEL_STORE_BYTES);
+        slot.append(LABEL_STORE_BYTES - int(slot.size()), '\0');
+        out.append(slot);
+    }
+    return out;
+}
+
+static QString notesOfSlots(const QVector<QByteArray> &noteSlots)
+{
+    QByteArray bytes;
+    for (const QByteArray &slot : noteSlots)
+        bytes += slot.left(LABEL_STORE_BYTES).leftJustified(LABEL_STORE_BYTES, '\0');
+    const int end = int(bytes.indexOf('\0'));
+    return QString::fromUtf8(end < 0 ? bytes : bytes.left(end));
 }
 
 MappingResult mapToDevice(const Configuration &config)
@@ -440,18 +624,24 @@ MappingResult mapToDevice(const Configuration &config)
     // whose names are in its label store, the 1.x fields' 31 and 17 otherwise.
     const int sigLabelBudget = cap.channelNameBytes();
     const int msgLabelBudget = cap.messageNameBytes();
-    const int maxMessages = cap.capacityOf(DeviceTable::Messages);
-    const int maxSignals = cap.capacityOf(DeviceTable::Signals);
-    const int maxMath = cap.capacityOf(DeviceTable::Math);
-    const int maxConditions = cap.capacityOf(DeviceTable::Conditions);
-    const int maxCounters = cap.capacityOf(DeviceTable::Counters);
-    const int maxTimers = cap.capacityOf(DeviceTable::Timers);
-    const int maxConstants = cap.capacityOf(DeviceTable::Constants);
-    const int maxRelays = cap.capacityOf(DeviceTable::Relays);
-    const int maxTables2x16 = cap.capacityOf(DeviceTable::Tables2x16Def);
-    const int maxTables8x8 = cap.capacityOf(DeviceTable::Tables8x8Def);
-    const int maxIntegrators = cap.capacityOf(DeviceTable::Integrators);
-    const int maxCrc8 = cap.capacityOf(DeviceTable::Crc8);
+    // The message index in the target's form: twelve bits on a CAN Triple 2.0
+    // that takes a plan, nine everywhere else (wire_structs.h, SIG_MSG_HI_*).
+    const bool wide = cap.wideMessageIndex();
+    // Each table's limit. On a target that takes a plan it is the table's
+    // ceiling, and the budget below decides the rest (the end of this function);
+    // elsewhere it is the table's capacity.
+    const int maxMessages = cap.limitOf(DeviceTable::Messages);
+    const int maxSignals = cap.limitOf(DeviceTable::Signals);
+    const int maxMath = cap.limitOf(DeviceTable::Math);
+    const int maxConditions = cap.limitOf(DeviceTable::Conditions);
+    const int maxCounters = cap.limitOf(DeviceTable::Counters);
+    const int maxTimers = cap.limitOf(DeviceTable::Timers);
+    const int maxConstants = cap.limitOf(DeviceTable::Constants);
+    const int maxRelays = cap.limitOf(DeviceTable::Relays);
+    const int maxTables2x16 = cap.limitOf(DeviceTable::Tables2x16Def);
+    const int maxTables8x8 = cap.limitOf(DeviceTable::Tables8x8Def);
+    const int maxIntegrators = cap.limitOf(DeviceTable::Integrators);
+    const int maxCrc8 = cap.limitOf(DeviceTable::Crc8);
 
     // Device labels are MAX_CHANNEL_NAME_BYTES UTF-8 bytes — 31, since the
     // record's label went back to 32 bytes with the capacity expansion (it was
@@ -526,13 +716,14 @@ MappingResult mapToDevice(const Configuration &config)
         const int idx = r.tables.signalConfigs.size();
         CanSignalConfig sig{};
         // virtual until a comms row claims it; byte order irrelevant while so
-        sigSetHeader(sig, SIG_MSG_NONE, 0, 1);
+        sigSetHeader(sig, SIG_MSG_NONE, 0, 1, wide);
         sig.factor = 1.0f;
         sig.offset = 0.0f;
         const Channel ch = catalog.findByName(channelName);
         sig.min_val = float(ch.isValid() ? ch.minValue : -1e9);
         sig.max_val = float(ch.isValid() ? ch.maxValue : 1e9);
         fillLabel(sig, channelName, r.tables.signalLabels, idx, sigLabelBudget);
+        fillUnit(r.tables.unitLabels, idx, ch);
         r.tables.signalConfigs.append(sig);
         r.channelToSignal.insert(key, idx);
         r.signalToChannel.insert(idx, channelName);
@@ -597,7 +788,12 @@ MappingResult mapToDevice(const Configuration &config)
                 // device as "triggered on condition 1" the moment anything set
                 // the flag by accident.
                 msg.tx_trigger_cond = TX_TRIGGER_COND_NONE;
-                msg.tx_trigger_flags = 0;
+                // The bit rate switch (MSGTX_NO_BRS): off only for a CAN FD
+                // frame, and only where the target honours it. Check Channels
+                // refuses it anywhere else, so a Send never gets here with it off
+                // for a target that would ignore it.
+                msg.tx_trigger_flags =
+                    (section.fd && !section.brs && cap.brsPerMessage()) ? MSGTX_NO_BRS : 0;
                 if (!section.cyclic) {
                     if (section.transmitCondition.isEmpty()) {
                         // Refused rather than silently sent as cyclic. The
@@ -636,7 +832,10 @@ MappingResult mapToDevice(const Configuration &config)
                 // the channel/compound/routing paths below apply unchanged);
                 // this block adds only the stamp.
                 if (section.isCrc8()) {
-                    if (r.tables.crc8.size() >= maxCrc8) {
+                    // The records this rule takes: one, or on a target whose
+                    // records hold 8 elements, one per 8 of them.
+                    const int crcRecords = crc8RecordsFor(int(section.crcElements.size()), cap);
+                    if (r.tables.crc8.size() + crcRecords > maxCrc8) {
                         r.errors.append(QStringLiteral("%1: device CRC8 table is full (%2)")
                                             .arg(where).arg(maxCrc8));
                     } else if (section.crcChannel.isEmpty()) {
@@ -682,36 +881,26 @@ MappingResult mapToDevice(const Configuration &config)
                                 cc.flags |= CRC8FLAG_REF_IN;
                             if (section.crcRefOut)
                                 cc.flags |= CRC8FLAG_REF_OUT;
-                            // 0..CRC8_MAX_ELEMENTS: zero is a real spelling.
-                            // Nothing feeds the register, so the stamp is the
-                            // constant init/final-XOR transform — the engine's
-                            // element loop simply runs no iterations. The
-                            // editor can build one (Element Count 0) and the
-                            // validator warns about it; the mapper transports
-                            // it faithfully.
-                            const int n =
-                                qBound(0, int(section.crcElements.size()), CRC8_MAX_ELEMENTS);
-                            cc.element_count = quint8(n);
-                            // Tails past element_count stay at the record's
-                            // zero-init, so a reused slot cannot leak a longer
+                            // The elements, in the target's record form: one
+                            // record of up to CRC8_MAX_ELEMENTS, or on a CAN
+                            // Triple 2.0 whose records hold 8 (store v22) the
+                            // rule's record and a continuation record per 8
+                            // more, up to CRC8_MAX_RULE_ELEMENTS
+                            // (appendCrc8Rule). Zero is a real spelling: nothing
+                            // feeds the register, so the stamp is the constant
+                            // init/final-XOR transform — the engine's element
+                            // loop simply runs no iterations. The editor can
+                            // build one (Element Count 0) and the validator
+                            // warns about it; the mapper transports it
+                            // faithfully. Tails past each record's count stay
+                            // zero, so a reused slot cannot leak a longer
                             // recipe's leftovers into a Verify comparison.
-                            for (int e = 0; e < n; ++e) {
-                                const CommsSection::CrcElement el = section.crcElements.value(e);
-                                if (el.type == CommsSection::CrcElement::DataRun) {
-                                    cc.elem_type[e] = quint8(CRC8_ELEM_DATA_RUN
-                                                             | (el.value & CRC8_RUN_FIRST_MASK));
-                                    cc.elem_value[e] = quint8(el.last & CRC8_RUN_LAST_MASK);
-                                } else if (el.type == CommsSection::CrcElement::IdAll) {
-                                    cc.elem_type[e] = CRC8_ELEM_ID_ALL;
-                                    cc.elem_value[e] =
-                                        quint8((qBound(0, el.value, 4) & CRC8_IDALL_BYTES_MASK)
-                                               | (el.lsbFirst ? CRC8_IDALL_LSB_FIRST : 0));
-                                } else {
-                                    cc.elem_type[e] = quint8(el.type);
-                                    cc.elem_value[e] = quint8(el.value & 0xFF);
-                                }
-                            }
-                            r.tables.crc8.append(cc);
+                            const int n = int(section.crcElements.size());
+                            QVector<quint8> types(n), values(n);
+                            for (int e = 0; e < n; ++e)
+                                crc8Encode(section.crcElements.at(e), &types[e], &values[e]);
+                            appendCrc8Rule(&r.tables.crc8, cc, types, values,
+                                           cap.crc8LongRules());
                         }
                     }
                 }
@@ -740,7 +929,7 @@ MappingResult mapToDevice(const Configuration &config)
                     const Channel ch = catalog.findByName(row.channelName);
                     CanSignalConfig sig{};
                     // belongs to this (transmit) message
-                    sigSetHeader(sig, quint16(msgIdx), fields.byteOrder, 1);
+                    sigSetHeader(sig, quint16(msgIdx), fields.byteOrder, 1, wide);
                     // The ONE place the model's polarity meets the wire's. The
                     // row says "clamp" because that is the box the user ticks;
                     // the record says "wrap" because a zero bit has to mean the
@@ -763,6 +952,7 @@ MappingResult mapToDevice(const Configuration &config)
                     sig.tx_source = quint16(sourceIdx + 1);
                     fillLabel(sig, row.channelName, r.tables.signalLabels,
                               int(r.tables.signalConfigs.size()), sigLabelBudget);
+                    fillUnit(r.tables.unitLabels, int(r.tables.signalConfigs.size()), ch);
                     r.tables.signalConfigs.append(sig);
                 };
 
@@ -842,7 +1032,7 @@ MappingResult mapToDevice(const Configuration &config)
                             // back off its signals.
                             const quint8 selOrder =
                                 (section.alignment == SectionAlignment::WordSwap) ? 0 : 1;
-                            sigSetHeader(sel, quint16(msgIdx), selOrder, 1);
+                            sigSetHeader(sel, quint16(msgIdx), selOrder, 1, wide);
                             sigSetSelectorOnly(sel, true);
                             // Width is a formality — nothing is packed from it —
                             // but a zero-length field is not a legal record, and
@@ -910,8 +1100,100 @@ MappingResult mapToDevice(const Configuration &config)
                 continue;
             }
 
+            // A UDS REQUEST (a CAN Triple 2.0 from its store v23) is two message
+            // records and a UdsConfig. The request is a transmit message timed
+            // as any (cyclic or triggered), flagged MSGTX_UDS_REQUEST, whose bytes
+            // are the record's, built here; the response is the receive message
+            // below with the response's identifier, flagged MSGRX_UDS_RESPONSE,
+            // and the section's rows decode it. The section's name is the
+            // request's, and names the response in a condition's message terms.
+            // A request that awaits no response (Tester Present) keeps its
+            // response message all the same — the ECU's flow control for a
+            // multi-frame request arrives on it — and its record says so
+            // (UDSFLAG_NO_RESPONSE). One ECU answers every request on one
+            // identifier, so response messages may share one: the unit's
+            // transport tells the responses apart by the request in flight.
+            const auto udsRecordFor = [&](int requestIdx, int responseIdx) {
+                UdsConfig uc{};
+                uc.request_msg = quint16(requestIdx);
+                uc.response_msg = responseIdx < 0 ? SIG_MSG_NONE : quint16(responseIdx);
+                uc.status_signal_idx = SIG_MSG_NONE;
+                if (!section.udsResultChannel.isEmpty()) {
+                    const int statusIdx = signalFor(section.udsResultChannel);
+                    if (statusIdx >= maxSignals)
+                        r.errors.append(QStringLiteral("%1: device signal table is full (%2)")
+                                            .arg(where).arg(maxSignals));
+                    else
+                        uc.status_signal_idx = quint16(statusIdx);
+                }
+                uc.timeout_ms = quint16(qBound(1, section.udsTimeoutMs, 65535));
+                uc.pending_ms = quint16(qBound(1, section.udsPendingMs, 65535));
+                uc.response_max = quint16(qBound(1, section.messageLengthBytes, UDS_RESPONSE_MAX));
+                uc.flags = UDSFLAG_ACTIVE | (section.udsPadByte >= 0 ? UDSFLAG_PAD : 0)
+                           | (section.udsAwaitResponse ? 0 : UDSFLAG_NO_RESPONSE);
+                uc.pad_byte = quint8(qBound(0, section.udsPadByte, 255));
+                uc.block_size = quint8(qBound(0, section.udsBlockSize, 255));
+                uc.st_min = quint8(qBound(0, section.udsStMin, 127));
+                const QByteArray bytes = section.udsRequest.left(UDS_REQUEST_MAX);
+                uc.request_len = quint8(bytes.size());
+                memcpy(uc.request, bytes.constData(), size_t(bytes.size()));
+                return uc;
+            };
+            int udsRequestIdx = -1;
+            if (section.isUds()) {
+                if (!cap.udsRequests()) {
+                    r.errors.append(QStringLiteral(
+                        "%1: the target firmware makes no UDS requests (a CAN Triple 2.0 with "
+                        "firmware 2.0.4 or later does; see File > Target Firmware)").arg(where));
+                    continue;
+                }
+                if (r.tables.messages.size() + 1 >= maxMessages) {
+                    r.errors.append(QStringLiteral("%1: device message table is full (%2)")
+                                        .arg(where).arg(maxMessages));
+                    continue;
+                }
+                if (r.tables.uds.size() >= cap.limitOf(DeviceTable::Uds)) {
+                    r.errors.append(QStringLiteral("%1: device UDS table is full (%2)")
+                                        .arg(where).arg(cap.limitOf(DeviceTable::Uds)));
+                    continue;
+                }
+                CanMessageConfig req{};
+                req.can_id = section.baseAddress;
+                req.flags = (busOn ? MSGFLAG_ACTIVE : 0) | MSGFLAG_TRANSMIT;
+                if (section.extended)
+                    req.flags |= MSGFLAG_EXTENDED;
+                if (section.fd)
+                    req.flags |= MSGFLAG_FD;
+                applyProtection(req.flags, section.protection);
+                req.password_slot = quint8(config.commsPasswordSlotFor(section.messageKey));
+                req.src_bus = quint8(busIdx + 1);
+                req.dlc = 8; /* not read: the record's bytes are the request */
+                req.tx_trigger_cond = TX_TRIGGER_COND_NONE;
+                req.tx_trigger_flags = MSGTX_UDS_REQUEST
+                                       | ((section.fd && !section.brs && cap.brsPerMessage())
+                                              ? MSGTX_NO_BRS
+                                              : 0);
+                if (!section.cyclic) {
+                    if (section.transmitCondition.isEmpty())
+                        r.errors.append(QStringLiteral(
+                            "%1: Triggered request with no User Condition selected").arg(where));
+                    else
+                        pendingTriggers.append({r.tables.messages.size(),
+                                                section.transmitCondition, where});
+                }
+                const int rate = qBound(1, section.transmitRateHz, 200);
+                req.period_ms = section.transmitPeriodMs > 0
+                                    ? quint16(qBound(5, section.transmitPeriodMs, 65535))
+                                    : quint16(qMax(5, 1000 / rate));
+                udsRequestIdx = r.tables.messages.size();
+                noteIfNameClipped(r, busIdx, section.name, msgLabelBudget);
+                fillMessageLabel(req, section.name, r.tables.messageLabels, udsRequestIdx,
+                                 msgLabelBudget);
+                r.tables.messages.append(req);
+            }
+
             CanMessageConfig msg{};
-            msg.can_id = section.baseAddress;
+            msg.can_id = section.isUds() ? section.udsResponseAddress : section.baseAddress;
             msg.flags = busOn ? MSGFLAG_ACTIVE : 0;
             if (section.extended)
                 msg.flags |= MSGFLAG_EXTENDED;
@@ -936,9 +1218,11 @@ MappingResult mapToDevice(const Configuration &config)
             // A receive message has no trigger, and says so rather than leaving
             // the sentinel to the zero-init — see the transmit branch.
             msg.tx_trigger_cond = TX_TRIGGER_COND_NONE;
-            msg.tx_trigger_flags = 0;
+            msg.tx_trigger_flags = section.isUds() ? MSGRX_UDS_RESPONSE : 0;
             msg.src_bus = quint8(busIdx + 1);
-            msg.dlc = quint8(qBound(0, section.messageLengthBytes, section.fd ? 64 : 8));
+            msg.dlc = section.isUds() ? 8
+                                      : quint8(qBound(0, section.messageLengthBytes,
+                                                      section.fd ? 64 : 8));
             // period_ms doubles as the receive timeout: signals revert to their
             // defaults after this long without a frame. 0 disables the feature
             // (the "Default value on timeout" box is unchecked or timeout is 0).
@@ -948,6 +1232,10 @@ MappingResult mapToDevice(const Configuration &config)
             const int msgIdx = r.tables.messages.size();
             messageIndexByBusName.insert(messageRefKey(busIdx + 1, section.name), msgIdx);
             r.tables.messages.append(msg);
+
+            // The UDS record, now that both messages have their indices.
+            if (section.isUds())
+                r.tables.uds.append(udsRecordFor(udsRequestIdx, msgIdx));
 
             // Emit one receive signal, optionally mux-gated (compound). muxMask
             // == 0 means always active; otherwise the firmware extracts the
@@ -990,13 +1278,13 @@ MappingResult mapToDevice(const Configuration &config)
                                             .arg(where).arg(maxSignals));
                         return;
                     }
-                    if (!created && sigMsgIdx(r.tables.signalConfigs[sigIdx]) != SIG_MSG_NONE)
+                    if (!created && sigMsgIdx(r.tables.signalConfigs[sigIdx], wide) != SIG_MSG_NONE)
                         r.warnings.append(QStringLiteral(
                             "%1 · %2: channel is already generated by another comms row; "
                             "this row overrides it").arg(where, row.channelName));
                 }
                 CanSignalConfig &sig = r.tables.signalConfigs[sigIdx];
-                sigSetHeader(sig, quint16(msgIdx), fields.byteOrder, 1);
+                sigSetHeader(sig, quint16(msgIdx), fields.byteOrder, 1, wide);
                 // Receive never wraps, and this slot may be one an earlier pass
                 // created, so the bit is cleared rather than assumed clear.
                 sigSetTxWrap(sig, false);
@@ -1013,6 +1301,7 @@ MappingResult mapToDevice(const Configuration &config)
                 sig.mux_id = muxId;
                 sig.mux_mask = muxMask;
                 fillLabel(sig, row.channelName, r.tables.signalLabels, sigIdx, sigLabelBudget);
+                fillUnit(r.tables.unitLabels, sigIdx, ch);
                 if (!ch.isValid())
                     r.warnings.append(QStringLiteral(
                         "%1 · %2: channel not found in the catalogue; using base resolution 1")
@@ -1221,6 +1510,19 @@ MappingResult mapToDevice(const Configuration &config)
             continue;
         }
         ConditionConfig cc{};
+        // The term slots this condition does not use name no channel on a
+        // unit that sizes its memory by the configuration (a CAN Triple 2.0
+        // that takes a plan). Its engine makes a dependency reference for every
+        // slot that names a channel, used or not, and a zeroed slot names
+        // channel 0: two bytes of the unit's working memory each (four slots in
+        // a condition of one comparison a side), and the condition run again
+        // whenever channel 0 changes. mapExpr fills the slots in use, and a
+        // Momentary's Reset side stays unused. Every other target is sent the
+        // zeroed record it always has been.
+        if (cap.plansTables())
+            for (int t = 0; t < COND_MAX_TERMS; ++t)
+                cc.set_terms[t].input_a_signal_idx = cc.reset_terms[t].input_a_signal_idx =
+                    kConditionTermUnused;
         cc.flags = CONDFLAG_ACTIVE;
         if (c.mode == ConditionMode::SetReset)
             cc.flags |= CONDFLAG_SETRESET;
@@ -1404,7 +1706,7 @@ MappingResult mapToDevice(const Configuration &config)
         }
         CanMessageConfig &msg = r.tables.messages[pt.msgIdx];
         msg.tx_trigger_cond = quint16(*it);
-        msg.tx_trigger_flags = TXTRIG_ENABLED;
+        msg.tx_trigger_flags |= TXTRIG_ENABLED; // beside MSGTX_NO_BRS, which shares the byte
     }
 
     // Resolves a boolean-input channel to a signal index (0xFFFF when empty,
@@ -1714,7 +2016,7 @@ MappingResult mapToDevice(const Configuration &config)
         // already a communications signal (message-bound), the constant would
         // both overwrite that signal's live value and corrupt its extraction
         // fields below — reject rather than silently clobber.
-        if (sigMsgIdx(sig) != SIG_MSG_NONE) {
+        if (sigMsgIdx(sig, wide) != SIG_MSG_NONE) {
             r.errors.append(QStringLiteral(
                 "%1: channel '%2' is already a communications signal — give the "
                 "constant its own channel name").arg(where, k.name));
@@ -1754,7 +2056,7 @@ MappingResult mapToDevice(const Configuration &config)
             r.errors.append(QStringLiteral("%1: device signal table is full").arg(where));
             return -1;
         }
-        if (sigMsgIdx(r.tables.signalConfigs[destIdx]) != SIG_MSG_NONE) {
+        if (sigMsgIdx(r.tables.signalConfigs[destIdx], wide) != SIG_MSG_NONE) {
             r.errors.append(QStringLiteral(
                 "%1: channel '%2' is already a communications signal — give the table its "
                 "own channel name").arg(where, name));
@@ -1943,59 +2245,149 @@ MappingResult mapToDevice(const Configuration &config)
     r.tables.messageLabels.resize(r.tables.messages.size());
     r.tables.signalLabels.resize(r.tables.signalConfigs.size());
     r.tables.relayLabels.resize(r.tables.relays.size());
+    r.tables.unitLabels.resize(r.tables.signalConfigs.size());
+
+    // VALUE NAMES (phase 4, step 3b): each user channel's, on the record its
+    // name is on, in record then value order, each name clipped to what a slot
+    // holds (VALUE_NAME_BYTES). Filled for every target like the names; a Send
+    // writes them only to a unit that keeps them, and only there do they take
+    // its room for names. A device channel's are built in.
+    {
+        const QList<Channel> users = catalog.userChannels();
+        QVector<QPair<int, int>> named; // (signal, index into users)
+        for (int u = 0; u < users.size(); ++u) {
+            if (users[u].enumLabels.isEmpty())
+                continue;
+            const int idx = r.channelToSignal.value(users[u].name.trimmed().toLower(), -1);
+            if (idx >= 0 && idx < int(r.tables.signalConfigs.size()))
+                named.append({idx, u});
+        }
+        std::sort(named.begin(), named.end());
+        for (const auto &n : named) {
+            const QMap<int, QString> &labels = users[n.second].enumLabels;
+            for (auto it = labels.constBegin(); it != labels.constEnd(); ++it)
+                if (!it.value().trimmed().isEmpty())
+                    r.tables.valueNameLabels.append(
+                        valueNameSlot(n.first, qint32(it.key()), it.value().trimmed()));
+        }
+    }
+
+    // CONFIG NOTES: the document's notes, in the label store's slots (cut at
+    // 16 KB; Check Channels says so first). For every target, like the names;
+    // only a unit that keeps notes is sent them.
+    r.tables.noteLabels = noteSlotsOf(config.comments);
+
+    // KEPT ACROSS POWER CYCLES: each channel the document lists, flagged on its
+    // record where the target keeps channels (a CAN Triple 2.0 from phase 4).
+    // A channel the configuration does not map has nothing to keep. Any other
+    // target starts them from their defaults, which is said once.
+    if (!config.retainedChannels.isEmpty()) {
+        int listed = 0;
+        for (const QString &name : config.retainedChannels) {
+            const int idx = r.channelToSignal.value(name.trimmed().toLower(), -1);
+            if (idx < 0 || idx >= int(r.tables.signalConfigs.size()))
+                continue;
+            ++listed;
+            if (cap.retainsChannels())
+                sigSetRetain(r.tables.signalConfigs[idx], true);
+        }
+        if (listed > 0 && !cap.retainsChannels())
+            r.warnings.append(QStringLiteral(
+                "%1 channel(s) are set to keep their value across power cycles, which this "
+                "target does not do (a CAN Triple 2.0 does): there they start from their "
+                "defaults")
+                                  .arg(listed));
+    }
+
+    // THE BUDGET, on a target that takes a plan: every table is within its
+    // ceiling (above), and now the whole is held against the target's
+    // configuration storage, working memory and room for names, as its Send's
+    // plan and SAVE will hold it. The script is not attached here
+    // (mapWithScript does that), and its chunks take configuration storage
+    // only, so tables that do not fit without it fit nowhere; the Send's own
+    // check (tablesExceeding) runs with it.
+    if (cap.plansTables() && r.errors.isEmpty())
+        for (const QString &shortfall : countsExceeding(tableCountsOf(r.tables), cap,
+                                                         planReferences(r.tables),
+                                                         valueNamesOf(r.tables),
+                                                         notesSlotsOf(r.tables)))
+            r.errors.append(QStringLiteral("This configuration does not fit the device: %1")
+                                .arg(shortfall));
     return r;
 }
 
-QVector<int> tableCountsOf(const DeviceTables &tables)
-{
-    QVector<int> counts(DEVICE_TABLE_COUNT, 0);
-    // Slot by slot rather than a positional list: the index IS the table.
-    counts[int(DeviceTable::Messages)] = int(tables.messages.size());
-    counts[int(DeviceTable::Signals)] = int(tables.signalConfigs.size());
-    counts[int(DeviceTable::Math)] = int(tables.math.size());
-    counts[int(DeviceTable::Conditions)] = int(tables.conditions.size());
-    counts[int(DeviceTable::Counters)] = int(tables.counters.size());
-    counts[int(DeviceTable::Timers)] = int(tables.timers.size());
-    counts[int(DeviceTable::Constants)] = int(tables.constants.size());
-    counts[int(DeviceTable::Relays)] = int(tables.relays.size());
-    counts[int(DeviceTable::Tables2x16Def)] = int(tables.tables2x16Def.size());
-    counts[int(DeviceTable::Tables2x16Out)] = int(tables.tables2x16Out.size());
-    counts[int(DeviceTable::Tables8x8Def)] = int(tables.tables8x8Def.size());
-    counts[int(DeviceTable::Tables8x8Row)] = int(tables.tables8x8Row.size());
-    counts[int(DeviceTable::Integrators)] = int(tables.integrators.size());
-    counts[int(DeviceTable::Script)] = int(tables.scriptChunks.size());
-    counts[int(DeviceTable::Crc8)] = int(tables.crc8.size());
-    return counts;
-}
+// tableCountsOf is with the plan arithmetic, in plan_budget.cpp.
 
 QStringList tablesExceeding(const DeviceTables &tables, const DeviceCapacity &device)
 {
-    QStringList out = countsExceeding(tableCountsOf(tables), device);
+    // On a unit that takes a plan, the references too: its SAVE counts them.
+    QStringList out = countsExceeding(tableCountsOf(tables), device,
+                                      device.plansTables() ? planReferences(tables) : -1,
+                                      valueNamesFor(tables, device), notesSlotsFor(tables, device));
     // Retained values are not a table, but a unit keeps only so many. Past its
-    // limit it keeps the counters and drops integrators, which then start from
-    // their start value at every power-up: refused here, not found out after a
-    // power cut.
-    int preserved = 0;
-    for (const CounterConfig &c : tables.counters)
-        if ((c.flags & COUNTERFLAG_ACTIVE) && (c.flags & COUNTERFLAG_PRESERVE))
-            ++preserved;
-    for (const IntegratorConfig &g : tables.integrators)
-        if ((g.flags & INTEGFLAG_ACTIVE) && (g.flags & INTEGFLAG_PRESERVE))
-            ++preserved;
+    // limit it keeps the first and drops the rest, which then start from their
+    // defaults at every power-up: refused here, not found out after a power
+    // cut.
+    const int preserved = retainedValuesOf(tables);
+    bool channels = false;
+    for (const CanSignalConfig &s : tables.signalConfigs)
+        channels = channels || sigRetain(s);
     if (preserved > device.retainedLimit())
-        out.append(QStringLiteral("%1 counters and integrators set to Preserve their value, but "
-                                  "this device keeps %2")
-                       .arg(preserved)
-                       .arg(device.retainedLimit()));
+        out.append(channels
+                       ? QStringLiteral("%1 values kept across power cycles (channels, and counters "
+                                        "and integrators set to Preserve), but this device keeps "
+                                        "%2")
+                             .arg(preserved)
+                             .arg(device.retainedLimit())
+                       : QStringLiteral("%1 counters and integrators set to Preserve their value, "
+                                        "but this device keeps %2")
+                             .arg(preserved)
+                             .arg(device.retainedLimit()));
     return out;
 }
 
 DeviceTables tablesForUnit(const DeviceTables &tables, const DeviceCapacity &device)
 {
     // The form is ConfigTransfer's to apply (sliceFor, settleLabels); all it
-    // reads of the capacity is where the names go.
+    // reads of the capacity is where the names go, whether the unit keeps a
+    // project (its CLEAR may then erase one), and whether it takes a plan (the
+    // Send then declares one, from these tables, right after its CLEAR).
     DeviceTables out = tables;
     out.capacity.labelBytes = device.labelBytes;
+    // And what it keeps beside them (phase 4, step 3b): the units and value
+    // names the tables carry for every target go to a unit that keeps them.
+    out.capacity.labelFlags = device.labelFlags;
+    out.capacity.projectBytes = device.projectBytes;
+    // The message index in the unit's form, when the tables were mapped for a
+    // unit that reads it the other way: every channel bound to the same
+    // message, or to none, as the unit reads it. Only a unit that takes a plan
+    // reads twelve bits, and the tables' own target could hold more messages
+    // than nine bits name only if it took one too — which the fit check
+    // (tablesExceeding) has refused by now.
+    const bool wide = device.wideMessageIndex();
+    if (tables.capacity.wideMessageIndex() != wide)
+        for (CanSignalConfig &sig : out.signalConfigs)
+            sigSetMsgIdx(sig, sigMsgIdx(sig, tables.capacity.wideMessageIndex()), wide);
+    out.capacity.plan = device.plan;
+    // The CRC8 records in the unit's form: one record a rule of up to
+    // CRC8_MAX_ELEMENTS, or on a CAN Triple 2.0 whose records hold 8 (store
+    // v22, crc8LongRules) the rule's record and its continuations. A rule moves
+    // between the two whole; one longer than the unit's form holds was refused
+    // before this, by the Send's check of the document against the unit
+    // (validation, crc8MaxElements).
+    const bool crc8Long = device.crc8LongRules();
+    if (tables.capacity.crc8LongRules() != crc8Long) {
+        QVector<Crc8Config> reformed;
+        for (int i = 0; i < tables.crc8.size(); ++i) {
+            if (!(tables.crc8[i].flags & CRC8FLAG_ACTIVE))
+                continue; // a continuation goes with its rule
+            QVector<quint8> types, values;
+            crc8RuleElements(tables.crc8, i, tables.capacity.crc8LongRules(), &types, &values);
+            appendCrc8Rule(&reformed, tables.crc8[i], types, values, crc8Long);
+        }
+        out.crc8 = reformed;
+    }
+    out.capacity.crc8Features = device.crc8Features;
     return out;
 }
 
@@ -2138,8 +2530,15 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
 {
     // The channel table these records index: the unit's, as the Get that read
     // them reported it. A slot at or past this is "unused", exactly as the
-    // device treats it.
-    const int maxSignals = tables.capacity.capacityOf(DeviceTable::Signals);
+    // device treats it. On a unit that takes a plan the report's capacity is
+    // only its default plan, and the Get read the running plan's records
+    // (CMD_GET_USAGE): those are the table.
+    const int maxSignals = tables.capacity.plansTables()
+                               ? int(tables.signalConfigs.size())
+                               : tables.capacity.capacityOf(DeviceTable::Signals);
+    // How the unit wrote each channel's message: twelve bits on one that takes
+    // a plan (wire_structs.h, SIG_MSG_HI_*).
+    const bool wide = tables.capacity.wideMessageIndex();
     // (bus, row) of every section whose name came off the DEVICE (store v18).
     // The prior-name pass at the end skips these: the unit carries the name
     // now, so the document snapshot below is a fallback rather than an
@@ -2368,6 +2767,7 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
             // from an index to a channel name at the end of this function, once
             // the condition rows exist.
             s.cyclic = !(msg.tx_trigger_flags & TXTRIG_ENABLED);
+            s.brs = !(msg.tx_trigger_flags & MSGTX_NO_BRS); // the bit rate switch
             s.transmitPeriodMs = msg.period_ms; // authoritative — exact re-send
             s.transmitRateHz = qBound(1, msg.period_ms ? 1000 / msg.period_ms : 50, 200);
             s.compoundTxMode = (msg.flags & MSGFLAG_TX_SEQUENTIAL) ? CompoundTxMode::Sequential
@@ -2449,6 +2849,10 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
             if (name.isEmpty())
                 name = QStringLiteral("Signal %1").arg(i);
             signalNames.insert(i, name);
+            // A channel the unit keeps across power cycles: kept in the
+            // rebuilt document too.
+            if (sigRetain(sig))
+                config.setRetainedChannel(name, true);
         }
 
         // Infer the storage data type from the field width + signedness so
@@ -2504,21 +2908,33 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
             ch.maxValue = sig.max_val;
             ch.dataType = inferDataType(sig);
             ch.userDefined = true;
+            // Its unit, from a unit that keeps it beside the name (phase 4,
+            // step 3b), with the quantity the catalogue lists it under.
+            ch.unit = QString::fromUtf8(tables.unitLabels.value(i));
+            if (!ch.unit.isEmpty())
+                ch.quantity = ChannelCatalog::quantityOfUnit(ch.unit);
             userChannels.append(ch);
             channelIndexByName.insert(nameKey, userChannels.size() - 1);
         } else if (channelIndexByName.contains(nameKey)) {
             Channel &existing = userChannels[channelIndexByName.value(nameKey)];
             if (existing.dataType.isEmpty())
                 existing.dataType = inferDataType(sig);
+            if (existing.unit.isEmpty() && !tables.unitLabels.value(i).isEmpty()) {
+                existing.unit = QString::fromUtf8(tables.unitLabels.value(i));
+                existing.quantity = ChannelCatalog::quantityOfUnit(existing.unit);
+            }
         }
 
         // Locate the section this signal belongs to (receive or transmit).
-        if (sigMsgIdx(sig) == SIG_MSG_NONE || !msgSection.contains(sigMsgIdx(sig)))
+        // A message past the table (a nine-bit "none" read by a twelve-bit unit
+        // is message 511) is no message, as the unit treats it.
+        const quint16 msgIdx = sigMsgIdx(sig, wide);
+        if (msgIdx == SIG_MSG_NONE || !msgSection.contains(msgIdx))
             continue; // virtual signal (math/counter/timer/integrator output, condition target)
-        const CanMessageConfig &parentMsg = tables.messages[sigMsgIdx(sig)];
+        const CanMessageConfig &parentMsg = tables.messages[msgIdx];
         const int busIdx = qBound(1, int(parentMsg.src_bus), 3) - 1;
-        CommsSection *section = &config.bus[busIdx].sections[msgSection.value(sigMsgIdx(sig))];
-        const int alignmentKey = sigMsgIdx(sig);
+        CommsSection *section = &config.bus[busIdx].sections[msgSection.value(msgIdx)];
+        const int alignmentKey = msgIdx;
 
         // One section holds one alignment; if the device mixes byte orders in
         // a single message we keep the first and skip conflicting signals.
@@ -2609,7 +3025,8 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
     // (signalNames), and before the reconciliation pass because the wire
     // identity there includes the device kind — a document TransmitCrc8 section
     // must be matched as one, not as the plain transmit it briefly was above.
-    for (const Crc8Config &cc : tables.crc8) {
+    for (int ri = 0; ri < tables.crc8.size(); ++ri) {
+        const Crc8Config &cc = tables.crc8[ri];
         // ACTIVE is the emptiness test here, and unlike the message and relay
         // walks that is honest rather than lossy: a zero-filled slot has flags 0
         // and msg_idx 0 — a VALID message index — and this table has no src_bus
@@ -2646,27 +3063,20 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         s.crcRefOut = cc.flags & CRC8FLAG_REF_OUT;
         s.crcElements.clear();
         // 0 restores as an empty element list — the same spelling mapToDevice
-        // gives it, so an element-less recipe survives a Get unchanged.
-        const int n = qBound(0, int(cc.element_count), CRC8_MAX_ELEMENTS);
-        for (int e = 0; e < n; ++e) {
-            CommsSection::CrcElement el;
-            const quint8 t = cc.elem_type[e], v = cc.elem_value[e];
-            if ((t & CRC8_ELEM_RUN_MASK) == CRC8_ELEM_DATA_RUN) {
-                el.type = CommsSection::CrcElement::DataRun;
-                el.value = t & CRC8_RUN_FIRST_MASK;
-                el.last = v & CRC8_RUN_LAST_MASK;
-            } else if (t == CRC8_ELEM_ID_ALL) {
-                el.type = CommsSection::CrcElement::IdAll;
-                el.value = qMin(int(v & CRC8_IDALL_BYTES_MASK), 4);
-                el.lsbFirst = (v & CRC8_IDALL_LSB_FIRST) != 0;
-            } else {
-                el.type = t == CRC8_ELEM_ID    ? CommsSection::CrcElement::Id
-                          : t == CRC8_ELEM_RAW ? CommsSection::CrcElement::Raw
-                                               : CommsSection::CrcElement::Data;
-                el.value = v;
-            }
-            s.crcElements.append(el);
-        }
+        // gives it, so an element-less recipe survives a Get unchanged. A rule
+        // of more elements than its record holds gathers the rest from the
+        // continuation records after it (long rules, which the ACTIVE test
+        // above passes over); one whose records do not add up comes back as
+        // the elements they do hold, and says so.
+        QVector<quint8> types, values;
+        if (!crc8RuleElements(tables.crc8, ri, tables.capacity.crc8LongRules(), &types, &values)
+            && notes)
+            notes->append(QStringLiteral("%1: its CRC8 rule says more elements than its records "
+                                         "hold — read as the %2 they do")
+                              .arg(s.name)
+                              .arg(types.size()));
+        for (int e = 0; e < types.size(); ++e)
+            s.crcElements.append(crc8Decode(types[e], values[e]));
         // SIG_MSG_NONE means "stamp only, publish nowhere". The mapper refuses
         // to WRITE that (an empty CRC channel is a mapping error), but the
         // firmware accepts it, so a foreign table can hold it — read it back as
@@ -2674,6 +3084,80 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         s.crcChannel = cc.dest_signal_idx == SIG_MSG_NONE
                            ? QString()
                            : signalNames.value(cc.dest_signal_idx);
+    }
+
+    // UDS requests (store v23): each ACTIVE record folds the sections rebuilt
+    // for its request and response messages into one UdsRequest section — the
+    // request's, which keeps its name, timing and identifier, taking the
+    // response's identifier, rows, alignment and timeout, the record's bytes
+    // and parameters, and the status channel's name. The response's section
+    // goes, so the rows below it move, and msgSection is kept in step: the
+    // response's message then names the merged section, which is what a
+    // condition's message term on it should read.
+    {
+        QList<QPair<int, int>> drop; // (bus, row) of the response sections folded in
+        for (const UdsConfig &uc : tables.uds) {
+            if (!(uc.flags & UDSFLAG_ACTIVE) || !msgSection.contains(uc.request_msg)
+                || uc.request_msg >= tables.messages.size())
+                continue;
+            const int busIdx = qBound(1, int(tables.messages[uc.request_msg].src_bus), 3) - 1;
+            CommsSection &s = config.bus[busIdx].sections[msgSection.value(uc.request_msg)];
+            if (!s.isTransmit())
+                continue; // a foreign table's inconsistency: left as it was read
+            s.device = SectionDevice::UdsRequest;
+            s.udsRequest = QByteArray(reinterpret_cast<const char *>(uc.request),
+                                      qBound(0, int(uc.request_len), UDS_REQUEST_MAX));
+            s.udsTimeoutMs = uc.timeout_ms;
+            s.udsPendingMs = uc.pending_ms;
+            s.udsPadByte = (uc.flags & UDSFLAG_PAD) ? int(uc.pad_byte) : -1;
+            s.udsBlockSize = uc.block_size;
+            s.udsStMin = uc.st_min;
+            s.messageLengthBytes = qBound(1, int(uc.response_max), UDS_RESPONSE_MAX);
+            s.udsResultChannel = uc.status_signal_idx == SIG_MSG_NONE
+                                     ? QString()
+                                     : signalNames.value(uc.status_signal_idx);
+            s.udsAwaitResponse = uc.response_msg != SIG_MSG_NONE && !(uc.flags & UDSFLAG_NO_RESPONSE);
+            s.rows.clear();
+            s.compound = false;
+            s.identifiers.clear();
+            if (uc.response_msg != SIG_MSG_NONE && uc.response_msg < tables.messages.size()
+                && msgSection.contains(uc.response_msg)) {
+                const int rbus = qBound(1, int(tables.messages[uc.response_msg].src_bus), 3) - 1;
+                const int rrow = msgSection.value(uc.response_msg);
+                const CommsSection &resp = config.bus[rbus].sections[rrow];
+                s.udsResponseAddress = resp.baseAddress;
+                s.rows = resp.rows;
+                s.alignment = resp.alignment;
+                s.receiveTimeoutMs = resp.receiveTimeoutMs;
+                s.defaultValueOnTimeout = resp.defaultValueOnTimeout;
+                if (!drop.contains({rbus, rrow}))
+                    drop.append({rbus, rrow});
+                msgSection.insert(uc.response_msg, msgSection.value(uc.request_msg));
+            } else {
+                // No response message named (this Manager always writes one; a
+                // foreign record): the identifier a reply would have by the usual
+                // convention (0x7E0 -> 0x7E8; a 29-bit address with its source and
+                // target bytes swapped), so the box holds one.
+                s.udsResponseAddress = s.extended ? ((s.baseAddress & 0xFFFF0000u)
+                                                     | ((s.baseAddress & 0xFFu) << 8)
+                                                     | ((s.baseAddress >> 8) & 0xFFu))
+                                                  : ((s.baseAddress + 8) & 0x7FFu);
+            }
+        }
+        // Highest row first on each bus, so the rows above are the ones that
+        // move, and every index of a moved row follows it.
+        std::sort(drop.begin(), drop.end(), [](const QPair<int, int> &a, const QPair<int, int> &b) {
+            return a.first != b.first ? a.first < b.first : a.second > b.second;
+        });
+        for (const QPair<int, int> &d : drop) {
+            config.bus[d.first].sections.removeAt(d.second);
+            for (auto it = msgSection.begin(); it != msgSection.end(); ++it) {
+                if (it.key() < tables.messages.size()
+                    && qBound(1, int(tables.messages[it.key()].src_bus), 3) - 1 == d.first
+                    && it.value() > d.second)
+                    --it.value();
+            }
+        }
     }
 
     for (const MathConfig &mc : tables.math) {
@@ -3199,7 +3683,23 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
             sec.messageKey = config.commsPassword(slot);
     }
 
+    // VALUE NAMES (phase 4, step 3b): each onto the channel its record names,
+    // where that is a channel this Get rebuilt; a device channel's are built in.
+    for (const QByteArray &slot : tables.valueNameLabels) {
+        int signal = -1;
+        qint32 value = 0;
+        QString name;
+        if (!readValueNameSlot(slot, &signal, &value, &name))
+            continue;
+        const auto at = channelIndexByName.constFind(signalNames.value(signal).toLower());
+        if (at != channelIndexByName.constEnd())
+            userChannels[*at].enumLabels.insert(int(value), name);
+    }
     config.catalog().setUserChannels(userChannels);
+    // CONFIG NOTES, from a unit that keeps them: the notes as a Send wrote them.
+    // From one that keeps none they stay empty, as every Get's did.
+    if (!tables.noteLabels.isEmpty())
+        config.comments = notesOfSlots(tables.noteLabels);
     // A User Condition's output is boolean, and a Get is the one path that could
     // quietly say otherwise. The device stores the type as SIGNAL_TYPE_UINT8 —
     // boolean and u8 are the same eight bits on the wire and always were — so

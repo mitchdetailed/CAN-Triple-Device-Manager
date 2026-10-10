@@ -137,7 +137,8 @@ AddChannelDialog::AddChannelDialog(Configuration *config, const CommsChannelRow 
         m_startBitSpin->setSpecialValueText(QStringLiteral(" "));
         m_startBitSpin->setValue(-1);
     } else {
-        m_startBitSpin->setRange(0, 511); // up to a 64-byte CAN FD frame
+        // Up to a 64-byte CAN FD frame, or a UDS response as long as its section says.
+        m_startBitSpin->setRange(0, qMax(511, messageLengthBytes * 8 - 1));
         m_startBitSpin->setValue(m_row.startBit);
     }
     m_startBitSpin->setToolTip(

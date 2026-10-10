@@ -14,6 +14,7 @@
 
 class QLabel;
 class QStackedWidget;
+class QTimer;
 
 namespace ct {
 
@@ -44,6 +45,8 @@ private:
     // Which firmware's capacities the document is sized against — see
     // TargetFirmwareDialog and Configuration::capacity().
     void onTargetFirmware();
+    // File > Config Notes: the document's notes (Configuration::comments).
+    void onConfigNotes();
     void onRevealProtectedComms();
     // Opens `path`, asking for a password when the file needs one. Shared by
     // Open… and the recent-files list so both handle a locked file identically.
@@ -117,6 +120,7 @@ private:
     void onChannelEditor();
     void onLuaConsole();
     void onConnectionSettings();
+    void onOptions();
     void onConnect();
     void onDisconnect();
     void onHelpContents();
@@ -146,6 +150,19 @@ private:
     // dialog, with a tooltip on the disabled item saying where to change the
     // target. Runs on document reset and whenever the target changes.
     void updateCapacityGates();
+
+    // The status bar's memory figures (memoryUseOf, plan_budget.h): the flash
+    // and RAM the document takes of a target that sizes it by memory (a CAN
+    // Triple 2.0 from phase 4), beside what that target has; on a target with
+    // fixed tables, a note that says so. Worked out from the whole document,
+    // so changes reach it through m_memoryTimer, a moment after the last one.
+    void updateMemoryStatus();
+    // Sizes the open document for the connected CAN Triple 2.0 when that unit
+    // sizes a configuration by its memory: on its own for a document nobody
+    // has chosen a target for (adoptsUnitTarget, unit_target.h), at a New and
+    // when such a unit connects; whatever the document when `asked` (the
+    // status bar's offer was clicked).
+    void adoptUnitTarget(bool asked);
 
     // Reflects whether there is a document at all. From launch until the first
     // New, Open or Get there is none: the window shows the start page and every
@@ -207,6 +224,14 @@ private:
     QLabel *m_connectionLabel = nullptr;
     QLabel *m_documentLabel = nullptr;
     QLabel *m_lockLabel = nullptr;
+    QLabel *m_memoryLabel = nullptr; // updateMemoryStatus()
+    QTimer *m_memoryTimer = nullptr;
+    // The connected unit's capacity report when it is a CAN Triple 2.0
+    // (identifyConnectedUnit); empty otherwise, and once it disconnects.
+    std::optional<DeviceCapacity> m_unitCapacity;
+    // Whether this document's target was chosen in Target Firmware: then no
+    // unit resizes it on its own. Cleared by New, Open and Get.
+    bool m_targetPicked = false;
 
     QAction *m_revealAction = nullptr;
     QAction *m_concealAction = nullptr;
@@ -224,8 +249,6 @@ private:
     // Online > Connect's memory, this session only: the port is chosen fresh
     // every run by design, but within a run "the one I was just using" is
     // almost always the answer.
-    QString m_lastPort;
-    qint32 m_lastBaud = 0;
     // Which board is on the other end of the link, as it answered when this
     // connection was made (identifyConnectedUnit). Empty while disconnected,
     // and when the unit did not answer.
@@ -236,6 +259,13 @@ private:
     // Meaningful only while m_getInProgress.
     bool m_monitorAfterGet = false;
     bool m_getInProgress = false; // a ConfigTransfer::get is running
+    // The open document is the project a CAN Triple 2.0 kept with its
+    // configuration, opened by a Get and not saved yet: the title and the
+    // status bar call it by the name it was sent under (m_unitProjectFile,
+    // empty when it was sent before it had one). Cleared by every New, Open
+    // and Get (documentReset), and moot once a Save gives it a path.
+    bool m_fromUnitProject = false;
+    QString m_unitProjectFile;
 };
 
 } // namespace ct

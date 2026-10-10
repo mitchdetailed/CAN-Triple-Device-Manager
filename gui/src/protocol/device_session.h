@@ -147,8 +147,10 @@ struct DeviceInfo {
 
 // The STM32's readout-protection level, as the unit's option bytes report it
 // (CMD_GET_PROTECTION, firmware 1.0.9). 0 = off, 1 = the flash cannot be read
-// over the debug port, 2 = permanent. A licensed unit sets level 1 itself at
-// boot, so on current firmware "off" means "holds no Firmware Key yet".
+// over the debug port, 2 = permanent. A unit sets level 1 itself at boot: a
+// CAN Triple 2.0 on a production build always, any unit once it holds a
+// Firmware Key. So "off" means an unlicensed unit on a development build (or
+// on 1.x firmware).
 struct ReadoutProtection {
     bool supported = false; // false on firmware without the command
     int level = 0;

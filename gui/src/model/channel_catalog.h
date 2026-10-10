@@ -79,6 +79,11 @@ public:
     static QStringList quantities();
     static QStringList unitsForQuantity(const QString &quantity);
     static QString defaultUnitForQuantity(const QString &quantity);
+    // The quantity whose units list `unit`; "Unitless" for an empty unit or one
+    // no quantity lists. Each listed unit belongs to one quantity, so a unit a
+    // Get reads back from a CAN Triple 2.0 (phase 4, step 3b) brings its
+    // quantity with it.
+    static QString quantityOfUnit(const QString &unit);
 
 private:
     QList<Channel> m_userChannels;

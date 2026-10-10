@@ -10,7 +10,14 @@
 // a retained image) and reports a script that will not build as a mapping
 // error, exactly as it would block a Send.
 //
-//   ct3check <file.ct3> [--verbose]
+//   ct3check <file.ct3> [--verbose] [--target <image.ctf>] [--json <out.json>]
+//
+// --target checks the file against that firmware image's capacity report —
+// what File > Target Firmware does in the Manager — so a .ct3 written for a
+// CAN Triple 2.0 (a plan, UDS requests) is judged by the numbers it will meet.
+// --json writes the document back as plain, legible JSON with the target
+// recorded, which is how an example file gets its target without the GUI; it
+// is refused for a secure (.ct3s) file, whose protection is the point of it.
 //
 // Exit status is 0 when the file loads and maps with no errors, 1 otherwise, so
 // it can gate a script.
@@ -26,6 +33,7 @@
 #include "../src/model/configuration.h"
 #include "../src/model/device_mapper.h"
 #include "../src/model/validation.h"
+#include "../src/protocol/firmware_image.h"
 #include "../src/protocol/wire_structs.h"
 #include "../src/scripting/script_compiler.h"   // mapWithScript
 
@@ -54,8 +62,19 @@ int main(int argc, char **argv)
 
     QStringList args = QCoreApplication::arguments().mid(1);
     const bool verbose = args.removeAll(QStringLiteral("--verbose")) > 0;
+    // The two options that take a value, taken out before the file name is read.
+    const auto takeValue = [&args](const QString &option) {
+        const int at = args.indexOf(option);
+        if (at < 0 || at + 1 >= args.size())
+            return QString();
+        const QString value = args.at(at + 1);
+        args.remove(at, 2);
+        return value;
+    };
+    const QString targetPath = takeValue(QStringLiteral("--target"));
+    const QString jsonPath = takeValue(QStringLiteral("--json"));
     if (args.isEmpty()) {
-        out << "usage: ct3check <file.ct3> [--verbose]\n";
+        out << "usage: ct3check <file.ct3> [--verbose] [--target <image.ctf>] [--json <out.json>]\n";
         return 2;
     }
     const QString path = args.first();
@@ -66,13 +85,30 @@ int main(int argc, char **argv)
         out << "LOAD FAILED: " << error << "\n";
         return 1;
     }
+    if (!targetPath.isEmpty()) {
+        const auto image = FirmwareImage::load(targetPath, &error);
+        if (!image.has_value()) {
+            out << "TARGET FAILED: " << error << "\n";
+            return 1;
+        }
+        if (!image->capacity().has_value()) {
+            out << "TARGET FAILED: " << QFileInfo(targetPath).fileName()
+                << " carries no capacity report\n";
+            return 1;
+        }
+        DeviceCapacity target = *image->capacity();
+        target.label = QStringLiteral("%1 (firmware %2)")
+                           .arg(QFileInfo(targetPath).fileName(), image->versionString());
+        cfg.setCapacity(target);
+        out << QStringLiteral("  target: %1\n").arg(target.label);
+    }
     out << QStringLiteral("%1\n").arg(QFileInfo(path).fileName());
     out << QStringLiteral("  title: %1\n\n").arg(cfg.configTitle());
 
     // What the document asks for, before mapping: bus modes and section shape,
     // because "500 transmit messages" is a claim about the document and the
     // table counts below are what it turns into.
-    int tx = 0, rx = 0, relay = 0, crc8 = 0;
+    int tx = 0, rx = 0, relay = 0, crc8 = 0, uds = 0;
     for (int b = 0; b < 3; ++b) {
         for (const CommsSection &s : cfg.bus[b].sections) {
             if (s.device == SectionDevice::TransmitMessage)
@@ -85,6 +121,8 @@ int main(int argc, char **argv)
                 ++crc8; // its own count, not folded into tx: a CRC8 section
                         // costs a message slot AND a CRC8 rule, and the second
                         // capacity is the one this line has to make visible
+            else if (s.device == SectionDevice::UdsRequest)
+                ++uds; // two message slots and a UDS record each
         }
         out << QStringLiteral("  CAN%1: %2, %3 kbit/s, %4 sections\n")
                    .arg(b + 1)
@@ -92,34 +130,38 @@ int main(int argc, char **argv)
                    .arg(cfg.bus[b].rateKbps)
                    .arg(cfg.bus[b].sections.size());
     }
-    out << QStringLiteral("  sections: %1 transmit, %2 receive, %3 relay, %4 transmit CRC8\n\n")
-               .arg(tx).arg(rx).arg(relay).arg(crc8);
+    out << QStringLiteral("  sections: %1 transmit, %2 receive, %3 relay, %4 transmit CRC8, "
+                          "%5 UDS request\n\n")
+               .arg(tx).arg(rx).arg(relay).arg(crc8).arg(uds);
 
     // mapWithScript, never plain mapToDevice: every real Send path compiles the
     // document's script (or re-verifies retained bytecode) and a failure lands
     // in m.errors, so a .ct3 with a broken script must read NOT OK here too.
     const MappingResult m = mapWithScript(cfg);
 
-    // The "of" column is the capacity the tables were mapped against — the
+    // The "of" column is the limit the tables were mapped against — the
     // document's, which is this build's numbers until a .ct3 records the
-    // firmware it targets — not a constant restated here.
+    // firmware it targets — not a constant restated here. On a target that
+    // takes a plan it is each table's ceiling.
     const DeviceCapacity &cap = m.tables.capacity;
     out << "device tables:\n";
-    row(out, "messages", m.tables.messages.size(), cap.capacityOf(DeviceTable::Messages));
-    row(out, "signals", m.tables.signalConfigs.size(), cap.capacityOf(DeviceTable::Signals));
-    row(out, "math", m.tables.math.size(), cap.capacityOf(DeviceTable::Math));
-    row(out, "conditions", m.tables.conditions.size(), cap.capacityOf(DeviceTable::Conditions));
-    row(out, "counters", m.tables.counters.size(), cap.capacityOf(DeviceTable::Counters));
-    row(out, "timers", m.tables.timers.size(), cap.capacityOf(DeviceTable::Timers));
-    row(out, "constants", m.tables.constants.size(), cap.capacityOf(DeviceTable::Constants));
-    row(out, "relays", m.tables.relays.size(), cap.capacityOf(DeviceTable::Relays));
+    row(out, "messages", m.tables.messages.size(), cap.limitOf(DeviceTable::Messages));
+    row(out, "signals", m.tables.signalConfigs.size(), cap.limitOf(DeviceTable::Signals));
+    row(out, "math", m.tables.math.size(), cap.limitOf(DeviceTable::Math));
+    row(out, "conditions", m.tables.conditions.size(), cap.limitOf(DeviceTable::Conditions));
+    row(out, "counters", m.tables.counters.size(), cap.limitOf(DeviceTable::Counters));
+    row(out, "timers", m.tables.timers.size(), cap.limitOf(DeviceTable::Timers));
+    row(out, "constants", m.tables.constants.size(), cap.limitOf(DeviceTable::Constants));
+    row(out, "relays", m.tables.relays.size(), cap.limitOf(DeviceTable::Relays));
     row(out, "tables 2x16", m.tables.tables2x16Def.size(),
-        cap.capacityOf(DeviceTable::Tables2x16Def));
+        cap.limitOf(DeviceTable::Tables2x16Def));
     row(out, "tables 8x8", m.tables.tables8x8Def.size(),
-        cap.capacityOf(DeviceTable::Tables8x8Def));
+        cap.limitOf(DeviceTable::Tables8x8Def));
     row(out, "integrators", m.tables.integrators.size(),
-        cap.capacityOf(DeviceTable::Integrators));
-    row(out, "crc8", m.tables.crc8.size(), cap.capacityOf(DeviceTable::Crc8));
+        cap.limitOf(DeviceTable::Integrators));
+    row(out, "crc8", m.tables.crc8.size(), cap.limitOf(DeviceTable::Crc8));
+    if (cap.udsRequests())
+        row(out, "uds", m.tables.uds.size(), cap.limitOf(DeviceTable::Uds));
 
     // Transmit load, because a configuration that maps cleanly can still ask for
     // more than the wire can carry, and that is invisible in the table counts.
@@ -150,7 +192,8 @@ int main(int argc, char **argv)
         // will actually send. Sequential rotates: one frame per period.
         QList<quint64> selectors;
         for (const CanSignalConfig &sig : m.tables.signalConfigs) {
-            if (!sigIsActive(sig) || int(sigMsgIdx(sig)) != mi || sig.mux_mask == 0)
+            if (!sigIsActive(sig) || int(sigMsgIdx(sig, cap.wideMessageIndex())) != mi
+                || sig.mux_mask == 0)
                 continue;
             const quint64 sel = (quint64(sigMuxByteOffset(sig)) << 32)
                                 | (quint64(sig.mux_mask) << 16)
@@ -205,6 +248,20 @@ int main(int argc, char **argv)
                    .arg(qint64(rate))
                    .arg(100.0 * load, 0, 'f', 1)
                    .arg(load > 1.0 ? "  ** OVERSUBSCRIBED **" : "");
+    }
+
+    // The document back as JSON, the target recorded, before the verdict: a
+    // file that fails its check is still worth writing out to look at.
+    if (!jsonPath.isEmpty()) {
+        if (cfg.isSecureFile()) {
+            out << "JSON REFUSED: a secure file is not written back as plain JSON\n";
+            return 1;
+        }
+        if (!cfg.saveJsonToFile(jsonPath, &error)) {
+            out << "JSON FAILED: " << error << "\n";
+            return 1;
+        }
+        out << QStringLiteral("  written: %1\n").arg(jsonPath);
     }
 
     const QList<ValidationIssue> issues = validateConfiguration(cfg);

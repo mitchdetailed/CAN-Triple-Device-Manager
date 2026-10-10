@@ -139,6 +139,10 @@ constexpr uint8_t CMD_WRITE_CRC8_CFG     = 0x41;
 constexpr uint8_t CMD_WRITE_MSG_PASSWORDS = 0x43;
 constexpr uint8_t CMD_READ_MSG_PASSWORDS  = 0x44;
 constexpr uint8_t CMD_READ_CRC8_CFG      = 0x42;
+// 2.0 line, store v23: the UDS request records (UdsConfig), a table like the
+// others: a range write and a range read.
+constexpr uint8_t CMD_WRITE_UDS_CFG      = 0x61;
+constexpr uint8_t CMD_READ_UDS_CFG       = 0x62;
 
 // The firmware licence: who this FIRMWARE is licensed to, and the key that
 // proves it. Replaces the compiled-in fleet identity, which could only be
@@ -319,6 +323,27 @@ constexpr uint8_t LABEL_KIND_MESSAGE   = 0;
 constexpr uint8_t LABEL_KIND_SIGNAL    = 1;
 constexpr uint8_t LABEL_KIND_RELAY     = 2;
 constexpr int LABEL_STORE_BYTES        = 32;
+// Phase 4, step 3b: two more kinds beside the names, on a unit whose report's
+// label_flags says so (LABEL_FLAG_*). LABEL_KIND_UNIT: a slot for each channel
+// record, its display unit (UTF-8, zero-padded; empty for none).
+// LABEL_KIND_VALUE_NAME: as many slots as the Send's plan declares
+// (CMD_STAGE_PLAN's value_names), each one name for one value of one channel
+// (ValueNameLabel). A configuration written before step 3b has the names'
+// three kinds alone (LABEL_KINDS_NAMES); GET_USAGE says which a running one has
+// (UsageLabels), and a read past them is refused ERR_OUT_OF_BOUNDS. The probe
+// (count 0) is answered for every kind a unit knows, so a sealed package that
+// writes units or value names leads with a probe of the last kind it writes.
+constexpr uint8_t LABEL_KIND_UNIT       = 3;
+constexpr uint8_t LABEL_KIND_VALUE_NAME = 4;
+// Config Notes: the configuration's notes, UTF-8 text run through as many slots
+// as the Send's plan declares (a u16 after its value names), up to
+// LABEL_NOTE_SLOTS_MAX (16 KB), on a unit whose label_flags says
+// LABEL_FLAG_NOTES. The unit keeps them and never reads them.
+constexpr uint8_t LABEL_KIND_NOTE       = 5;
+constexpr uint8_t LABEL_KIND_COUNT      = 6;
+constexpr int LABEL_NOTE_SLOTS_MAX      = 512;
+constexpr uint8_t LABEL_KINDS_NAMES     = 3;
+constexpr int VALUE_NAME_BYTES          = 26;
 
 // The CAN Triple 2.0's own settings (its protocol.h, "Device settings"): not
 // configuration, so a Send leaves them alone and a Get does not read them; the
@@ -336,6 +361,68 @@ constexpr uint8_t CMD_WRITE_DEVICE_SETTINGS = 0x5C;
 constexpr uint8_t DEVICE_SETTINGS_FORMAT    = 1;
 constexpr int LED_BRIGHTNESS_MIN            = 5;
 constexpr int LED_BRIGHTNESS_MAX            = 100;
+
+// The CAN Triple 2.0's STORED PROJECT (its protocol.h, "The stored project"):
+// the document a configuration was sent from, kept with it, so a Get can give
+// the project back and not only the records. The bytes are the Manager's own
+// (stored_project.h: a header, then the document sealed like a .ct3); the unit
+// keeps them encrypted under a key of its own and reads none of them. WRITE
+// only inside a Send: u32 offset, bytes -> ACK; a byte already written is taken
+// again only unchanged (ERR_FLASH_WRITE otherwise). READ: u32 offset, u16 count
+// (1..PROJECT_READ_MAX) -> those six bytes, then count bytes: as written up to
+// the end of what was written, 0xFF past it, and 0xFF throughout when the
+// running configuration came without a project. Staged with the Send like the names: what a Send writes goes live
+// with its SAVE, and a Send that writes none leaves the unit with none. A unit
+// whose capacity report states project_bytes keeps one; the CAN Triple 1.x
+// answers either command ERR_INVALID_CMD.
+constexpr uint8_t CMD_WRITE_PROJECT  = 0x5D;
+constexpr uint8_t CMD_READ_PROJECT   = 0x5E;
+constexpr int PROJECT_BYTES          = 1024 * 1024;
+constexpr int PROJECT_READ_MAX       = 2016;
+
+// The CAN Triple 2.0's PLAN (its protocol.h, "The plan"; phase 4, store v21):
+// how many records each table of a configuration holds is the configuration's
+// own choice. A Send declares it right after its CLEAR and before anything
+// else: u8 STAGE_PLAN_FORMAT, u8 table_count (the unit's report's), then a u16
+// capacity per table in DeviceTable order, and on a unit that keeps value names
+// (LABEL_FLAG_VALUE_NAMES) a u16 of them (step 3b; absent, none), then on one that
+// keeps notes (LABEL_FLAG_NOTES) a u16 of the notes' slots (absent, none), which come out
+// of the room for names with the rest -> ACK, so the command is NOT in
+// DeviceLink::isReadResponse. ERR_OUT_OF_BOUNDS: a capacity past its ceiling,
+// a 2x16 Out table not as long as its Def table, or 8x8 rows not eight a
+// table; ERR_NO_ROOM: the tables would not fit the unit's configuration flash,
+// its engine's RAM or its room for names. A unit takes a plan when its
+// capacity report says so (CAPACITY_PLAN_STAGE, DeviceCapacity::plansTables);
+// a Send that declares none is laid out with the report's entries, the
+// DEFAULT plan. Format STAGE_PLAN_FORMAT_ASK asks what a plan would cost and is
+// answered with a PlanCost DATA frame; the Manager works the cost out from the
+// report itself (DeviceCapacity::planCost, the same arithmetic) and never
+// asks, which keeps one command one kind of reply. The CAN Triple 1.x, and the
+// 2.0 firmware before phase 4, answer ERR_INVALID_CMD.
+constexpr uint8_t CMD_STAGE_PLAN         = 0x5F;
+constexpr uint8_t STAGE_PLAN_FORMAT      = 1;
+constexpr uint8_t STAGE_PLAN_FORMAT_ASK  = 2;
+// The rooms a plan overruns (PlanCost.short_of, DeviceCapacity::planCost).
+constexpr uint8_t PLAN_SHORT_FLASH       = 0x01;
+constexpr uint8_t PLAN_SHORT_ARENA       = 0x02;
+constexpr uint8_t PLAN_SHORT_NAMES       = 0x04;
+// What the RUNNING configuration uses (its protocol.h, "What the running
+// configuration uses"): the plan's capacity and the records in use for each
+// table, and what the rooms hold. Empty request -> UsageReportHeader, then
+// table_count UsageEntry in DeviceTable order, then (step 3b) UsageLabels: the
+// running configuration's label kinds and each kind's slots, which a Get reads
+// its names over; a reply that ends with the entries has the names' three
+// kinds; then (step 4c) UsageQueues: each bus's transmit queue and what its
+// transmit messages would like of it. Gated like a table read, fixed
+// shape, no echo: in DeviceLink::isReadResponse and NOT in echoesRequestRange.
+// A Get from a unit that takes plans reads each table this far (its running
+// plan may hold more than the report's entries). The CAN Triple 1.x, and the
+// 2.0 firmware before phase 4, answer ERR_INVALID_CMD.
+constexpr uint8_t CMD_GET_USAGE          = 0x60;
+constexpr uint8_t USAGE_REPORT_FORMAT    = 1;
+constexpr uint8_t USAGE_REFS_OVERFLOW    = 0x01; // the references did not fit: every row runs every pass
+constexpr uint8_t USAGE_SEND_OPEN        = 0x02; // a Send is in progress, with a plan of its own
+constexpr uint8_t USAGE_NAMES_KEPT       = 0x04; // the unit keeps names
 
 #pragma pack(push, 1)
 struct DeviceSettings {
@@ -359,6 +446,10 @@ constexpr uint8_t CMD_SCRIPT_STATUS    = 0x3F;
 constexpr uint8_t CONFIG_STATUS_OK           = 0x00;
 constexpr uint8_t CONFIG_STATUS_NONE         = 0x01; // blank, or bad magic/version/CRC
 constexpr uint8_t CONFIG_STATUS_WRONG_DEVICE = 0x02; // valid, but bound to another chip
+// The CAN Triple 2.0 (phase 4): valid, but its tables need more engine RAM than
+// this firmware has, so it does not run. Met after a firmware update that left
+// the engine less room; a Send refuses such a configuration before it starts.
+constexpr uint8_t CONFIG_STATUS_NO_ROOM      = 0x03;
 constexpr int CONFIG_NAME_LEN           = 32;
 
 // CanSignalConfig::label is 32 bytes, so a channel name reaches the device as at
@@ -423,6 +514,12 @@ constexpr uint8_t ERR_LOCKED        = 0x07;
 // and for the bootloader's verdict on the last commit, which no NACK could
 // have carried.
 constexpr uint8_t ERR_FW_REJECTED   = 0x08;
+// The CAN Triple 2.0 (phase 4): a configuration that does not fit the unit. A
+// CMD_STAGE_PLAN whose tables need more configuration flash, engine RAM or room
+// for names than the unit has, or the SAVE of a Send whose dependency
+// references overrun the RAM its plan left. The running configuration is
+// untouched either way: a 2.0's Send is staged beside it.
+constexpr uint8_t ERR_NO_ROOM       = 0x09;
 
 // Bootloader state and verdicts, mirroring fw_image.h. The GUI only reports
 // these; the device is the one that acts on them.
@@ -553,12 +650,18 @@ enum class DeviceTable : uint8_t {
     Integrators = 12,
     Script = 13,
     Crc8 = 14,
+    Uds = 15, // 2.0 line, store v23: UDS requests (UdsConfig)
 };
 // FLASH_NUM_TABLES on the device. A newer firmware may report MORE entries
 // than this (an appended table); a host indexes by DeviceTable and ignores the
 // rest, so this is how many tables THIS build understands, not a ceiling on
-// what a reply may carry.
-constexpr int DEVICE_TABLE_COUNT = 15;
+// what a reply may carry. The CAN Triple 1.x line, frozen at firmware 1.0.15,
+// has the first fifteen (through the CRC8 rules), and is what a unit that
+// cannot report is assumed to be (DeviceCapacity::builtIn()); the sixteenth,
+// the UDS requests, is the 2.0's from store v23 and only ever comes from a
+// report.
+constexpr int DEVICE_TABLE_COUNT = 16;
+constexpr int DEVICE_TABLE_COUNT_1X = int(DeviceTable::Crc8) + 1;
 
 constexpr uint8_t START_MARKER = 0x55;
 
@@ -615,6 +718,19 @@ constexpr uint8_t TXTRIG_ENABLED     = 0x01; // transmit only while the conditio
 // whether the message is gated; this only stops an unset field from reading as
 // condition 0 after a round trip.
 constexpr uint16_t TX_TRIGGER_COND_NONE = 0xFFFFu;
+// The same byte, 2.0 line (CAPACITY_CAN_BRS_PER_MESSAGE): a CAN FD transmit
+// message sent WITHOUT the bit rate switch, every bit at the nominal rate.
+// Clear, as on every message before it, an FD frame switches as it always has.
+// A receive message and a classic frame do not read it.
+constexpr uint8_t MSGTX_NO_BRS = 0x04;
+// 2.0 line (CAPACITY_CAN_UDS_REQUESTS): the transmit message a UDS request is
+// timed by (UdsConfig::request_msg). When it comes due the record's bytes go
+// out as ISO-TP frames instead of a frame of its channels.
+constexpr uint8_t MSGTX_UDS_REQUEST = 0x08;
+// The same byte of a RECEIVE message: a UDS request's response message
+// (UdsConfig::response_msg). Its frames are the transport's, and its channels
+// decode the reassembled response rather than any one frame.
+constexpr uint8_t MSGRX_UDS_RESPONSE = 0x10;
 // 2.3.0: bits 6-7 are ONE ORDERED PROTECTION LEVEL, not two independent flags.
 // level = (flags & MSGPROT_MASK) >> 6, and that number IS CommsProtection:
 //
@@ -1119,8 +1235,21 @@ struct IntegratorConfig {
 constexpr uint8_t CRC8FLAG_ACTIVE  = 0x01;
 constexpr uint8_t CRC8FLAG_REF_IN  = 0x02; // reflect each input byte first
 constexpr uint8_t CRC8FLAG_REF_OUT = 0x04; // reflect the register before final XOR
+// The CAN Triple 2.0's long rules (store v22): this record carries more of the
+// elements of the rule before it, and is no rule of its own. ACTIVE is clear on
+// it, so a firmware before long rules passes over it as a rule not in use.
+constexpr uint8_t CRC8FLAG_CONTINUATION = 0x08;
 
 constexpr int CRC8_MAX_ELEMENTS = 15;
+// LONG RULES (the CAN Triple 2.0 from its store v22, CAPACITY_CRC8_LONG_RULES):
+// its record holds CRC8_V2_RECORD_ELEMENTS elements, and a rule of more, up to
+// CRC8_MAX_RULE_ELEMENTS, carries the rest in the records right after it, each
+// flagged CRC8FLAG_CONTINUATION alone with the rule's msg_idx and the count it
+// holds. The rule's own record holds every other field and the WHOLE rule's
+// element_count. The Manager keeps those records in the struct below too, and
+// sends the 2.0's 26-byte form as two runs of it (V2_CRC8_*).
+constexpr int CRC8_V2_RECORD_ELEMENTS = 8;
+constexpr int CRC8_MAX_RULE_ELEMENTS = 70;
 
 // elem_type values: what one element feeds into the CRC, in element order.
 constexpr uint8_t CRC8_ELEM_ID   = 0; // elem_value = shift 0..3: (id >> 8*v) & 0xFF
@@ -1151,6 +1280,43 @@ constexpr uint8_t CRC8_RUN_LAST_MASK = 0x3F;
 // marked messages nobody can open, edit or release.
 struct MessagePasswordRecord {
     uint32_t key[kMsgPasswordSlots];
+};
+
+// UDS REQUESTS (the 2.0 line's protocol.h, "UDS REQUESTS"; store v23). The
+// unit is the tester: one record makes one diagnostic request of one ECU over
+// ISO 15765-2 and decodes the response. request_msg is a TRANSMIT message
+// flagged MSGTX_UDS_REQUEST (the request's identifier, bus, frame format and
+// timing); response_msg a RECEIVE message flagged MSGRX_UDS_RESPONSE (the
+// response's identifier, whose channels decode the whole reassembled response
+// by byte, byte 0 the service byte), or SIG_MSG_NONE when none is awaited.
+// `request` is the request's bytes, the service first; response_max the bytes
+// of a response kept for the channels (the bus's buffer in the unit's RAM is
+// the largest request or response_max on it: planUdsBytes); timeout_ms the
+// wait for the response and pending_ms the wait after a 7F xx 78; block_size
+// and st_min the flow control the unit sends; status_signal_idx a channel told
+// how each request ended: 0 a positive response, 1..255 the negative
+// response's code, 256 no response, 257 a transport fault.
+constexpr int UDS_REQUEST_MAX = 64;
+constexpr int UDS_RESPONSE_MAX = 4095;
+constexpr uint8_t UDSFLAG_ACTIVE = 0x01;
+constexpr uint8_t UDSFLAG_PAD = 0x02; // frames padded to 8 bytes with pad_byte
+constexpr uint8_t UDSFLAG_NO_RESPONSE = 0x04; // nothing awaited: the request ends when it is out
+constexpr int UDS_RESULT_TIMEOUT = 256;
+constexpr int UDS_RESULT_TRANSPORT = 257;
+struct UdsConfig {
+    uint16_t request_msg;
+    uint16_t response_msg;
+    uint16_t status_signal_idx;
+    uint16_t timeout_ms;
+    uint16_t pending_ms;
+    uint16_t response_max;
+    uint8_t flags;
+    uint8_t pad_byte;
+    uint8_t block_size;
+    uint8_t st_min;
+    uint8_t request_len;
+    uint8_t reserved;
+    uint8_t request[UDS_REQUEST_MAX];
 };
 
 struct Crc8Config {
@@ -1471,6 +1637,13 @@ struct TimerConfig {
 // same thing the old 0xFFFF in start_signal_idx said.
 constexpr uint16_t kTimerTermUnused = 0xFFFFu;
 
+// A User Condition's term slot it does not use, on a unit that sizes its
+// memory by the configuration (a CAN Triple 2.0 from phase 4): out of range
+// names no channel. A zeroed slot names channel 0, and that unit's engine makes
+// a dependency reference for every slot that names a channel, used or not
+// (device_mapper.cpp, mapToDevice).
+constexpr uint16_t kConditionTermUnused = 0xFFFFu;
+
 // v6: constant â€” writes a fixed value into a generated channel's slot.
 struct ConstantConfig {
     uint16_t dest_signal_idx;
@@ -1649,6 +1822,33 @@ struct CapacityEntry {
 // firmware may lengthen it without another format. Not part of the layout
 // identity, which covers the entries alone.
 constexpr int CAPACITY_SCRIPT_OPS = 48; // opcodes 0x00..0x2F
+// One slice of the 2.0 engine's RAM (its arena), as the report states it: what
+// it scales with (ARENA_MEASURE_* in the 2.0 protocol.h), the alignment it
+// starts on and the bytes an entry takes.
+struct CapacitySlice {
+    uint8_t  measure;
+    uint8_t  align;
+    uint16_t bytes;
+};
+constexpr int CAPACITY_MAX_TABLES = 16; // CapacityExtension.ceiling[]
+constexpr int CAPACITY_MAX_STAGES = 8;  // CapacityExtension.stage_table[]
+constexpr int CAPACITY_MAX_SLICES = 40; // CapacityExtension.slice[]
+// CapacitySlice.measure: how many entries a slice has for a plan, from the plan's
+// capacities (the 2.0 protocol.h, "The plan's cost"). A report naming a measure
+// past these is one this build cannot cost: DeviceCapacity::planCost says so.
+constexpr uint8_t ARENA_MEASURE_CHANNEL       = 0;  // channels
+constexpr uint8_t ARENA_MEASURE_CHANNEL_END   = 1;  // channels + 1
+constexpr uint8_t ARENA_MEASURE_CHANNEL_BIT   = 2;  // ceil(channels / 8)
+constexpr uint8_t ARENA_MEASURE_MESSAGE       = 3;  // messages
+constexpr uint8_t ARENA_MEASURE_MESSAGE_BIT   = 4;  // ceil(messages / 32)
+constexpr uint8_t ARENA_MEASURE_MESSAGE_WORD  = 5;  // ceil(ceil(messages / 32) / 32)
+constexpr uint8_t ARENA_MEASURE_CONDITION     = 6;  // conditions
+constexpr uint8_t ARENA_MEASURE_COUNTER       = 7;  // counters
+constexpr uint8_t ARENA_MEASURE_TIMER         = 8;  // timers
+constexpr uint8_t ARENA_MEASURE_INTEGRATOR    = 9;  // integrators
+constexpr uint8_t ARENA_MEASURE_STAGE_ROW_BIT = 10; // stages x max(1, ceil(R / 32)), R the
+                                                    // largest of the stage tables' capacities
+constexpr uint8_t ARENA_MEASURE_COUNT         = 11;
 struct CapacityExtension {
     uint16_t size;                 // bytes of this block, this field included
     uint16_t retained_values;      // retained (Preserve) values the unit keeps,
@@ -1672,18 +1872,136 @@ struct CapacityExtension {
     // the message, signal and relay records are the 2.0 ones without them; 0,
     // or a block that ends before this, when the records carry them.
     uint8_t  label_bytes;
-    uint8_t  label_flags;
-    uint16_t reserved3;
+    uint8_t  label_flags;          // LABEL_FLAG_*: units and value names (step 3b)
+    // What kind of build the report comes from: CAPACITY_BUILD_*. A reserved 0
+    // before it had a meaning, so an earlier build states none.
+    uint16_t build_flags;
+    // The stored project: PROJECT_BYTES when the unit keeps one with its
+    // configuration (CMD_WRITE_PROJECT); 0, or a block that ends before this,
+    // when it keeps none.
+    uint32_t project_bytes;
+    // The plan (2.0 line, phase 4): what a Send may declare (CMD_STAGE_PLAN)
+    // and what it costs, worked out by the rules in the 2.0 protocol.h ("The
+    // plan's cost") from these alone. A block that ends before this takes no
+    // plan: every Send is laid out with the capacities in the entries.
+    uint16_t plan_flags;           // CAPACITY_PLAN_*
+    uint16_t plan_header_bytes;    // a configuration's header, ahead of its tables
+    uint32_t plan_flash_bytes;     // the most its header and tables may take
+    uint32_t arena_bytes;          // the engine's RAM for slices and references, and
+                                   // (CAPACITY_PLAN_TX_QUEUES) the transmit queues
+    uint32_t label_region_bytes;   // the room for names
+    uint16_t label_align;          // a kind's run of names starts on a multiple
+    uint16_t ref_bytes;            // a dependency reference
+    uint16_t ceiling[CAPACITY_MAX_TABLES]; // the most a plan may declare, table order
+    uint8_t  slice_count;          // slice[] in use
+    uint8_t  measure_count;        // the measures slice[] may name: 0 .. count-1
+    uint8_t  stage_count;          // stage_table[] in use
+    uint8_t  plan_reserved;
+    uint8_t  stage_table[CAPACITY_MAX_STAGES]; // the dependency stages' tables
+    CapacitySlice slice[CAPACITY_MAX_SLICES];  // the engine's RAM, in carving order
+    // The transmit queues (phase 4, step 4c): with CAPACITY_PLAN_TX_QUEUES, what
+    // each bus's queue takes at least and what a queued frame takes beside its
+    // data (the 2.0 protocol.h, "The transmit queues"). A block that ends
+    // before this keeps its queues outside the engine's RAM.
+    uint16_t tx_queue_floor;
+    uint8_t  tx_queue_entry_overhead;
+    uint8_t  tx_queue_reserved;
 };
 // Kept without a write limit (FRAM): writing them often costs nothing.
 constexpr uint16_t CAPACITY_RETAINED_NO_WEAR = 0x0001;
+// Any channel can be kept across power cycles (SIG_BITS_RETAIN), not only the
+// outputs of counters and integrators set to Preserve; retained_values counts
+// them all together (the CAN Triple 2.0, phase 4).
+constexpr uint16_t CAPACITY_RETAINED_CHANNELS = 0x0002;
 // CapacityExtension.crc8_features
 constexpr uint16_t CAPACITY_CRC8_WHOLE_ID = 0x0001;  // CRC8_ELEM_ID_ALL
 constexpr uint16_t CAPACITY_CRC8_DATA_RUNS = 0x0002; // CRC8_ELEM_DATA_RUN
+constexpr uint16_t CAPACITY_CRC8_LONG_RULES = 0x0004; // records of 8, rules of up to 70
 // CapacityExtension.can_features: CAN FD data phases of 4, 5 and 8 Mbit/s (an
 // 80 MHz CAN clock and transmitter delay compensation). Without it a unit
 // runs data phases to 2 Mbit/s.
 constexpr uint16_t CAPACITY_CAN_FAST_DATA = 0x0001;
+// And: each CAN FD transmit message says whether it switches the bit rate
+// (MSGTX_NO_BRS). Without it, every FD frame does.
+constexpr uint16_t CAPACITY_CAN_BRS_PER_MESSAGE = 0x0002;
+// The unit makes UDS requests as a tester (DeviceTable::Uds, UdsConfig).
+constexpr uint16_t CAPACITY_CAN_UDS_REQUESTS = 0x0004;
+// CapacityExtension.build_flags: a PRODUCTION build, which sets the chip's
+// readout protection the first time it starts, licensed or not. Clear: a
+// development build, which leaves it alone unless the unit is licensed.
+constexpr uint16_t CAPACITY_BUILD_PRODUCTION = 0x0001;
+// CapacityExtension.plan_flags: the unit lays a Send out with the plan it
+// declares, and answers the plan's ask.
+constexpr uint16_t CAPACITY_PLAN_STAGE = 0x0001;
+// The transmit queues are in the engine's working memory (phase 4, step 4c):
+// each bus's takes at least tx_queue_floor, beside the slices and the
+// references, and what is left goes to them too (first a frame of each of a
+// bus's transmit messages, then a third each); a plan is declared, and a SAVE
+// checked, with the three floors (DeviceCapacity::arenaWithReferences).
+constexpr uint16_t CAPACITY_PLAN_TX_QUEUES = 0x0002;
+// The most one bus's queue takes: a ring's counts are 16-bit.
+constexpr int TX_QUEUE_MAX_BYTES = 65532;
+// CapacityExtension.label_flags (phase 4, step 3b): what the label store keeps
+// beside the names, which a plan's names pay for too (DeviceCapacity::planCost).
+constexpr uint8_t LABEL_FLAG_UNITS       = 0x01; // LABEL_KIND_UNIT: a unit for each channel
+constexpr uint8_t LABEL_FLAG_VALUE_NAMES = 0x02; // LABEL_KIND_VALUE_NAME: as many as a plan
+                                                 // declares; never without LABEL_FLAG_UNITS
+constexpr uint8_t LABEL_FLAG_NOTES       = 0x04; // LABEL_KIND_NOTE: the configuration's notes;
+                                                 // never without LABEL_FLAG_VALUE_NAMES
+
+// The plan's ask answered (CMD_STAGE_PLAN with STAGE_PLAN_FORMAT_ASK). Mirrored
+// for the tests' model units; the Manager itself never asks.
+struct PlanCost {
+    uint8_t  format;      // STAGE_PLAN_FORMAT_ASK
+    uint8_t  verdict;     // what a Send declaring it would be answered: 0 (ACK),
+                          // ERR_OUT_OF_BOUNDS or ERR_NO_ROOM
+    uint8_t  short_of;    // PLAN_SHORT_*: the rooms it overruns
+    uint8_t  reserved;
+    uint32_t flash_bytes; // its header and tables; 0 when it is not well formed
+    uint32_t arena_bytes; // its slices; the references come at the SAVE
+    uint32_t label_bytes; // its names, with its units and value names
+};
+
+// CMD_GET_USAGE reply: this header, then table_count UsageEntry.
+struct UsageReportHeader {
+    uint8_t  format;        // USAGE_REPORT_FORMAT
+    uint8_t  table_count;   // UsageEntry records that follow
+    uint8_t  config_status; // CONFIG_STATUS_*
+    uint8_t  flags;         // USAGE_*
+    uint32_t flash_bytes;   // the running plan's header and tables
+    uint32_t arena_bytes;   // its slices
+    uint32_t ref_bytes;     // its references, as last counted; 0 with USAGE_REFS_OVERFLOW
+    uint32_t label_bytes;   // its names' room; 0 when the unit keeps none
+    uint16_t retained_used; // retained values held now
+    uint16_t retained_room; // the most it holds
+    uint32_t project_bytes; // the stored project, as far as it was written; 0: none
+};
+struct UsageEntry {
+    uint16_t capacity;      // records the running plan has room for
+    uint16_t used;          // records the running configuration has
+};
+// After the entries (step 3b): u8 kinds, u8 reserved, then a u16 of slots for
+// each kind the unit has (LABEL_KIND_COUNT on the 2.0 firmware), of which the
+// first `kinds` are the running configuration's, in LABEL_KIND_* order.
+struct UsageLabels {
+    uint8_t  kinds;    // LABEL_KINDS_NAMES .. LABEL_KIND_COUNT; 0: the unit keeps no names
+    uint8_t  reserved;
+    uint16_t kind_slots[LABEL_KIND_COUNT]; // the firmware's `slots`, a Qt keyword here
+};
+// After the label trailer (step 4c): each bus's transmit queue as the running
+// configuration has it, and what its transmit messages would like of it (a
+// frame each), CAN1..CAN3.
+struct UsageQueues {
+    uint32_t bytes[3];
+    uint32_t need[3];
+};
+// A LABEL_KIND_VALUE_NAME slot (step 3b): the hosts' format, which the unit keeps
+// as written and never reads.
+struct ValueNameLabel {
+    uint16_t signal;                 // the channel: its record's index, as its name's slot
+    int32_t  value;                  // the value it names
+    char     name[VALUE_NAME_BYTES]; // UTF-8, zero-padded; no terminator when all are used
+};
 
 // CMD_GET_HARDWARE reply. Parsed with >= on length: a later format may use the
 // reserved bytes without moving anything here. See protocol/hardware.h.
@@ -1774,6 +2092,14 @@ struct HardwareReport {
 // that happens to fail. One re-Send after the update, which Update Firmware
 // backs up for and offers to do.
 constexpr uint16_t EXPECTED_STORE_VERSION = 20;
+// The CAN Triple 2.0 line's (its own flash_store.h, which test_firmware_v2
+// holds this against). The 2.0's store left the 1.x's behind at 21 (phase 4):
+// the plan in the configuration's header, the twelve-bit message index, and
+// the layout identity over the records' sizes alone. A Send asks which line
+// the unit is (its hardware report) and expects that line's number.
+// 22 since its CRC8 record holds 8 elements (long rules, above); 23 since its
+// sixteenth table, the UDS requests.
+constexpr uint16_t EXPECTED_STORE_VERSION_2 = 23;
 
 #pragma pack(pop)
 
@@ -1803,6 +2129,14 @@ constexpr uint16_t SIG_FLAG_TX_WRAP   = 0x0800;
 // identifier with nothing bound to it used to infer nothing and never went out.
 // See the firmware's protocol.h.
 constexpr uint16_t SIG_FLAG_SELECTOR_ONLY = 0x1000;
+// bits bit 31 (the CAN Triple 2.0, phase 4): KEEP THIS CHANNEL'S VALUE ACROSS
+// POWER CYCLES. The unit writes it to its FRAM while it changes and puts it
+// back when it starts with the configuration that wrote it: a received channel
+// reads it until its message arrives, a Set/Reset User Condition comes back
+// latched as it was. A unit takes it when its report says so
+// (CAPACITY_RETAINED_CHANNELS); the 1.x reads none of it. See the 2.0
+// protocol.h's SIG_BITS_RETAIN.
+constexpr uint32_t SIG_BITS_RETAIN = 0x80000000u;
 
 inline uint16_t sigMsgIdx(const CanSignalConfig &s)
 {
@@ -1823,6 +2157,7 @@ inline int8_t sigDecimalPlaces(const CanSignalConfig &s)
 { return int8_t((s.bits >> 21) & SIG_DECIMALS_MASK); }
 inline uint8_t sigMuxByteOffset(const CanSignalConfig &s)
 { return uint8_t((s.bits >> 25) & SIG_MUXOFF_MASK); }
+inline bool sigRetain(const CanSignalConfig &s) { return (s.bits & SIG_BITS_RETAIN) != 0; }
 
 inline void sigSetHeader(CanSignalConfig &s, uint16_t msgIdx, uint8_t byteOrder, uint8_t isActive)
 {
@@ -1849,9 +2184,15 @@ inline void sigSetBits(CanSignalConfig &s, uint16_t startBit, uint8_t bitLength,
 {
     const uint32_t len = uint32_t((bitLength ? bitLength : 1) - 1) & SIG_BITLEN_MASK;
     const uint32_t dp = uint32_t(decimals < 0 ? 0 : decimals) & SIG_DECIMALS_MASK;
-    s.bits = (uint32_t(startBit) & SIG_START_BIT_MASK) | (len << 9)
+    // SIG_BITS_RETAIN is kept, as the 2.0's sig_set_bits keeps it, so the two
+    // setters may be called in either order.
+    s.bits = (s.bits & SIG_BITS_RETAIN) | (uint32_t(startBit) & SIG_START_BIT_MASK) | (len << 9)
              | ((uint32_t(valueType) & SIG_VALTYPE_MASK) << 15) | (dp << 21)
              | ((uint32_t(muxByteOffset) & SIG_MUXOFF_MASK) << 25);
+}
+inline void sigSetRetain(CanSignalConfig &s, bool retain)
+{
+    s.bits = retain ? (s.bits | SIG_BITS_RETAIN) : (s.bits & ~SIG_BITS_RETAIN);
 }
 
 // Single-field updates, for the paths that stamp a type onto an already-built
@@ -1878,6 +2219,61 @@ inline void sigSetMsgIdx(CanSignalConfig &s, uint16_t msgIdx)
     s.msg_and_flags = uint16_t((s.msg_and_flags & ~SIG_MSG_IDX_MASK) | m);
 }
 
+// THE CAN TRIPLE 2.0'S MESSAGE INDEX IS TWELVE BITS (phase 4, store v21): the
+// nine above and three more at the top of msg_and_flags (bits 13..15, free on
+// every unit before), so a configuration may have up to SIG_MSG_MAX messages.
+// All twelve set is "no message". A unit reads twelve bits when it takes a plan
+// (DeviceCapacity::wideMessageIndex); the 1.x, and every 2.0 before phase 4,
+// read nine, where 0x1FF is "no message". A twelve-bit unit reads a nine-bit
+// 0x1FF as message 511, past the end of every table of 511 messages or fewer,
+// so a record written the narrow way is still bound to nothing there — but a
+// Send writes each unit's own form (tablesForUnit). These mirror the 2.0
+// protocol.h's sig_msg_idx and sig_set_header; test_firmware_v2 holds the two
+// against each other.
+constexpr uint16_t SIG_MSG_HI_SHIFT   = 13;     // where the index's top three bits sit
+constexpr uint16_t SIG_MSG_HI_MASK    = 0xE000;
+constexpr uint16_t SIG_MSG_IDX12_NONE = 0xFFF;  // all twelve: no message
+constexpr uint16_t SIG_MSG_MAX        = 4094;   // the most messages a configuration can have
+constexpr int kSigMsgLowBits          = 9;      // the index's bits at the bottom of the word
+
+inline uint16_t sigMsgIdx(const CanSignalConfig &s, bool wide)
+{
+    if (!wide)
+        return sigMsgIdx(s);
+    const uint16_t v = uint16_t((s.msg_and_flags & SIG_MSG_IDX_MASK)
+                                | ((s.msg_and_flags & SIG_MSG_HI_MASK)
+                                   >> (SIG_MSG_HI_SHIFT - kSigMsgLowBits)));
+    return v == SIG_MSG_IDX12_NONE ? SIG_MSG_NONE : v;
+}
+// The index in a unit's form: twelve bits, or nine with the top three clear.
+// Past SIG_MSG_MAX is no message, as on the unit, rather than a wrap onto a low
+// index.
+inline void sigSetMsgIdx(CanSignalConfig &s, uint16_t msgIdx, bool wide)
+{
+    if (!wide) {
+        s.msg_and_flags = uint16_t(s.msg_and_flags & ~SIG_MSG_HI_MASK);
+        sigSetMsgIdx(s, msgIdx);
+        return;
+    }
+    const uint16_t m = (msgIdx == SIG_MSG_NONE || msgIdx > SIG_MSG_MAX) ? SIG_MSG_IDX12_NONE
+                                                                         : msgIdx;
+    s.msg_and_flags = uint16_t((s.msg_and_flags & uint16_t(~(SIG_MSG_IDX_MASK | SIG_MSG_HI_MASK)))
+                               | (m & SIG_MSG_IDX_MASK)
+                               | uint16_t((m >> kSigMsgLowBits) << SIG_MSG_HI_SHIFT));
+}
+inline void sigSetHeader(CanSignalConfig &s, uint16_t msgIdx, uint8_t byteOrder, uint8_t isActive,
+                         bool wide)
+{
+    sigSetHeader(s, SIG_MSG_NONE, byteOrder, isActive);
+    sigSetMsgIdx(s, msgIdx, wide);
+}
+
+static_assert(sizeof(PlanCost) == 16, "must match firmware (2.0 line)");
+static_assert(sizeof(UsageReportHeader) == 28, "must match firmware (2.0 line)");
+static_assert(sizeof(UsageEntry) == 4, "must match firmware (2.0 line)");
+static_assert(sizeof(UsageLabels) == 14, "must match firmware (2.0 line)");
+static_assert(sizeof(UsageQueues) == 24, "must match firmware (2.0 line)");
+static_assert(sizeof(ValueNameLabel) == LABEL_STORE_BYTES, "a value name is one slot");
 static_assert(sizeof(MathConfig) == 24, "must match firmware");
 static_assert(sizeof(ConditionTerm) == 8, "must match firmware");
 static_assert(sizeof(ConditionConfig) == 62, "must match firmware");
@@ -1914,6 +2310,15 @@ static_assert(offsetof(CanSignalConfig, label) == 0 && offsetof(CanSignalConfig,
               "the 2.0 signal record is the 1.x one after its label");
 static_assert(offsetof(RelayConfig, label) == V2_RELAY_AT + V2_RELAY_BYTES,
               "the 2.0 relay record is the 1.x one up to its label");
+// The CAN Triple 2.0's CRC8 record from its store v22, 26 bytes: the 1.x
+// record's fields and its first 8 element types, then its first 8 element
+// values — two runs of the 1.x struct, where the label-store records are one.
+constexpr int V2_CRC8_AT = 0, V2_CRC8_BYTES = 18;
+constexpr int V2_CRC8_VALUES_AT = 25, V2_CRC8_VALUES_BYTES = 8;
+static_assert(offsetof(Crc8Config, elem_type) + CRC8_V2_RECORD_ELEMENTS == V2_CRC8_AT + V2_CRC8_BYTES
+                  && offsetof(Crc8Config, elem_value) == V2_CRC8_VALUES_AT
+                  && V2_CRC8_VALUES_BYTES == CRC8_V2_RECORD_ELEMENTS,
+              "the 2.0 CRC8 record is the 1.x one's fields, 8 types and 8 values");
 static_assert(sizeof(Table2x16Def) == 70, "must match firmware");
 static_assert(sizeof(Table2x16Out) == 64, "must match firmware");
 // 6 indices + 3 counts + 8*4 X sites + 8*4 Y sites = 73 (padded slot 80), and
@@ -1922,6 +2327,7 @@ static_assert(sizeof(Table8x8Def) == 73, "must match firmware");
 static_assert(sizeof(Table8x8GridRow) == 32, "must match firmware Table8x8Row");
 static_assert(sizeof(IntegratorConfig) == 30, "must match firmware");
 static_assert(sizeof(Crc8Config) == 40, "must match firmware");
+static_assert(sizeof(UdsConfig) == 82, "must match firmware (2.0 line, store v23)");
 static_assert(sizeof(ControlCanPayload) == 11, "must match firmware");
 static_assert(sizeof(FwUpdateBeginPayload) == 16, "must match firmware");
 static_assert(sizeof(FwUpdateStatus) == 32, "must match firmware");
@@ -1930,7 +2336,8 @@ static_assert(sizeof(ScriptChunk) == 64, "must match firmware");
 static_assert(sizeof(ScriptStatus) == 29, "must match firmware");
 static_assert(sizeof(CapacityReportHeader) == 4, "must match firmware");
 static_assert(sizeof(CapacityEntry) == 4, "must match firmware");
-static_assert(sizeof(CapacityExtension) == 68, "must match the 2.0 firmware");
+static_assert(sizeof(CapacitySlice) == 4, "must match the 2.0 firmware");
+static_assert(sizeof(CapacityExtension) == 300, "must match the 2.0 firmware");
 static_assert(sizeof(HardwareReport) == 48, "must match firmware");
 
 // Host->device wire frame limit. This was 127 for years because the firmware's

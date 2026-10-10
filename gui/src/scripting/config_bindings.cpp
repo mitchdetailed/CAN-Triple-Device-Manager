@@ -480,6 +480,7 @@ QString deviceToString(SectionDevice d)
     // The same token the .ct3 file uses, so a script and a saved file agree
     // about what a section is called.
     case SectionDevice::TransmitCrc8: return QStringLiteral("transmitCrc8");
+    case SectionDevice::UdsRequest: return QStringLiteral("udsRequest");
     case SectionDevice::MessageRelay: return QStringLiteral("relay");
     }
     return QStringLiteral("off");
@@ -491,9 +492,11 @@ SectionDevice deviceFromString(lua_State *L, const QString &s)
     if (s == QLatin1String("receive")) return SectionDevice::ReceiveMessage;
     if (s == QLatin1String("transmit")) return SectionDevice::TransmitMessage;
     if (s == QLatin1String("transmitCrc8")) return SectionDevice::TransmitCrc8;
+    if (s == QLatin1String("udsRequest")) return SectionDevice::UdsRequest;
     if (s == QLatin1String("relay")) return SectionDevice::MessageRelay;
     luaL_error(L,
-               "device must be 'off', 'receive', 'transmit', 'transmitCrc8' or 'relay' (got '%s')",
+               "device must be 'off', 'receive', 'transmit', 'transmitCrc8', 'udsRequest' or "
+               "'relay' (got '%s')",
                s.toUtf8().constData());
     return SectionDevice::Off; // unreachable
 }
@@ -623,14 +626,14 @@ void pushSectionScalars(lua_State *L, const CommsSection &s)
     // "may I read the detail", `editLocked` is "may I change it". They are not
     // the same set — Read Only is visible and locked.
     setBool(L, "editLocked", s.isEditLocked());
-    if (s.isTransmit()) {
+    if (s.isTransmit() || s.isUds()) {
         setBool(L, "cyclic", s.cyclic);
         setInt(L, "rateHz", s.transmitRateHz);
         // Named by the condition's output channel, like everything else a
         // section references — see CommsSection::transmitCondition.
         setStr(L, "transmitCondition", s.transmitCondition);
     }
-    if (s.isReceive()) {
+    if (s.isReceive() || s.isUds()) {
         setInt(L, "timeoutMs", s.receiveTimeoutMs);
     }
 }

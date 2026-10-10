@@ -90,11 +90,11 @@ QString rowDetail(const CommsChannelRow &row, const CommsSection &s)
                     .arg(dbcTypeName(row.dbcType))
                     .arg(num(row.dbcFactor))
                     .arg(num(row.dbcOffset));
-    if (s.isReceive() && s.defaultValueOnTimeout && s.receiveTimeoutMs > 0)
+    if ((s.isReceive() || s.isUds()) && s.defaultValueOnTimeout && s.receiveTimeoutMs > 0)
         d += QStringLiteral(", dflt: %1").arg(num(row.defaultValue));
     // Only worth a word when it is NOT the default, and only on the side that
     // acts on it. Silence means clamping, which is what it has always meant.
-    if (!s.isReceive() && !row.clampToRange)
+    if (!(s.isReceive() || s.isUds()) && !row.clampToRange)
         d += QStringLiteral(", rolls over");
     return d;
 }
@@ -185,6 +185,7 @@ QString sectionDetail(const CommsSection &s, int busIndex, bool revealed)
     // squeezed into this line — it prints as the section's "Generates Channel"
     // row below (crc8Detail), where the concealment rules already govern it.
     parts << (s.isCrc8()       ? QStringLiteral("transmit CRC8")
+              : s.isUds()      ? QStringLiteral("UDS request")
               : s.isTransmit() ? QStringLiteral("transmit")
                                : QStringLiteral("receive"));
     QString id = QStringLiteral("ID ") + hexId(s);
@@ -195,7 +196,7 @@ QString sectionDetail(const CommsSection &s, int busIndex, bool revealed)
                  .arg(s.fd ? QStringLiteral("CAN FD ") : QString())
                  .arg(s.messageLengthBytes);
     parts << alignmentName(s.alignment);
-    if (s.isTransmit()) {
+    if (s.isTransmit() || s.isUds()) {
         if (s.transmitPeriodMs > 0)
             parts << QStringLiteral("every %1 ms").arg(s.transmitPeriodMs);
         else
@@ -408,8 +409,8 @@ ReportBuilder buildReport(const Configuration &config)
         r.line(QStringLiteral("State     : unsaved changes"));
     r.line();
 
-    // ---- Configuration Comments ----
-    r.heading(QStringLiteral("Configuration Comments"));
+    // ---- Config Notes (File > Config Notes) ----
+    r.heading(QStringLiteral("Config Notes"));
     if (config.comments.trimmed().isEmpty()) {
         r.line(noneMarker());
     } else {
@@ -861,6 +862,10 @@ ChannelUsage analyzeChannelUsage(const Configuration &config)
             }
             if (!s.diagnosticChannel.isEmpty())
                 c.user(s.diagnosticChannel, where + QStringLiteral(" diagnostic"));
+            // A UDS request's result channel is written by the unit at the end
+            // of every request: generated, like the CRC8 stamp's channel.
+            if (s.isUds() && !s.udsResultChannel.isEmpty())
+                c.generator(s.udsResultChannel, where + QStringLiteral(" result"));
             if (s.isTransmit()) {
                 for (const CommsChannelRow &row : s.allRows())
                     c.user(row.channelName, where);

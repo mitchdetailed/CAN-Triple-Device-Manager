@@ -19,11 +19,12 @@ current licence.</p>
 
 <table>
 <tr><th>Command</th><th>Shortcut</th><th>What it does</th></tr>
-<tr><td>Connect</td><td></td><td>Opens the serial link. Reuses this session's
-last port; the first connect of a session (or a port that has gone away)
-opens Connection Settings. The status bar's right side shows the result, and
-which board answered — CAN Triple or CAN Triple 2.0 — with its firmware
-version.</td></tr>
+<tr><td>Connect</td><td></td><td>Opens the serial link. Connection Settings
+asks which port to use and closes itself once the link is open; with
+<b>Remember last connection</b> ticked in <b>Tools → Options…</b>, Connect
+goes straight back to the last port and asks only when that port is gone. The
+status bar's right side shows the result, and which board answered — CAN
+Triple or CAN Triple 2.0 — with its firmware version.</td></tr>
 <tr><td>Disconnect</td><td></td><td>Closes the serial link. The device keeps
 running its configuration; the live windows simply stop updating.</td></tr>
 <tr><td>Send Configuration</td><td>F5</td><td>Programs the open document onto the device and saves it to flash.</td></tr>
@@ -90,6 +91,13 @@ two checkboxes:
   Offered only when the firmware can report a device ID.</li>
   <li><b>Reset device after sending</b> — reboots the unit once the transfer
   completes.</li>
+  <li><b>Store this project on the unit</b> — offered by a CAN Triple 2.0,
+  which keeps this whole document with the configuration, so
+  <a href="#get-project">Get Configuration</a> gives it back as it is now: its
+  script source, comments and every name as typed. Ticked unless you untick it,
+  and the choice is remembered for each document file. Untick it to send the
+  configuration alone; the unit then keeps no project. Greyed, with the reason
+  in its tooltip, when the project is larger than the unit keeps.</li>
   </ul></li>
 </ol>
 
@@ -110,7 +118,10 @@ by reading every record back and comparing the echoed bytes</b> with what was
 written, and finally the image is <b>saved to flash</b>, which is what makes
 it boot-persistent — it reloads automatically at every power-up. The
 configuration's own revision number rides the save step, so the version the
-device reports afterwards matches the tables it just committed.</p>
+device reports afterwards matches the tables it just committed. A project being
+stored goes in after everything else and is read back with the rest; one that
+does not go in whole fails the Send before the save, and a CAN Triple 2.0 keeps
+running what it had.</p>
 
 <p class="warn">Cancelling or losing the link mid-send leaves the device
 cleared but not reprogrammed — the clear has already happened and the flash
@@ -177,11 +188,13 @@ and — on current firmware — the live bus setup (mode, bit rates, termination
 so what comes back can be re-sent without guessing. A
 <a href="device-scripts.html">device script</a> comes back as well, as the
 <b>compiled bytecode</b> the device stores — sending that document back puts the
-same script on a unit byte for byte. What a Get cannot recover is a script's
-<em>Lua source</em>, because bytecode does not turn back into source: the Script
-Editor shows a retrieved script as a
+same script on a unit byte for byte. What a Get cannot recover from the
+configuration alone is a script's <em>Lua source</em>, because bytecode does not
+turn back into source: the Script Editor shows a retrieved script as a
 <a href="device-scripts.html#retrieved">read-only disassembly</a>, and replaces
-it only if you deliberately ask it to.</p>
+it only if you deliberately ask it to. A CAN Triple 2.0 that keeps the project
+it was sent with gives the source back with it: see
+<a href="#get-project">below</a>.</p>
 
 <p>On firmware that cannot report its bus setup, the assumed bring-up
 rates are used and a note tells you to check Connections → Communications
@@ -192,6 +205,23 @@ raised whenever that conversion happens.</p>
 <i>different</i> CAN Triple reads back as empty, because its engine refused to
 load the image. Get Configuration says so instead of handing you a blank
 document: send a configuration to that device to replace it.</p>
+
+<h3 id="get-project">A CAN Triple 2.0 that keeps its project</h3>
+
+<p>A CAN Triple 2.0 sent a configuration with <b>Store this project on the
+unit</b> ticked keeps the document it came from. Get Configuration then opens
+that document exactly as it was sent: its script's Lua source, its comments,
+its names and its layout, everything a configuration on its own leaves out. The
+status bar says so, and the window is titled with the name the project was sent
+under until you save it, which File&nbsp;→ Save&nbsp;As offers.</p>
+
+<p>It is opened only while the unit still runs exactly what was sent with it.
+If the configuration has been changed since, by another tool writing to the
+unit, you are asked whether to open the project as it was sent or the
+configuration as the unit runs it now. A stored project that cannot be read is
+named in the result, and the configuration is rebuilt from what the unit runs,
+as on any other unit. A unit sent a configuration without its project, or by a
+secure package, holds none.</p>
 
 <h3>Reading a device that holds marked messages</h3>
 

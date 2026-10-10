@@ -1,8 +1,10 @@
 // Minimal DBC (Vector CANdb) parser and mapping into the app's comms model.
 //
 // Scope: BO_ messages and SG_ signals (including the M / m<n> multiplexor
-// markers), plus SIG_VALTYPE_ float markers. Comments (CM_), value tables
-// (VAL_), attributes (BA_) and nodes are ignored. The parser is pure model code (no widgets) so it is unit-tested.
+// markers), plus SIG_VALTYPE_ float markers and VAL_ value descriptions (a
+// signal's value names, which become its channel's). Comments (CM_), value
+// tables (VAL_TABLE_), attributes (BA_, but for GenMsgCycleTime) and nodes are
+// ignored. The parser is pure model code (no widgets) so it is unit-tested.
 //
 // The one subtlety is the start-bit convention. A DBC file stores a signal's
 // start bit as its LEAST significant bit for little-endian (Intel, @1) signals
@@ -12,6 +14,7 @@
 #pragma once
 
 #include <QList>
+#include <QMap>
 #include <QString>
 #include <QStringList>
 
@@ -39,6 +42,10 @@ struct DbcSignal {
     bool isMultiplexor = false; // 'M' — its value selects the active sub-message
     bool isMultiplexed = false; // 'm<n>' — present only while multiplexor == muxValue
     int muxValue = -1;          // the <n> for a multiplexed signal
+    // VAL_ <msgId> <SigName> <raw> "<name>" ...;  each name by the RAW value it
+    // names. channelFromDbcSignal gives the channel them at the physical values
+    // those decode to.
+    QMap<qint64, QString> valueNames;
 };
 
 // One BO_ message and its signals.

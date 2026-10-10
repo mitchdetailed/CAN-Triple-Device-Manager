@@ -208,9 +208,10 @@ Because the device writes it, nothing else should. Pointing a calculation's outp
 
 ## The Channel Editor
 
-**Tools &gt; Channel Editor…** lists every channel in the document in one sortable table with columns **Channel**, **Data Type**, **Dec**, **Resolution**, **Minimum**, **Maximum**, **Unit**, **Default on Timeout** and **Source**.
+**Tools &gt; Channel Editor…** lists every channel in the document in one sortable table with columns **Channel**, **Data Type**, **Dec**, **Resolution**, **Minimum**, **Maximum**, **Unit**, **Default on Timeout**, **Kept** and **Source**.
 - **Search :** filters as you type — any part of the name, or a regular expression (^Cruise, Speed$, set|limit).
 - **Default on Timeout** shows the value a channel reverts to when its receive message times out — filled in only when that message declares a Receive Timeout *and* has "Default value on timeout" enabled (see [Communications](communications.md)).
+- **Kept** keeps the channel's value across power cycles: tick it and a CAN Triple 2.0 puts the value back when it starts, before anything runs. A received channel then reads its last value until its message arrives, and a Set/Reset User Condition comes back latched as it was. A calculation worked out again on every pass (Math, a table, a Momentary condition) is worked out at once anyway, so keeping it changes nothing. Kept channels share the unit's room for kept values with the counters and integrators set to Preserve value (349 on a CAN Triple 2.0; see [How much it holds](can-triple-2.md#room)). The box is offered only when the target firmware keeps channels, and never for a Device Channel, which the unit writes afresh at every sample.
 - **Source** names what *generates* the channel — what the value comes from, never where it is sent. A **receive** message decodes the frame and writes the channel, so it is named ("CAN 1 · Dash"). A **transmit** message is not: it *reads* the channel and puts it on the wire, so it is a destination, and this column does not report destinations. The one exception is a **Transmit CRC8**, which computes a checksum and publishes it into a channel ("CAN 1 · Dash CRC8" — see [Transmit CRC8](communications.md#crc8)); the device really does write that one. Otherwise: Math, User Condition, Counter, Timer, Integrator, Constant, Table 2x16, Table 8x8, or **Internal** for a **Device Channel**, which the unit produces itself whether or not anything uses it. Two entries separated by a comma mean two things write the channel — they share one slot and whichever runs last wins, which [Check Channels](validation-report.md) reports. **"not generated"** means nothing produces it yet: it may still be read (transmitted, or fed to a calculation), it just has no writer, so it carries its default value. **"unused"** is the stronger statement — nothing generates it *and* nothing reads it — and is exactly the set Check Channels offers to remove. A message or calculation that is switched off keeps a channel out of "unused" so cleanup cannot break it, but does not make it generated.
 - **New…** creates a channel; **Edit…** opens the selected one. Double-clicking a row also opens it.
 
@@ -250,6 +251,15 @@ It starts as what the chosen type spans at the chosen precision, and is
 re-derived whenever the type or the decimals change; edit it to declare what
 the channel should plausibly read — 0…8000 on an RPM channel — narrower or
 wider than the type span alike. Minimum must stay below Maximum.</td></tr>
+<tr><td><b>Value Names:</b></td><td>Names for particular values of the
+channel: <b>Park</b> for 0, <b>Drive</b> for 3. Wherever the live value is
+shown it reads "Park (0)", and the Monitor's override offers the names to pick
+from. Whole values only, one name each, up to 26 bytes a name. <b>Add</b> starts
+a row at the next value after the highest named one; <b>Remove</b> takes the
+selected row; a row left without a name names nothing. A DBC import fills them
+from the file's value descriptions (see <a href="dbc-import.md">Importing a
+DBC</a>), and a <a href="can-triple-2.md#names">CAN Triple 2.0</a> keeps
+them, with each channel's unit, so Get Configuration brings them back.</td></tr>
 </table>
 
 ## Storage types

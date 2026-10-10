@@ -6,7 +6,7 @@ One document — one configuration file. The document holds everything: buses, m
 <tr><th>Format</th><th>Written by</th><th>What it is</th></tr>
 <tr><td><b>.ct3</b></td><td>File → Save / Save As…</td>
 <td>A short readable header — the format, the schema and the version that wrote
-it — followed by the document as an encrypted binary body.</td></tr>
+it — followed by the document compressed and encrypted.</td></tr>
 <tr><td><b>.ct3s</b></td><td>File → Secure Configuration Builder…</td>
 <td>The same container with no readable header, plus the two things a .ct3 does
 not have: concealment that survives the file, and an install policy naming the
@@ -16,7 +16,7 @@ devices it may be sent to.</td></tr>
 have to pick it — see <a href="#json">Saving as JSON</a>.</td></tr>
 </table>
 
-**Configurations saved before this version were indented JSON**, and they still open normally — there is nothing to convert and nothing to do. The first time you save one it is written in the new format. Going back is not offered.
+**Older .ct3 files still open normally**: the indented JSON written by early versions, and the encrypted but uncompressed files written by versions up to 1.2.7. There is nothing to convert and nothing to do. The first time you save one it is written in the current format, compressed and then encrypted, which makes it about a twentieth of the size. Going back is not offered; to keep a readable copy, use Save As… and pick JSON.
 
 <a id="whatbinary"></a>
 
@@ -71,7 +71,9 @@ The policy stops a package being *used* where it should not be; the seal stops i
 
 ## Version compatibility
 
-Every .ct3 records the schema version it was written at (currently **21**). Older files keep loading — fields a newer schema added simply take their defaults. A file whose version is *ahead* of the program is refused rather than half-read, with a message saying it was saved by a newer version of CAN Triple Device Manager; update the program to open it.
+Every .ct3 records the schema version it was written at (currently **25**). Older files keep loading — fields a newer schema added simply take their defaults. A file whose version is *ahead* of the program is refused rather than half-read, with a message saying it was saved by a newer version of CAN Triple Device Manager; update the program to open it.
+
+The same goes for the file format itself. A .ct3 saved by version 1.2.8 or later is compressed, and versions before 1.2.8 refuse it with that same message; update them to open it. Version 1.2.8 and later open every older .ct3.
 
 Refusing is deliberate, and the reason is worth knowing: a setting an older program does not recognise is not always a setting it can safely ignore. A message set to transmit only on a [User Condition](communications.md#triggered) looks like an ordinary message to a program written before that existed, and sending it from there would put a continuously transmitting message on the bus. A [User Condition](conditions.md#modes) with a mode is the same hazard in its sharpest form: a program written before the modes finds none of the keys it expects, reads every condition as a single empty comparison — because a missing key has always been a legal way to say "default" — and would send a configuration whose logic is simply absent. Refusing the file names the real remedy instead.
 
@@ -90,9 +92,17 @@ How many messages, channels, conditions, tables, CRC8 rules and so on a configur
 
 The target is saved with the document and restored when it is opened. It sets the limit each editing dialog enforces, the "n of m" figures in the Config Summary, and which items the Calculations menu offers — a target with no integrators, say, disables Integrators… rather than opening a dialog that refuses every row. **Get Configuration** sets the target to the unit it read from, so a document read back from a larger variant can carry everything that unit held.
 
+A **CAN Triple 2.0** sizes each configuration's tables to what it uses (see [How much it holds](can-triple-2.md#room)). For one, the dialog shows each table as *up to* the most it can take, then three more rows for the rooms everything shares: configuration storage, working memory and names, each in bytes beside what the document takes of it, in red when it does not fit. The figures leave out the device script, which the Send adds.
+
 > **Note:** A target smaller than the document is allowed — it is how a configuration is brought down to a smaller firmware — but it is never silent: the dialog says how many rows no longer fit, and Check Channels names them. And a target is a sizing assumption, not a lock: before **Send Configuration** the program reads what the connected unit actually holds and refuses, by table, a configuration it cannot take — with the unit untouched — whatever the document's target says. A secure package records the table sizes it writes for the same check at install time.
 
 When the connected unit is not the document's target, Send Configuration checks the configuration again with the unit as its target. What the unit cannot run stops the send, listed, with nothing sent; what comes out differently on it (a CAN Triple keeps 31 bytes of a channel's name and 17 of a message's where a CAN Triple 2.0 keeps 32, for instance) is listed in the confirmation, where you can still cancel. The configuration goes to the unit in the form that unit takes it.
+
+<a id="notes"></a>
+
+## Config notes
+
+**File → Config Notes…** holds notes about the configuration, up to 16 KB of text: what it is for, who asked for it, what changed. They are saved in the file and printed by Config Summary. A CAN Triple 2.0 with firmware 2.0.3 or later keeps them with its configuration: **Send Configuration** writes them and **Get Configuration** reads them back, so a unit carries its own notes. Other units keep no notes; they stay in the file. A secure package carries none.
 
 ## What the file carries besides the configuration
 - The **target firmware** — the capacities the document is sized against and where they came from — once one has been chosen (see above). A document sized against the built-in numbers records nothing, and opens in an older version of the program exactly as it always did.

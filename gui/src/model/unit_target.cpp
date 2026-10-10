@@ -66,4 +66,10 @@ QString targetName(const DeviceCapacity &target)
                                   : target.label;
 }
 
+bool adoptsUnitTarget(const Configuration &config, const DeviceCapacity &unit, bool picked)
+{
+    return unit.plansTables() && !picked && config.filePath().isEmpty()
+           && !config.capacity().reported;
+}
+
 } // namespace ct

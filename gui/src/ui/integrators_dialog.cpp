@@ -591,7 +591,7 @@ void IntegratorsDialog::rebuild()
 
 void IntegratorsDialog::onAdd()
 {
-    const int limit = m_config->capacity().capacityOf(DeviceTable::Integrators);
+    const int limit = m_config->capacity().limitOf(DeviceTable::Integrators);
     if (m_rows.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
                              tr("The device supports at most %1 integrators.").arg(limit));
@@ -655,7 +655,7 @@ void IntegratorsDialog::updateButtons()
     m_upButton->setEnabled(hasSelection && row > 0);
     m_downButton->setEnabled(hasSelection && row >= 0 && row < m_rows.size() - 1);
     m_addButton->setEnabled(m_rows.size()
-                            < m_config->capacity().capacityOf(DeviceTable::Integrators));
+                            < m_config->capacity().limitOf(DeviceTable::Integrators));
 }
 
 } // namespace ct

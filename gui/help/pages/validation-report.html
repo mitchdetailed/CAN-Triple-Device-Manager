@@ -64,9 +64,11 @@ selected.</li>
 <li>A message relay that forwards to no bus.</li>
 <li>A Transmit CRC8 message with no CRC channel selected, or a CRC byte
 location outside the message; more Transmit CRC8 messages across the buses than
-the device runs — 20 CRC8 rules on a CAN Triple, 100 on a CAN Triple 2.0; a CRC8
+the device runs — 20 CRC8 rules on a CAN Triple, and on a CAN Triple 2.0 more
+CRC8 records than it holds (a record for each 8 elements of a recipe); a CRC8
 recipe using what only a CAN Triple 2.0 has (a byte past Byte 7, an ID (Whole)
-element or a Data Run) when the target is not one.</li>
+element, a Data Run, or more than 15 elements) when the target is not one, or
+more than 70 elements on any.</li>
 <li>A bus with a CAN FD data rate above 2&nbsp;Mbit/s (4M, 5M or 8M) when the
 target is not a CAN Triple 2.0.</li>
 <li>A calculation with no output channel, or an input set to "channel" with no
@@ -116,7 +118,10 @@ catalogue channels (removable via Remove Unused Channels…), the
 flash-wear note for preserved integrators (see
 <a href="integrators.html">Integrators</a>), and the "Device usage" capacity
 line, which reports how much of each device table the configuration
-occupies.</p>
+occupies. For a CAN Triple 2.0 a "Device budget" line follows it: what the
+configuration takes of the unit's configuration storage, working memory and
+room for names (see <a href="can-triple-2.html#room">How much it holds</a>),
+with an Error for each one it overruns.</p>
 
 <h2>Marked messages in the report</h2>
 

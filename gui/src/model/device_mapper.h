@@ -37,6 +37,23 @@ struct DeviceTables {
     QVector<QByteArray> messageLabels;
     QVector<QByteArray> signalLabels;
     QVector<QByteArray> relayLabels;
+    // What a CAN Triple 2.0 keeps beside the names (phase 4, step 3b).
+    // unitLabels: one per signal record, its channel's unit (UTF-8, up to
+    // LABEL_STORE_BYTES; empty for none). valueNameLabels: the configuration's
+    // value names, each a whole LABEL_KIND_VALUE_NAME slot (valueNameSlot), in
+    // record then value order. mapToDevice fills both for every target, like
+    // the names; a Send writes them only to a unit that keeps them
+    // (DeviceCapacity::keepsUnits / keepsValueNames). A Get fills them from
+    // CMD_READ_LABELS, and mapFromDevice gives the channels it rebuilds their
+    // units and value names from them.
+    QVector<QByteArray> unitLabels;
+    QVector<QByteArray> valueNameLabels;
+    // CONFIG NOTES: the document's notes (Configuration::comments) as the label
+    // store keeps them, LABEL_KIND_NOTE: UTF-8 in LABEL_STORE_BYTES slots, the
+    // last zero-padded, 16 KB at the most. Mapped for every target; a Send
+    // writes them only to a unit that keeps them (DeviceCapacity::keepsNotes),
+    // and a Get from one reads them back.
+    QVector<QByteArray> noteLabels;
     QVector<MathConfig> math;
     QVector<ConditionConfig> conditions;
     QVector<CounterConfig> counters; // firmware v3+
@@ -67,7 +84,16 @@ struct DeviceTables {
     // stamped), so a rule uploaded without ACTIVE would encode nothing —
     // except ambiguity on read-back, where !ACTIVE is the only way to tell a
     // zero-filled slot from a record (msg_idx 0 is a valid message index).
+    // On a target whose CRC8 records hold 8 elements (a CAN Triple 2.0 from its
+    // store v22, DeviceCapacity::crc8LongRules), a rule of more takes
+    // continuation records right after its own, flagged CRC8FLAG_CONTINUATION
+    // and not ACTIVE, each holding the next 8 (wire_structs.h, LONG RULES); a
+    // CRC8 table's count is records, not rules.
     QVector<Crc8Config> crc8;
+    // UDS requests (wire_structs.h, UDS REQUESTS; a CAN Triple 2.0 from its
+    // store v23): one record per UdsRequest section, naming its request and
+    // response messages in `messages`. Empty for any other target.
+    QVector<UdsConfig> uds;
     // v16: the four document-wide message passwords. Not a table - one record
     // that rides in the config header, like deviceChannels. Every marked message
     // names one of these by slot instead of carrying a key of its own.
@@ -97,6 +123,14 @@ struct DeviceTables {
     // put the same script back byte for byte. That direction needs no Lua, only
     // the verifier — see scriptImageFromChunks() below.
     QVector<ScriptChunk> scriptChunks;
+    // The STORED PROJECT (stored_project.h): on a Send, the bytes a CAN Triple
+    // 2.0 is to keep with this configuration, header and body, or empty for
+    // none, which leaves the unit with none; on a Get, what the unit held,
+    // header and (when the header checked out) body, or empty from a unit
+    // that keeps none. Never filled by the mapper: the document is not the
+    // tables, and only the Send command and the update window's restore store
+    // one. A sealed package never carries it.
+    QByteArray storedProject;
 };
 
 struct MappingResult {
@@ -124,6 +158,13 @@ struct MappingResult {
 // Document -> firmware tables.
 MappingResult mapToDevice(const Configuration &config);
 
+// A LABEL_KIND_VALUE_NAME slot (wire_structs.h ValueNameLabel; phase 4, step
+// 3b): the channel's record, the value, and the name clipped to VALUE_NAME_BYTES
+// without splitting a character. And back: false for a slot that names nothing
+// (its name empty).
+QByteArray valueNameSlot(int signal, qint32 value, const QString &name);
+bool readValueNameSlot(const QByteArray &slot, int *signal, qint32 *value, QString *name);
+
 // Firmware tables -> document (lossy; names come from signal labels).
 // Existing document content is replaced.
 // `busSetup` is the device's ControlCanPayload[3] when CMD_READ_CAN_SETUP
@@ -137,7 +178,8 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config,
 
 // Records per table, indexed by DeviceTable — the sizes a Send writes. A
 // sealed package records these in its policy so the unit can be checked
-// against a stream nobody but the device can read.
+// against a stream nobody but the device can read. Defined in plan_budget.cpp,
+// beside the arithmetic that sizes a plan from it (memoryUseOf).
 QVector<int> tableCountsOf(const DeviceTables &tables);
 
 // Which of these tables a unit of capacity `device` cannot hold, one sentence
@@ -160,7 +202,10 @@ QStringList tablesExceeding(const DeviceTables &tables, const DeviceCapacity &de
 // the form, from the unit on the cable. Sent in the document's form instead,
 // the other kind of unit refuses the first record after its CLEAR, which on a
 // CAN Triple erases the configuration in place. `device` is the unit's
-// capacity report, or builtIn() for firmware without one.
+// capacity report, or builtIn() for firmware without one. It carries one more
+// fact about the unit, whether it keeps a stored project
+// (DeviceCapacity::projectBytes), because that decides how long its CLEAR may
+// take.
 DeviceTables tablesForUnit(const DeviceTables &tables, const DeviceCapacity &device);
 
 // ---- The device script, as an image ---------------------------------------

@@ -29,6 +29,7 @@
 #include "../scripting/script_compiler.h"
 #include "../protocol/config_transfer.h"
 #include "../protocol/device_session.h"
+#include "../protocol/stored_project.h"
 #include "../model/user_paths.h"
 
 namespace ct {
@@ -247,6 +248,16 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
         else
             m_deviceHardware.reset();
     }
+    // And what it was built as: the product record, ungated like the board.
+    {
+        device_session::DeviceInfo info;
+        m_productRecordError.clear();
+        if (device_session::readDeviceInfo(m_link, &info, &m_productRecordError))
+            m_productRecord = info;
+        else
+            m_productRecord.reset();
+    }
+    m_readoutLevel = -1;
 
     QString error;
     m_statusValid = m_updater.readStatus(&m_status, &error, &m_slots);
@@ -279,6 +290,17 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
         if (device_session::readCapacity(m_link, &capacity, &capError) && capacity.reported)
             m_deviceCapacity = capacity;
     }
+    // Whether the chip's readout protection is on, so that a production image,
+    // which turns it on, can say so before it locks a unit that is still open.
+    // Ungated; firmware without the command leaves it unknown, and then nothing
+    // is said.
+    {
+        device_session::ReadoutProtection readout;
+        QString readoutError;
+        if (device_session::readReadoutProtection(m_link, &readout, &readoutError)
+            && readout.supported)
+            m_readoutLevel = readout.level;
+    }
 
     QStringList lines;
     if (m_deviceHardware) {
@@ -287,6 +309,11 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
         if (!revision.isEmpty())
             board += tr(" rev %1").arg(revision);
         lines << tr("Board: <b>%1</b>").arg(board.toHtmlEscaped());
+        if (m_productRecord && m_productRecord->supported)
+            lines << tr("Product record: <b>%1</b>")
+                         .arg(m_productRecord->product.isEmpty()
+                                  ? tr("blank")
+                                  : m_productRecord->product.toHtmlEscaped());
         if (m_deviceHardware->siliconMismatch()) {
             lines << tr("<span style='color:#c0392b'>Its processor (%1) is not the %2's — this "
                         "unit is running firmware built for another board.</span>")
@@ -306,6 +333,12 @@ void FirmwareUpdateDialog::refreshDeviceStatus()
     }
     lines << tr("Configuration format: v%1").arg(m_status.running_store_version);
     lines << tr("Largest image accepted: %1 KB").arg(m_status.staging_capacity / 1024);
+    if (m_readoutLevel >= 0) {
+        lines << tr("Readout protection: %1")
+                     .arg(m_readoutLevel == 0   ? tr("off")
+                          : m_readoutLevel == 1 ? tr("on")
+                                                : tr("on, permanently"));
+    }
     if (m_slots)
         lines << tr("Firmware kept on the unit: %1").arg(slotSummary(*m_slots).toHtmlEscaped());
 
@@ -413,6 +446,20 @@ bool FirmwareUpdateDialog::selectImage(const QString &path, QString *error)
     return true;
 }
 
+// The board a product record names: blank or "CAN Triple" the CAN Triple,
+// "CAN Triple V2" the CAN Triple 2.0 (what the manufacturing tool burns), and
+// nothing for a product this build does not know. Spacing and case are
+// forgiven; nothing else is.
+std::optional<BoardFamily> FirmwareUpdateDialog::productRecordFamily(const QString &product)
+{
+    const QString name = product.simplified();
+    if (name.isEmpty() || name.compare(QStringLiteral("CAN Triple"), Qt::CaseInsensitive) == 0)
+        return BoardFamily::CanTriple;
+    if (name.compare(QStringLiteral("CAN Triple V2"), Qt::CaseInsensitive) == 0)
+        return BoardFamily::CanTriple2;
+    return std::nullopt;
+}
+
 void FirmwareUpdateDialog::updateReadiness()
 {
     QStringList warnings;
@@ -443,6 +490,60 @@ void FirmwareUpdateDialog::updateReadiness()
         warnings << tr("Which board this unit is could not be read: %1")
                         .arg(m_hardwareError.toHtmlEscaped());
         blocked = true;
+    }
+
+    // The product record is the authority on what the unit IS (Mitch,
+    // 2026-10-09): it was burned at manufacture and no firmware can change it,
+    // where the board report comes from whatever firmware happens to be
+    // running. A blank record or "CAN Triple" is a CAN Triple and takes 1.x
+    // firmware only; "CAN Triple V2" is a CAN Triple 2.0 and takes 2.0
+    // firmware only; a product this build does not know is refused by name.
+    // The record and the board report have to agree, and a CAN Triple 2.0
+    // that cannot show its record is not updated at all. A CAN Triple on
+    // firmware without the command is taken for what its board report says.
+    if (m_productRecord && m_productRecord->supported) {
+        const QString record = m_productRecord->product;
+        const QString recordText = record.isEmpty() ? tr("blank") : QStringLiteral("\"%1\"")
+                                                                          .arg(record.toHtmlEscaped());
+        const std::optional<BoardFamily> family = productRecordFamily(record);
+        if (!family) {
+            warnings << tr("This unit's product record says %1, which this version of the "
+                           "Device Manager does not know: it updates units whose record is "
+                           "blank or \"CAN Triple\" (a CAN Triple) and units whose record is "
+                           "\"CAN Triple V2\" (a CAN Triple 2.0). Update the Device Manager.")
+                            .arg(recordText);
+            blocked = true;
+        } else {
+            if (m_deviceHardware
+                && (m_deviceHardware->family == BoardFamily::CanTriple
+                    || m_deviceHardware->family == BoardFamily::CanTriple2)
+                && m_deviceHardware->family != *family) {
+                warnings << tr("This unit reports itself as a %1, but its product record "
+                               "says it is a %2 (%3). It is not updated until the two agree.")
+                                .arg(m_deviceHardware->familyName().toHtmlEscaped(),
+                                     boardFamilyName(*family).toHtmlEscaped(), recordText);
+                blocked = true;
+            }
+            if (m_image && m_image->family() != *family) {
+                warnings << tr("This image is firmware for the %1, but this unit's product "
+                               "record says it is a %2 (%3).")
+                                .arg(boardFamilyName(m_image->family()).toHtmlEscaped(),
+                                     boardFamilyName(*family).toHtmlEscaped(), recordText);
+                blocked = true;
+            }
+        }
+    } else if (m_statusValid) {
+        if (m_productRecord) { // firmware without the command
+            if (m_deviceHardware && m_deviceHardware->family == BoardFamily::CanTriple2) {
+                warnings << tr("This unit reports itself as a CAN Triple 2.0 but cannot show "
+                               "its product record. It is not updated.");
+                blocked = true;
+            }
+        } else if (!m_productRecordError.isEmpty()) {
+            warnings << tr("This unit's product record could not be read: %1")
+                            .arg(m_productRecordError.toHtmlEscaped());
+            blocked = true;
+        }
     }
 
     if (!m_statusValid) {
@@ -488,6 +589,21 @@ void FirmwareUpdateDialog::updateReadiness()
                                  "the device afterwards.");
         }
 
+        // A production image turns the unit's readout protection on the first
+        // time it starts. On a unit that is already protected, every unit a
+        // customer has, that changes nothing; on an open one, a bench unit on a
+        // development build, it is a lock only a complete erase undoes, so it
+        // is said before it happens. Not a reason to refuse: shipping units
+        // protected is what the production build is for.
+        if (imageLocksThisUnit()) {
+            warnings << tr("<b>This is a production build.</b> The first time it starts, it "
+                           "turns on this unit's readout protection, which is off now. After "
+                           "that the unit cannot be read or programmed through its debug "
+                           "connector without erasing it completely, licence and "
+                           "configuration included. Updates through the Device Manager carry "
+                           "on as before.");
+        }
+
         const int cmp = m_image->compareVersion(m_status.running_major, m_status.running_minor,
                                                 m_status.running_patch);
         if (cmp < 0) {
@@ -514,6 +630,12 @@ void FirmwareUpdateDialog::updateReadiness()
     }
 
     m_updateButton->setEnabled(m_image.has_value() && !blocked);
+}
+
+bool FirmwareUpdateDialog::imageLocksThisUnit() const
+{
+    return m_readoutLevel == 0 && m_image && m_image->capacity()
+           && m_image->capacity()->productionBuild();
 }
 
 QStringList FirmwareUpdateDialog::layoutChanges() const
@@ -549,6 +671,8 @@ void FirmwareUpdateDialog::setBusy(bool busy)
 bool FirmwareUpdateDialog::backupConfiguration(QString *savedPath, QString *error)
 {
     say(tr("Reading the device's configuration…"));
+    m_backupIsProject = false;
+    m_backupProjectFile.clear();
 
     // ConfigTransfer is asynchronous; run it to completion inside a nested loop
     // so this whole procedure stays readable top to bottom.
@@ -624,10 +748,29 @@ bool FirmwareUpdateDialog::backupConfiguration(QString *savedPath, QString *erro
         return true;
     }
 
+    // A CAN Triple 2.0 that kept the project its configuration was sent with,
+    // and still runs exactly that (the fingerprint): the project IS the backup.
+    // It is the user's own document, script source and comments included, and
+    // the restore below sends it and stores it again, so an update that clears
+    // the configuration does not take the project with it. Otherwise the
+    // configuration is rebuilt from the records, as it always was.
     Configuration backup;
-    mapFromDevice(tables, backup, nullptr, busSetup);
-    if (!deviceName.isEmpty()) {
-        backup.setConfigTitle(deviceName);
+    bool fromProject = false;
+    {
+        StoredProjectHeader stored;
+        QByteArray body;
+        if (openStoredProject(tables.storedProject, &stored, &body) == StoredProjectState::Valid
+            && stored.fingerprint == ConfigTransfer::configurationFingerprint(tables)
+            && backup.loadProjectBody(body, nullptr)) {
+            fromProject = true;
+            m_backupProjectFile = stored.fileName;
+        }
+    }
+    if (!fromProject) {
+        mapFromDevice(tables, backup, nullptr, busSetup);
+        if (!deviceName.isEmpty()) {
+            backup.setConfigTitle(deviceName);
+        }
     }
 
     // Prove the folder before trusting it with the file. mkpath's answer was
@@ -649,7 +792,11 @@ bool FirmwareUpdateDialog::backupConfiguration(QString *savedPath, QString *erro
     }
 
     const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
-    const QString path = QStringLiteral("%1/device-config-%2.ct3").arg(backupDirectory(), stamp);
+    const QString path = QStringLiteral("%1/%2-%3.ct3")
+                             .arg(backupDirectory(),
+                                  fromProject ? QStringLiteral("device-project")
+                                              : QStringLiteral("device-config"),
+                                  stamp);
 
     QString saveError;
     if (!backup.saveToFile(path, &saveError)) {
@@ -659,6 +806,7 @@ bool FirmwareUpdateDialog::backupConfiguration(QString *savedPath, QString *erro
     }
 
     *savedPath = path;
+    m_backupIsProject = fromProject;
     return true;
 }
 
@@ -806,12 +954,24 @@ void FirmwareUpdateDialog::offerConfigurationRestore(const QString &backupPath)
         busSetups.append(setup);
     }
 
+    // A backup that was the unit's own project goes back with the
+    // configuration and is stored again, as the Send command would store it.
+    DeviceTables restoreTables = tablesForUnit(mapped.tables, capacity);
+    if (m_backupIsProject && capacity.keepsProject()) {
+        StoredProjectHeader header;
+        header.sentMs = QDateTime::currentMSecsSinceEpoch();
+        header.writer = QCoreApplication::applicationVersion();
+        header.fileName = m_backupProjectFile;
+        restoreTables.storedProject = buildStoredProject(restored.projectBody(), header);
+    }
+    const bool projectRestored = !restoreTables.storedProject.isEmpty();
+
     say(tr("Restoring configuration…"));
     QEventLoop loop;
     bool ok = false;
     QString sendError;
     auto *transfer = ConfigTransfer::send(
-        m_link, tablesForUnit(mapped.tables, capacity), /*verify=*/true, busSetups,
+        m_link, restoreTables, /*verify=*/true, busSetups,
         /*saveToFlash=*/true,
         // nullopt: restoring what the unit already ran is not a release, so the
         // version it was running stays exactly as it was.
@@ -831,8 +991,11 @@ void FirmwareUpdateDialog::offerConfigurationRestore(const QString &backupPath)
     loop.exec();
 
     if (ok) {
-        QMessageBox::information(this, tr("Restore Configuration"),
-                                 tr("The configuration was restored and saved to the device."));
+        QMessageBox::information(
+            this, tr("Restore Configuration"),
+            projectRestored ? tr("The configuration was restored and saved to the device, and "
+                                 "the project it was sent with is stored on it again.")
+                            : tr("The configuration was restored and saved to the device."));
     } else {
         QMessageBox::warning(
             this, tr("Restore Configuration"),
@@ -861,6 +1024,10 @@ void FirmwareUpdateDialog::onUpdate()
     }
     if (formatChanges) {
         confirm += tr("\n\nThe device's stored configuration WILL be cleared by this update.");
+    }
+    if (imageLocksThisUnit()) {
+        confirm += tr("\n\nThis is a production build: it turns this unit's readout protection "
+                      "on when it first starts, and only a complete erase turns it off again.");
     }
     if (!m_backupCheck->isChecked()) {
         confirm += tr("\n\nNo backup will be taken.");

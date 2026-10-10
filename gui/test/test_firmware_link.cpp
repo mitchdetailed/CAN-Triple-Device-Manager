@@ -9397,6 +9397,82 @@ static void testBuilderPackageEndToEnd(const SerialProtoCallbacks *restore)
         CHECK(sameTables(got, reference)); // untouched
     }
 
+    // ---- 6b. a package carries no Config Notes ----------------------------------
+    // They are the author's (File > Config Notes), and a package is for a
+    // configuration someone may install without reading. Built for a CAN Triple
+    // 2.0 that keeps notes, its stream writes no note and its plan declares none.
+    {
+        ct::Configuration noted;
+        fillTransferFixture(noted);
+        noted.setConfigTitle(QStringLiteral("Noted"));
+        ct::DeviceCapacity cap20 = ct::DeviceCapacity::builtIn();
+        cap20.labelBytes = ct::LABEL_STORE_BYTES;
+        cap20.labelFlags =
+            ct::LABEL_FLAG_UNITS | ct::LABEL_FLAG_VALUE_NAMES | ct::LABEL_FLAG_NOTES;
+        cap20.reported = true;
+        noted.setCapacity(cap20);
+        noted.comments = QStringLiteral("Author's notes, not for the customer.");
+        CHECK(cap20.keepsNotes() && !ct::mapToDevice(noted).tables.noteLabels.isEmpty());
+        const QString notedPath = dir.filePath(QStringLiteral("noted.ct3"));
+        CHECK(noted.saveToFile(notedPath, &err));
+        ct::PackageBuildRequest req;
+        req.sourcePath = notedPath;
+        req.outputPath = dir.filePath(QStringLiteral("noted.ct3s"));
+        req.fleetPassphrase = passphrase;
+        req.includeEditable = false;
+        const ct::PackageBuildResult built = ct::buildSecurePackage(req);
+        CHECK(built.ok);
+        ct::SecureFileInfo info;
+        CHECK(ct::readSecureInstall(req.outputPath, &info, &err));
+        const QList<QByteArray> inner = innerFrames(info.installStream);
+        CHECK(inner.size() == built.frameCount && inner.size() > 3);
+        bool names = false, notes = false;
+        for (const QByteArray &f : inner) {
+            const bool labels = quint8(f[0]) == ct::CMD_WRITE_LABELS && f.size() > 5;
+            names = names || (labels && quint8(f[1]) == ct::LABEL_KIND_MESSAGE);
+            notes = notes || (labels && quint8(f[1]) == ct::LABEL_KIND_NOTE)
+                    || f.contains(QByteArrayLiteral("not for the customer"));
+        }
+        CHECK(names && !notes);
+    }
+
+    // ---- 6c. a package that sends CAN FD without the bit rate switch ----------
+    // says so in its policy (fdWithoutBrs), so the verdict can hold a unit whose
+    // firmware would switch regardless to it; one that does not, does not.
+    {
+        ct::Configuration fdCfg;
+        fillTransferFixture(fdCfg);
+        fdCfg.setConfigTitle(QStringLiteral("FD without BRS"));
+        ct::DeviceCapacity cap20 = ct::DeviceCapacity::builtIn();
+        cap20.canFeatures |= ct::CAPACITY_CAN_BRS_PER_MESSAGE;
+        cap20.reported = true; // a chosen target, which the file keeps
+        fdCfg.setCapacity(cap20);
+        fdCfg.bus[0].dataRateKbps = 2000;
+        ct::CommsSection tx;
+        tx.name = QStringLiteral("FD out");
+        tx.device = ct::SectionDevice::TransmitMessage;
+        tx.baseAddress = 0x6F0;
+        tx.fd = true;
+        tx.brs = false;
+        tx.messageLengthBytes = 16;
+        fdCfg.bus[0].sections.append(tx);
+        const auto built = [&](bool brs) {
+            fdCfg.bus[0].sections.last().brs = brs;
+            const QString src = dir.filePath(QStringLiteral("fd-brs.ct3"));
+            CHECK(fdCfg.saveToFile(src, &err));
+            ct::PackageBuildRequest req;
+            req.sourcePath = src;
+            req.outputPath = dir.filePath(QStringLiteral("fd-brs.ct3s"));
+            req.fleetPassphrase = passphrase;
+            CHECK(ct::buildSecurePackage(req).ok);
+            ct::SecureFileInfo info;
+            CHECK(ct::readSecureInstall(req.outputPath, &info, &err));
+            return info.policy.fdWithoutBrs;
+        };
+        CHECK(built(false));
+        CHECK(!built(true));
+    }
+
     // ---- refusals ------------------------------------------------------------
     // A hardware match naming another unit stops before the device is touched.
     {
@@ -9517,7 +9593,11 @@ static void testCapacityReport(const SerialProtoCallbacks *restore)
 {
     CHECK(ct::CMD_GET_CAPACITY == fw::kCmdGetCapacity);
     CHECK(ct::CAPACITY_REPORT_FORMAT == fw::kCapacityReportFormat);
-    CHECK(ct::DEVICE_TABLE_COUNT == fw::kFlashNumTables);
+    // The 1.x firmware's tables are the first DEVICE_TABLE_COUNT_1X of the
+    // DEVICE_TABLE_COUNT this build understands; the sixteenth is the 2.0's
+    // UDS requests, which test_firmware_v2 holds to the 2.0 firmware.
+    CHECK(ct::DEVICE_TABLE_COUNT_1X == fw::kFlashNumTables);
+    CHECK(ct::DEVICE_TABLE_COUNT > fw::kFlashNumTables);
     static_assert(sizeof(ct::CapacityReportHeader) == sizeof(::CapacityReportHeader),
                   "GUI and firmware capacity report headers differ in size");
     static_assert(sizeof(ct::CapacityEntry) == sizeof(::CapacityEntry),

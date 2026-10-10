@@ -1,8 +1,13 @@
 #include "config_transfer.h"
 
+#include <QCryptographicHash>
 #include <QPointer>
+#include <QtEndian>
 
+#include <algorithm>
 #include <cstring>
+
+#include "stored_project.h"
 
 namespace ct {
 
@@ -20,14 +25,20 @@ QByteArray rangeHeader(quint16 start, quint16 count)
 
 // The bytes of a record a unit takes: all of it, or, on a CAN Triple 2.0 whose
 // names are in its label store, the message, signal and relay records without
-// their label fields (V2_* in wire_structs.h) — one run of the 1.x struct.
+// their label fields (V2_* in wire_structs.h) — one run of the 1.x struct; and
+// on one whose CRC8 records hold 8 elements (store v22, crc8Short), the CRC8
+// record's fields and first 8 element types, then its first 8 element values —
+// two runs.
 struct Slice {
     int at;
     int bytes;
+    int at2 = 0;
+    int bytes2 = 0;
+    int total() const { return bytes + bytes2; }
 };
 
 template <typename T>
-Slice sliceFor(bool labelsApart)
+Slice sliceFor(bool labelsApart, bool crc8Short = false)
 {
     if (labelsApart) {
         if constexpr (std::is_same_v<T, CanMessageConfig>)
@@ -37,6 +48,9 @@ Slice sliceFor(bool labelsApart)
         if constexpr (std::is_same_v<T, RelayConfig>)
             return {V2_RELAY_AT, V2_RELAY_BYTES};
     }
+    if constexpr (std::is_same_v<T, Crc8Config>)
+        if (crc8Short)
+            return {V2_CRC8_AT, V2_CRC8_BYTES, V2_CRC8_VALUES_AT, V2_CRC8_VALUES_BYTES};
     return {0, int(sizeof(T))};
 }
 
@@ -46,11 +60,14 @@ QByteArray writePayload(quint16 start, const QVector<T> &items, int from, int co
 {
     QByteArray b = rangeHeader(start, quint16(count));
     const int oldSize = b.size();
-    b.resize(oldSize + count * slice.bytes);
-    for (int i = 0; i < count; ++i)
-        std::memcpy(b.data() + oldSize + i * slice.bytes,
-                    reinterpret_cast<const char *>(items.constData() + from + i) + slice.at,
-                    size_t(slice.bytes));
+    b.resize(oldSize + count * slice.total());
+    for (int i = 0; i < count; ++i) {
+        const char *item = reinterpret_cast<const char *>(items.constData() + from + i);
+        char *out = b.data() + oldSize + i * slice.total();
+        std::memcpy(out, item + slice.at, size_t(slice.bytes));
+        if (slice.bytes2)
+            std::memcpy(out + slice.bytes, item + slice.at2, size_t(slice.bytes2));
+    }
     return b;
 }
 
@@ -69,12 +86,15 @@ bool appendItems(QVector<T> &dst, const QByteArray &payload, Slice slice = {0, i
     std::memcpy(&count, payload.constData() + 2, 2);
     if (start != dst.size())
         return false;
-    const int available = (payload.size() - 4) / slice.bytes;
+    const int available = (payload.size() - 4) / slice.total();
     const int n = qMin<int>(count, available);
     for (int i = 0; i < n; ++i) {
         T item{};
-        std::memcpy(reinterpret_cast<char *>(&item) + slice.at,
-                    payload.constData() + 4 + i * slice.bytes, size_t(slice.bytes));
+        const char *in = payload.constData() + 4 + i * slice.total();
+        std::memcpy(reinterpret_cast<char *>(&item) + slice.at, in, size_t(slice.bytes));
+        if (slice.bytes2)
+            std::memcpy(reinterpret_cast<char *>(&item) + slice.at2, in + slice.bytes,
+                        size_t(slice.bytes2));
         dst.append(item);
     }
     return true;
@@ -104,6 +124,33 @@ QByteArray labelReadRequest(quint8 kind, int start, int count)
     return labelPayload(kind, start, {}, 0).left(3)
            + QByteArray(1, char(count & 0xFF)) + QByteArray(1, char((count >> 8) & 0xFF));
 }
+
+// The stored project's commands: a write is u32 offset then the bytes; a read
+// asks for u32 offset, u16 count, and its reply repeats those six bytes before
+// the bytes, so a verify's expected reply is the request and then what was
+// written there.
+QByteArray projectRequest(int offset, int count)
+{
+    QByteArray b(6, '\0');
+    qToLittleEndian<quint32>(quint32(offset), b.data());
+    qToLittleEndian<quint16>(quint16(count), b.data() + 4);
+    return b;
+}
+
+QByteArray projectWritePayload(int offset, const QByteArray &bytes)
+{
+    QByteArray b(4, '\0');
+    qToLittleEndian<quint32>(quint32(offset), b.data());
+    return b + bytes;
+}
+
+// A CLEAR on a unit that keeps a project can also have to erase the project a
+// Send left beside the half it is about to write: about 2.8 s for a whole
+// megabyte with the staged copy, measured on board 2, when the unit's own
+// background erase has not done it first (a CLEAR straight behind a SAVE, a
+// Send restarted after one abandoned part way through its project). The flash
+// timeout is 4 s, close enough to that for a slow part to retransmit the CLEAR.
+constexpr int kProjectClearTimeoutMs = 15000;
 
 // A label field's name, as far as its NUL.
 QByteArray fieldName(const char *field, int size)
@@ -156,6 +203,82 @@ static_assert(4 + kReadChunkCrc8 * int(sizeof(Crc8Config)) <= 2030,
               "CRC8 read chunk must fit the response cap");
 static_assert(4 + kWriteChunkCrc8 * int(sizeof(Crc8Config)) <= MAX_TX_PAYLOAD,
               "CRC8 write chunk must fit the payload cap");
+// UDS request records (the 2.0's store v23), 82 bytes each.
+constexpr int kWriteChunkUds = 6;
+constexpr int kReadChunkUds = 24;
+static_assert(4 + kReadChunkUds * int(sizeof(UdsConfig)) <= 2030,
+              "UDS read chunk must fit the response cap");
+static_assert(4 + kWriteChunkUds * int(sizeof(UdsConfig)) <= MAX_TX_PAYLOAD,
+              "UDS write chunk must fit the payload cap");
+
+// CMD_STAGE_PLAN's declaration: the format, the unit's table count, and the
+// records each table of this Send holds, in DeviceTable order, the paired
+// tables made to agree (planCapacities) — exactly the plan the fit check
+// judged. A table this build does not know is declared empty; the count is
+// the unit's (its report's ceilings, one per table), because the unit refuses
+// any other.
+QByteArray stagePlanPayload(const DeviceTables &tables)
+{
+    const QVector<int> plan = planCapacities(tableCountsOf(tables));
+    const int count = int(tables.capacity.plan.ceiling.size());
+    QByteArray b;
+    b.append(char(STAGE_PLAN_FORMAT));
+    b.append(char(count));
+    for (int t = 0; t < count; ++t) {
+        const quint16 c = quint16(qBound(0, plan.value(t), 0xFFFF));
+        b.append(char(c & 0xFF));
+        b.append(char(c >> 8));
+    }
+    // Phase 4, step 3b: the value names the Send's names take, on a unit that
+    // keeps them; none is the same as leaving it out.
+    if (tables.capacity.keepsValueNames()) {
+        const quint16 v = quint16(qBound(0, int(tables.valueNameLabels.size()), 0xFFFF));
+        b.append(char(v & 0xFF));
+        b.append(char(v >> 8));
+    }
+    // Config Notes: the notes' slots after them, on a unit that keeps notes,
+    // and only when there are some — a plan that stops before them declares
+    // none, which is also what a 2.0 from before notes reads.
+    if (tables.capacity.keepsNotes() && !tables.noteLabels.isEmpty()) {
+        const quint16 n =
+            quint16(qBound(0, int(tables.noteLabels.size()), LABEL_NOTE_SLOTS_MAX));
+        b.append(char(n & 0xFF));
+        b.append(char(n >> 8));
+    }
+    return b;
+}
+
+// CMD_GET_USAGE's reply: a UsageReportHeader, then table_count UsageEntry. The
+// records each table of the running configuration holds, by DeviceTable — a
+// Send's highest index written, plus one, so every record is below it — or
+// false for a reply this build cannot read. Then (phase 4, step 3b) its names'
+// kinds: `labelSlots` gets a slot count for each kind the running
+// configuration has, and stays empty for a reply that stops at the entries.
+bool usageRanges(const QByteArray &payload, QVector<int> *ranges, QVector<int> *labelSlots = nullptr)
+{
+    constexpr int kHeader = int(sizeof(UsageReportHeader));
+    constexpr int kEntry = int(sizeof(UsageEntry));
+    if (payload.size() < kHeader || quint8(payload[0]) != USAGE_REPORT_FORMAT)
+        return false;
+    const int count = quint8(payload[1]);
+    if (payload.size() < kHeader + count * kEntry)
+        return false;
+    ranges->fill(0, DEVICE_TABLE_COUNT);
+    for (int t = 0; t < qMin(count, DEVICE_TABLE_COUNT); ++t) {
+        const char *e = payload.constData() + kHeader + t * kEntry;
+        const int capacity = qFromLittleEndian<quint16>(e);
+        const int used = qFromLittleEndian<quint16>(e + 2);
+        (*ranges)[t] = qMin(used, capacity);
+    }
+    if (labelSlots) {
+        labelSlots->clear();
+        const int at = kHeader + count * kEntry;
+        const int kinds = payload.size() >= at + 2 ? quint8(payload[at]) : 0;
+        for (int k = 0; k < qMin(kinds, int(LABEL_KIND_COUNT)) && payload.size() >= at + 4 + 2 * k; ++k)
+            labelSlots->append(qFromLittleEndian<quint16>(payload.constData() + at + 2 + 2 * k));
+    }
+    return true;
+}
 
 // The one sentence both routes to an abandoned read-back report, so a device
 // known to guard Get before the transfer started and one that only said so when
@@ -222,7 +345,12 @@ QList<PlannedFrame> ConfigTransfer::planInstallFrames(const DeviceTables &tables
     // parent, and no runNext() is ever queued.
     ConfigTransfer t(nullptr, nullptr);
     t.m_payloadBudget = qBound(64, payloadBudget, int(MAX_TX_PAYLOAD));
-    t.buildSendSteps(tables, /*verify=*/false, busSetups, /*saveToFlash=*/true, configVersion,
+    // A sealed package never stores a project: it is installed by someone who
+    // may not read the configuration, so it must not leave a readable document
+    // on the unit either.
+    DeviceTables sealed = tables;
+    sealed.storedProject.clear();
+    t.buildSendSteps(sealed, /*verify=*/false, busSetups, /*saveToFlash=*/true, configVersion,
                      configName, /*resetAfter=*/false);
     QList<PlannedFrame> out;
     for (const Step &s : t.m_steps) {
@@ -232,7 +360,7 @@ QList<PlannedFrame> ConfigTransfer::planInstallFrames(const DeviceTables &tables
         f.cmd = s.cmd;
         f.payload = s.payload;
         f.stage = s.stage;
-        f.flashTimeout = s.timeoutMs == DeviceLink::kFlashTimeoutMs;
+        f.flashTimeout = s.timeoutMs >= DeviceLink::kFlashTimeoutMs;
         out.append(f);
     }
     return out;
@@ -254,9 +382,13 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
     settleLabels(tables.messages, tables.messageLabels);
     settleLabels(tables.signalConfigs, tables.signalLabels);
     settleLabels(tables.relays, tables.relayLabels);
+    tables.unitLabels.resize(tables.signalConfigs.size()); // a unit a slot, as the unit has
     // A CAN Triple 2.0 that keeps its names in its label store: the three
     // labelled records go without their labels, and the names follow them.
     const bool labelsApart = tables.capacity.labelsApart();
+    // And one whose CRC8 records hold 8 elements (store v22) takes the 2.0's
+    // record, two runs of ours.
+    const bool crc8Short = tables.capacity.crc8LongRules();
     Step ping;
     ping.cmd = CMD_GET_STATUS;
     ping.stage = QStringLiteral("Checking device");
@@ -277,7 +409,26 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
     // erase is reason enough on its own. A flash operation gets the flash
     // timeout, same as SAVE_TO_FLASH below.
     clear.timeoutMs = DeviceLink::kFlashTimeoutMs;
+    if (tables.capacity.keepsProject())
+        clear.timeoutMs = kProjectClearTimeoutMs; // see kProjectClearTimeoutMs
     m_steps.append(clear);
+
+    // THE PLAN, on a unit that takes one (a CAN Triple 2.0 from phase 4): how
+    // many records each table of this Send holds, declared before anything else
+    // is written, so the unit lays its tables out at exactly these sizes rather
+    // than at its report's default plan, and pays for nothing more. A unit
+    // that does not take one gets no such step — a 1.x would refuse it after
+    // its CLEAR — and lays the Send out with its default plan, which the fit
+    // check (tablesExceeding) held these tables to. One whose tables do not fit
+    // answers ERR_NO_ROOM here, and its running configuration is untouched: the
+    // 2.0 stages a Send beside it.
+    if (tables.capacity.plansTables()) {
+        Step plan;
+        plan.cmd = CMD_STAGE_PLAN;
+        plan.payload = stagePlanPayload(tables);
+        plan.stage = QStringLiteral("Declaring the configuration's tables");
+        m_steps.append(plan);
+    }
 
     // Configuration name (CLEAR resets it on the device, so this comes after).
     // Old firmware NACKs the command — tolerated, the name just isn't stored.
@@ -309,9 +460,9 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
         using Item = std::decay_t<decltype(items[0])>;
         // A record sent without its label is smaller than the chunk constant
         // was sized for: as many as the payload holds.
-        const Slice slice = sliceFor<Item>(labelsApart);
-        const int fit = (m_payloadBudget - 4) / slice.bytes;
-        chunk = qMax(1, slice.bytes < int(sizeof(Item)) ? fit : qMin(chunk, fit));
+        const Slice slice = sliceFor<Item>(labelsApart, crc8Short);
+        const int fit = (m_payloadBudget - 4) / slice.total();
+        chunk = qMax(1, slice.total() < int(sizeof(Item)) ? fit : qMin(chunk, fit));
         for (int i = 0; i < items.size(); i += chunk) {
             const int count = qMin(chunk, int(items.size()) - i);
             Step s;
@@ -346,14 +497,25 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
             Step s;
             s.cmd = CMD_WRITE_LABELS;
             s.payload = labelPayload(kind, i, labels, count);
-            s.stage = QStringLiteral("Sending %1 names (%2/%3)").arg(what).arg(i + count).arg(labels.size());
+            s.stage = QStringLiteral("Sending %1 (%2/%3)").arg(what).arg(i + count).arg(labels.size());
             m_steps.append(s);
         }
     };
     if (labelsApart) {
-        addLabelWrites(LABEL_KIND_MESSAGE, tables.messageLabels, QStringLiteral("message"));
-        addLabelWrites(LABEL_KIND_SIGNAL, tables.signalLabels, QStringLiteral("channel"));
-        addLabelWrites(LABEL_KIND_RELAY, tables.relayLabels, QStringLiteral("relay"));
+        addLabelWrites(LABEL_KIND_MESSAGE, tables.messageLabels, QStringLiteral("message names"));
+        addLabelWrites(LABEL_KIND_SIGNAL, tables.signalLabels, QStringLiteral("channel names"));
+        addLabelWrites(LABEL_KIND_RELAY, tables.relayLabels, QStringLiteral("relay names"));
+        // Phase 4, step 3b: each channel's unit and the value names, to a unit
+        // that keeps them beside the names. The value names are as many as the
+        // plan declared (stagePlanPayload).
+        if (tables.capacity.keepsUnits())
+            addLabelWrites(LABEL_KIND_UNIT, tables.unitLabels, QStringLiteral("channel units"));
+        if (tables.capacity.keepsValueNames())
+            addLabelWrites(LABEL_KIND_VALUE_NAME, tables.valueNameLabels,
+                           QStringLiteral("value names"));
+        // Config Notes, as many slots as the plan declared.
+        if (tables.capacity.keepsNotes())
+            addLabelWrites(LABEL_KIND_NOTE, tables.noteLabels, QStringLiteral("notes"));
     }
     // OUTPUTS BEFORE DEFINITIONS, deliberately. The engine keeps evaluating
     // while the upload streams in, and the Def record is the one carrying
@@ -389,6 +551,9 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
     // units up front (EXPECTED_STORE_VERSION) instead of part-writing them.
     addWrites(CMD_WRITE_CRC8_CFG, tables.crc8, kWriteChunkCrc8,
               QStringLiteral("CRC8 rules"));
+    // UDS requests (store v23): mapped only for a target that makes them, so
+    // nothing is sent to a unit without the table.
+    addWrites(CMD_WRITE_UDS_CFG, tables.uds, kWriteChunkUds, QStringLiteral("UDS requests"));
     // The compiled device script. Unlike the tables above there is no torn-state
     // window to design around: the firmware adopts a script only in
     // engine_load_script(), which runs on config LOAD, so a half-uploaded image
@@ -463,6 +628,46 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
         m_steps.append(s);
     }
 
+    // THE STORED PROJECT (stored_project.h), last of the writes: its body, then
+    // its header, stamped here with the fingerprint of exactly the tables
+    // above, so it describes what this Send wrote whatever the caller worked
+    // out. Header last, because a Send that stops part way through leaves a
+    // copy with no header, which a Get reads as no project at all. Required
+    // steps, not optional ones: a project that did not go in fails the Send
+    // before its SAVE, and a CAN Triple 2.0 keeps running what it had.
+    QByteArray project;
+    if (!tables.storedProject.isEmpty()) {
+        StoredProjectHeader header;
+        if (parseStoredProjectHeader(tables.storedProject, &header) != StoredProjectState::Valid
+            || tables.storedProject.size()
+                   != kStoredProjectHeaderBytes + qsizetype(header.bodyBytes)) {
+            m_buildFault = QStringLiteral("Internal error: the project to store on the unit is "
+                                          "not one this Manager made.");
+        } else {
+            header.fingerprint = configurationFingerprint(tables);
+            project = buildStoredProjectHeader(header)
+                      + tables.storedProject.mid(kStoredProjectHeaderBytes);
+            const int chunk = m_payloadBudget - 4;
+            const int total = int(project.size());
+            const QString kb = QString::number((total + 1023) / 1024);
+            for (int at = kStoredProjectHeaderBytes; at < total; at += chunk) {
+                const int count = qMin(chunk, total - at);
+                Step s;
+                s.cmd = CMD_WRITE_PROJECT;
+                s.payload = projectWritePayload(at, project.mid(at, count));
+                s.stage = QStringLiteral("Storing the project (%1/%2 KB)")
+                              .arg((at + count + 1023) / 1024)
+                              .arg(kb);
+                m_steps.append(s);
+            }
+            Step head;
+            head.cmd = CMD_WRITE_PROJECT;
+            head.payload = projectWritePayload(0, project.left(kStoredProjectHeaderBytes));
+            head.stage = QStringLiteral("Storing the project (%1/%1 KB)").arg(kb);
+            m_steps.append(head);
+        }
+    }
+
     // The read-back phase. It has to stay one unbroken run of isVerify steps
     // with the commit behind it, because runNext() abandons the phase by walking
     // forward over consecutive isVerify steps until it reaches the next thing —
@@ -472,7 +677,7 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
         auto addVerify = [&](quint8 cmd, auto const &items, int chunk, const QString &what,
                              bool skipIfUnsupported = false) {
             using Item = std::decay_t<decltype(items[0])>;
-            const Slice slice = sliceFor<Item>(labelsApart);
+            const Slice slice = sliceFor<Item>(labelsApart, crc8Short);
             for (int i = 0; i < items.size(); i += chunk) {
                 const int count = qMin(chunk, int(items.size()) - i);
                 Step s;
@@ -509,15 +714,22 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
                     Step s;
                     s.cmd = CMD_READ_LABELS;
                     s.payload = labelReadRequest(kind, i, count);
-                    s.stage = QStringLiteral("Verifying %1 names").arg(what);
+                    s.stage = QStringLiteral("Verifying %1").arg(what);
                     s.expectedEcho = labelPayload(kind, i, labels, count);
                     s.isVerify = true;
                     m_steps.append(s);
                 }
             };
-            addLabelVerify(LABEL_KIND_MESSAGE, tables.messageLabels, QStringLiteral("message"));
-            addLabelVerify(LABEL_KIND_SIGNAL, tables.signalLabels, QStringLiteral("channel"));
-            addLabelVerify(LABEL_KIND_RELAY, tables.relayLabels, QStringLiteral("relay"));
+            addLabelVerify(LABEL_KIND_MESSAGE, tables.messageLabels, QStringLiteral("message names"));
+            addLabelVerify(LABEL_KIND_SIGNAL, tables.signalLabels, QStringLiteral("channel names"));
+            addLabelVerify(LABEL_KIND_RELAY, tables.relayLabels, QStringLiteral("relay names"));
+            if (tables.capacity.keepsUnits())
+                addLabelVerify(LABEL_KIND_UNIT, tables.unitLabels, QStringLiteral("channel units"));
+            if (tables.capacity.keepsValueNames())
+                addLabelVerify(LABEL_KIND_VALUE_NAME, tables.valueNameLabels,
+                               QStringLiteral("value names"));
+            if (tables.capacity.keepsNotes())
+                addLabelVerify(LABEL_KIND_NOTE, tables.noteLabels, QStringLiteral("notes"));
         }
         addVerify(CMD_READ_TABLE2X16_DEF, tables.tables2x16Def, READ_CHUNK_TABLES_2X16_DEF,
                   QStringLiteral("2x16 tables"));
@@ -535,12 +747,24 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
         // NACK this read was refused the whole Send before it started.
         addVerify(CMD_READ_CRC8_CFG, tables.crc8, kReadChunkCrc8,
                   QStringLiteral("CRC8 rules"));
+        addVerify(CMD_READ_UDS_CFG, tables.uds, kReadChunkUds, QStringLiteral("UDS requests"));
         // skipIfUnsupported, to match the WRITE_SCRIPT step above: on pre-v5
         // firmware the write was skipped, so its read-back would NACK
         // ERR_INVALID_CMD too, and demanding it would abort a verify that has
         // otherwise entirely succeeded.
         addVerify(CMD_READ_SCRIPT, tables.scriptChunks, READ_CHUNK_SCRIPT,
                   QStringLiteral("script"), /*skipIfUnsupported=*/true);
+        // The project, header and all, back exactly as it was written.
+        for (int at = 0; at < project.size(); at += PROJECT_READ_MAX) {
+            const int count = qMin(PROJECT_READ_MAX, int(project.size()) - at);
+            Step s;
+            s.cmd = CMD_READ_PROJECT;
+            s.payload = projectRequest(at, count);
+            s.stage = QStringLiteral("Verifying the project");
+            s.expectedEcho = s.payload + project.mid(at, count);
+            s.isVerify = true;
+            m_steps.append(s);
+        }
     }
 
     // Persist the verified configuration to flash as the final step so a
@@ -597,99 +821,28 @@ void ConfigTransfer::buildGetSteps(const DeviceCapacity &capacity)
     ping.stage = QStringLiteral("Checking device");
     m_steps.append(ping);
 
-    // Each table is read over the range the UNIT reports for it, in chunks
-    // sized by the response cap. A table the firmware lacks has capacity 0
-    // and gets no read at all — which is also what an older firmware's NACK
-    // on an optional read amounts to, so the two read the same downstream.
-    auto addReads = [&](quint8 cmd, DeviceTable table, int chunk, const QString &what) {
-        const int max = capacity.capacityOf(table);
-        for (int i = 0; i < max; i += chunk) {
-            const int count = qMin(chunk, max - i);
-            Step s;
-            s.cmd = cmd;
-            s.payload = rangeHeader(quint16(i), quint16(count));
-            s.stage = QStringLiteral("Reading %1 (%2/%3)").arg(what).arg(i + count).arg(max);
-            s.table = int(table);
-            m_steps.append(s);
-        }
-    };
-    addReads(CMD_READ_MSG_CFG, DeviceTable::Messages, READ_CHUNK_MESSAGES,
-             QStringLiteral("messages"));
-    addReads(CMD_READ_SIG_CFG, DeviceTable::Signals, READ_CHUNK_SIGNALS,
-             QStringLiteral("channels"));
-    addReads(CMD_READ_MATH_CFG, DeviceTable::Math, READ_CHUNK_MATH, QStringLiteral("math"));
-    addReads(CMD_READ_COND_CFG, DeviceTable::Conditions, READ_CHUNK_CONDITIONS,
-             QStringLiteral("conditions"));
-    // Older firmware NACKs the counter/timer/constant reads — tolerated, tables
-    // stay empty.
-    const int firstOptionalStep = m_steps.size();
-    addReads(CMD_READ_COUNTER_CFG, DeviceTable::Counters, READ_CHUNK_COUNTERS,
-             QStringLiteral("counters"));
-    addReads(CMD_READ_TIMER_CFG, DeviceTable::Timers, READ_CHUNK_TIMERS,
-             QStringLiteral("timers"));
-    addReads(CMD_READ_CONST_CFG, DeviceTable::Constants, READ_CHUNK_CONSTANTS,
-             QStringLiteral("constants"));
-    addReads(CMD_READ_RELAY_CFG, DeviceTable::Relays, READ_CHUNK_RELAYS,
-             QStringLiteral("relays"));
-    addReads(CMD_READ_TABLE2X16_DEF, DeviceTable::Tables2x16Def, READ_CHUNK_TABLES_2X16_DEF,
-             QStringLiteral("2x16 tables"));
-    addReads(CMD_READ_TABLE2X16_OUT, DeviceTable::Tables2x16Out, READ_CHUNK_TABLES_2X16_OUT,
-             QStringLiteral("2x16 table values"));
-    // The 8x8 pair took the retired 4x4's slots 10 and 11, which pushed the
-    // integrators to 12 — see the table-index note in runNext(). The row table
-    // is read over its FLAT range (the unit's row capacity, 64 on every
-    // firmware so far), not per table: the device stores it as one table and
-    // the t*8 grouping is the reader's arithmetic, not the wire's.
-    addReads(CMD_READ_TABLE8X8_DEF, DeviceTable::Tables8x8Def, READ_CHUNK_TABLES_8X8_DEF,
-             QStringLiteral("8x8 tables"));
-    addReads(CMD_READ_TABLE8X8_ROW, DeviceTable::Tables8x8Row, READ_CHUNK_TABLES_8X8_ROW,
-             QStringLiteral("8x8 table values"));
-    addReads(CMD_READ_INTEG_CFG, DeviceTable::Integrators, READ_CHUNK_INTEGRATORS,
-             QStringLiteral("integrators"));
-    // The script, table 13. Read back as BYTECODE, which is not the source and
-    // cannot be turned into it — so a Get still cannot recover an EDITABLE
-    // script. What it does now is KEEP the image: mapFromDevice validates these
-    // chunks and stores them in Configuration::scriptBytecode(), so sending the
-    // configuration back restores the same script byte for byte instead of
-    // silently removing it.
-    //
-    // Read over the table's FULL capacity, like every other table, so the reply
-    // carries the device's stored chunks followed by zeros for the rest
-    // (engine_table_read zero-fills past the active prefix). The mapper is what
-    // trims that back down to header + code_bytes.
-    //
-    // It would be read even without any of that, because the comparison in
-    // main_window is byte-for-byte against what a Send would produce, and a
-    // device whose script differs from the document's is exactly the difference
-    // that comparison exists to report.
-    addReads(CMD_READ_SCRIPT, DeviceTable::Script, READ_CHUNK_SCRIPT, QStringLiteral("script"));
-    // Transmit-CRC8 rules, table 14 (the firmware's ENGINE_TABLE_CRC8).
-    // Optional like everything from the counters on: firmware without the
-    // table NACKs ERR_INVALID_CMD, and the honest reading of that is "this
-    // device stamps no checksums", not a failed Get.
-    addReads(CMD_READ_CRC8_CFG, DeviceTable::Crc8, kReadChunkCrc8, QStringLiteral("CRC8 rules"));
-    // The names, from a unit that keeps them apart: a slot per record over each
-    // table's whole range, like the records, so the lists line up with them.
-    // Optional with the rest: a unit that fails them loses its names from this
-    // Get, not the Get.
-    if (capacity.labelsApart()) {
-        const int readChunk = (2030 - 5) / LABEL_STORE_BYTES;
-        auto addLabelReads = [&](quint8 kind, DeviceTable table, const QString &what) {
-            const int max = capacity.capacityOf(table);
-            for (int i = 0; i < max; i += readChunk) {
-                const int count = qMin(readChunk, max - i);
-                Step s;
-                s.cmd = CMD_READ_LABELS;
-                s.payload = labelReadRequest(kind, i, count);
-                s.stage = QStringLiteral("Reading %1 names (%2/%3)").arg(what).arg(i + count).arg(max);
-                s.captureLabels = kind;
-                m_steps.append(s);
-            }
-        };
-        addLabelReads(LABEL_KIND_MESSAGE, DeviceTable::Messages, QStringLiteral("message"));
-        addLabelReads(LABEL_KIND_SIGNAL, DeviceTable::Signals, QStringLiteral("channel"));
-        addLabelReads(LABEL_KIND_RELAY, DeviceTable::Relays, QStringLiteral("relay"));
+    // Each table is read over the range the UNIT reports for it. A unit that
+    // takes a plan (a CAN Triple 2.0 from phase 4) lays each configuration out
+    // at its own plan, which may hold more records than its report's entries
+    // (only its default plan) say: it is asked first what its running
+    // configuration holds, and that reply plans the reads (runNext,
+    // captureUsage). Required, like the first tables' reads: without it there
+    // is nothing to read the records over.
+    if (capacity.plansTables()) {
+        Step usage;
+        usage.cmd = CMD_GET_USAGE;
+        usage.stage = QStringLiteral("Reading what the configuration holds");
+        usage.captureUsage = true;
+        m_steps.append(usage);
+    } else {
+        QVector<int> ranges(DEVICE_TABLE_COUNT, 0);
+        for (int t = 0; t < DEVICE_TABLE_COUNT; ++t)
+            ranges[t] = capacity.capacityOf(DeviceTable(t));
+        m_steps.append(tableReadSteps(ranges, capacity));
     }
+    // Everything from here on is optional, as everything after the first four
+    // tables' reads always was.
+    const int firstOptionalStep = m_steps.size();
     // Configuration name (v7+; old firmware NACKs — tolerated).
     {
         Step s;
@@ -737,9 +890,248 @@ void ConfigTransfer::buildGetSteps(const DeviceCapacity &capacity)
         s.quietIfUnsupported = true; // see deviceLacked(); optional below with the rest
         m_steps.append(s);
     }
+    // The stored project, last: its header, whose reply plans the body's reads
+    // (addProjectReads). Only from a unit that says it keeps one. Optional like
+    // everything from the counters on: a Get that cannot read the project has
+    // still read the configuration.
+    if (capacity.keepsProject()) {
+        Step s;
+        s.cmd = CMD_READ_PROJECT;
+        s.payload = projectRequest(0, kStoredProjectHeaderBytes);
+        s.stage = QStringLiteral("Reading the stored project");
+        s.captureProject = true;
+        m_steps.append(s);
+    }
     for (int i = firstOptionalStep; i < m_steps.size(); ++i)
         m_steps[i].optional = true;
     validateReadClassification();
+}
+
+QList<ConfigTransfer::Step> ConfigTransfer::tableReadSteps(const QVector<int> &ranges,
+                                                           const DeviceCapacity &capacity,
+                                                           const QVector<int> &labelSlots) const
+{
+    QList<Step> steps;
+    // Each table over its range, in chunks sized by the response cap. A table
+    // the firmware lacks has range 0 and gets no read at all — which is also
+    // what an older firmware's NACK on an optional read amounts to, so the two
+    // read the same downstream.
+    auto addReads = [&](quint8 cmd, DeviceTable table, int chunk, const QString &what) {
+        const int max = ranges.value(int(table));
+        for (int i = 0; i < max; i += chunk) {
+            const int count = qMin(chunk, max - i);
+            Step s;
+            s.cmd = cmd;
+            s.payload = rangeHeader(quint16(i), quint16(count));
+            s.stage = QStringLiteral("Reading %1 (%2/%3)").arg(what).arg(i + count).arg(max);
+            s.table = int(table);
+            steps.append(s);
+        }
+    };
+    addReads(CMD_READ_MSG_CFG, DeviceTable::Messages, READ_CHUNK_MESSAGES,
+             QStringLiteral("messages"));
+    addReads(CMD_READ_SIG_CFG, DeviceTable::Signals, READ_CHUNK_SIGNALS,
+             QStringLiteral("channels"));
+    addReads(CMD_READ_MATH_CFG, DeviceTable::Math, READ_CHUNK_MATH, QStringLiteral("math"));
+    addReads(CMD_READ_COND_CFG, DeviceTable::Conditions, READ_CHUNK_CONDITIONS,
+             QStringLiteral("conditions"));
+    // Older firmware NACKs the counter/timer/constant reads — tolerated, tables
+    // stay empty.
+    const int firstOptionalStep = steps.size();
+    addReads(CMD_READ_COUNTER_CFG, DeviceTable::Counters, READ_CHUNK_COUNTERS,
+             QStringLiteral("counters"));
+    addReads(CMD_READ_TIMER_CFG, DeviceTable::Timers, READ_CHUNK_TIMERS,
+             QStringLiteral("timers"));
+    addReads(CMD_READ_CONST_CFG, DeviceTable::Constants, READ_CHUNK_CONSTANTS,
+             QStringLiteral("constants"));
+    addReads(CMD_READ_RELAY_CFG, DeviceTable::Relays, READ_CHUNK_RELAYS,
+             QStringLiteral("relays"));
+    addReads(CMD_READ_TABLE2X16_DEF, DeviceTable::Tables2x16Def, READ_CHUNK_TABLES_2X16_DEF,
+             QStringLiteral("2x16 tables"));
+    addReads(CMD_READ_TABLE2X16_OUT, DeviceTable::Tables2x16Out, READ_CHUNK_TABLES_2X16_OUT,
+             QStringLiteral("2x16 table values"));
+    // The 8x8 pair took the retired 4x4's slots 10 and 11, which pushed the
+    // integrators to 12 — see the table-index note in runNext(). The row table
+    // is read over its FLAT range (the unit's row capacity, 64 on every
+    // firmware so far), not per table: the device stores it as one table and
+    // the t*8 grouping is the reader's arithmetic, not the wire's.
+    addReads(CMD_READ_TABLE8X8_DEF, DeviceTable::Tables8x8Def, READ_CHUNK_TABLES_8X8_DEF,
+             QStringLiteral("8x8 tables"));
+    addReads(CMD_READ_TABLE8X8_ROW, DeviceTable::Tables8x8Row, READ_CHUNK_TABLES_8X8_ROW,
+             QStringLiteral("8x8 table values"));
+    addReads(CMD_READ_INTEG_CFG, DeviceTable::Integrators, READ_CHUNK_INTEGRATORS,
+             QStringLiteral("integrators"));
+    // The script, table 13. Read back as BYTECODE, which is not the source and
+    // cannot be turned into it — so a Get still cannot recover an EDITABLE
+    // script. What it does now is KEEP the image: mapFromDevice validates these
+    // chunks and stores them in Configuration::scriptBytecode(), so sending the
+    // configuration back restores the same script byte for byte instead of
+    // silently removing it.
+    //
+    // Read over the table's range, like every other table: its full capacity,
+    // where the reply carries the device's stored chunks followed by zeros for
+    // the rest (engine_table_read zero-fills past the active prefix), or on a
+    // unit that takes a plan as far as its configuration holds. The mapper is
+    // what trims either back down to header + code_bytes.
+    //
+    // It would be read even without any of that, because the comparison in
+    // main_window is byte-for-byte against what a Send would produce, and a
+    // device whose script differs from the document's is exactly the difference
+    // that comparison exists to report.
+    addReads(CMD_READ_SCRIPT, DeviceTable::Script, READ_CHUNK_SCRIPT, QStringLiteral("script"));
+    // Transmit-CRC8 rules, table 14 (the firmware's ENGINE_TABLE_CRC8).
+    // Optional like everything from the counters on: firmware without the
+    // table NACKs ERR_INVALID_CMD, and the honest reading of that is "this
+    // device stamps no checksums", not a failed Get.
+    addReads(CMD_READ_CRC8_CFG, DeviceTable::Crc8, kReadChunkCrc8, QStringLiteral("CRC8 rules"));
+    // UDS requests, table 15: none to read on a unit without the table.
+    addReads(CMD_READ_UDS_CFG, DeviceTable::Uds, kReadChunkUds, QStringLiteral("UDS requests"));
+    // The names, from a unit that keeps them apart: a slot per record over each
+    // table's range, like the records, so the lists line up with them.
+    // Optional with the rest: a unit that fails them loses its names from this
+    // Get, not the Get.
+    if (capacity.labelsApart()) {
+        const int readChunk = (2030 - 5) / LABEL_STORE_BYTES;
+        auto addLabelReads = [&](quint8 kind, int max, const QString &what) {
+            for (int i = 0; i < max; i += readChunk) {
+                const int count = qMin(readChunk, max - i);
+                Step s;
+                s.cmd = CMD_READ_LABELS;
+                s.payload = labelReadRequest(kind, i, count);
+                s.stage = QStringLiteral("Reading %1 (%2/%3)").arg(what).arg(i + count).arg(max);
+                s.captureLabels = kind;
+                steps.append(s);
+            }
+        };
+        const int channels = ranges.value(int(DeviceTable::Signals));
+        addLabelReads(LABEL_KIND_MESSAGE, ranges.value(int(DeviceTable::Messages)),
+                      QStringLiteral("message names"));
+        addLabelReads(LABEL_KIND_SIGNAL, channels, QStringLiteral("channel names"));
+        addLabelReads(LABEL_KIND_RELAY, ranges.value(int(DeviceTable::Relays)),
+                      QStringLiteral("relay names"));
+        // Phase 4, step 3b: the units over the channels read, and the value
+        // names over as many as the running configuration declared, where
+        // GET_USAGE says its names have them (labelSlots, a count per kind).
+        if (labelSlots.size() > LABEL_KIND_UNIT)
+            addLabelReads(LABEL_KIND_UNIT, channels, QStringLiteral("channel units"));
+        if (labelSlots.size() > LABEL_KIND_VALUE_NAME)
+            addLabelReads(LABEL_KIND_VALUE_NAME, labelSlots[LABEL_KIND_VALUE_NAME],
+                          QStringLiteral("value names"));
+        // Config Notes: as many slots as the running configuration declared.
+        if (labelSlots.size() > LABEL_KIND_NOTE)
+            addLabelReads(LABEL_KIND_NOTE, labelSlots[LABEL_KIND_NOTE], QStringLiteral("notes"));
+    }
+    for (int i = firstOptionalStep; i < steps.size(); ++i)
+        steps[i].optional = true;
+    return steps;
+}
+
+void ConfigTransfer::addProjectReads(int from, int to)
+{
+    const QString kb = QString::number((to + 1023) / 1024);
+    for (int at = from; at < to; at += PROJECT_READ_MAX) {
+        const int count = qMin(PROJECT_READ_MAX, to - at);
+        Step s;
+        s.cmd = CMD_READ_PROJECT;
+        s.payload = projectRequest(at, count);
+        s.stage = QStringLiteral("Reading the stored project (%1/%2 KB)")
+                      .arg((at + count + 1023) / 1024)
+                      .arg(kb);
+        s.captureProject = true;
+        s.optional = true;
+        m_steps.append(s);
+    }
+}
+
+QByteArray ConfigTransfer::configurationFingerprint(const DeviceTables &source)
+{
+    // The names where a Send puts them (settleLabels), so the tables a Send
+    // writes and the tables a Get reads back agree on every name's place.
+    DeviceTables tables = source;
+    settleLabels(tables.messages, tables.messageLabels);
+    settleLabels(tables.signalConfigs, tables.signalLabels);
+    settleLabels(tables.relays, tables.relayLabels);
+    const bool labelsApart = tables.capacity.labelsApart();
+    const bool crc8Short = tables.capacity.crc8LongRules();
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    const auto addWord = [&](quint32 v) {
+        char b[4];
+        qToLittleEndian<quint32>(v, b);
+        hash.addData(QByteArrayView(b, 4));
+    };
+    // Each table by its index in a Get's read-back switch, then how many
+    // records up to the last one holding a nonzero byte (a unit reads every
+    // slot past what a Send wrote as zeros), then those records as the unit
+    // takes them.
+    const auto addTable = [&](quint32 id, auto const &items) {
+        using Item = std::decay_t<decltype(items[0])>;
+        const Slice slice = sliceFor<Item>(labelsApart, crc8Short);
+        // A record's bytes as the unit takes them: one run, or two (the 2.0's
+        // CRC8 record), the second empty for every other.
+        const auto runOf = [&](int i, int which) {
+            const char *item = reinterpret_cast<const char *>(items.constData() + i);
+            return which == 0 ? QByteArrayView(item + slice.at, slice.bytes)
+                              : QByteArrayView(item + slice.at2, slice.bytes2);
+        };
+        const auto nonzero = [](QByteArrayView r) {
+            return std::any_of(r.begin(), r.end(), [](char c) { return c != 0; });
+        };
+        int n = int(items.size());
+        while (n > 0) {
+            if (nonzero(runOf(n - 1, 0)) || nonzero(runOf(n - 1, 1)))
+                break;
+            --n;
+        }
+        addWord(id);
+        addWord(quint32(n));
+        for (int i = 0; i < n; ++i) {
+            hash.addData(runOf(i, 0));
+            if (slice.bytes2)
+                hash.addData(runOf(i, 1));
+        }
+    };
+    addTable(0, tables.messages);
+    addTable(1, tables.signalConfigs);
+    addTable(2, tables.math);
+    addTable(3, tables.conditions);
+    addTable(4, tables.counters);
+    addTable(5, tables.timers);
+    addTable(6, tables.constants);
+    addTable(7, tables.relays);
+    addTable(8, tables.tables2x16Def);
+    addTable(9, tables.tables2x16Out);
+    addTable(10, tables.tables8x8Def);
+    addTable(11, tables.tables8x8Row);
+    addTable(12, tables.integrators);
+    addTable(13, tables.scriptChunks);
+    addTable(14, tables.crc8);
+    // The names, where they are apart from the records: up to the last one
+    // that is not empty, each as its length and bytes.
+    if (labelsApart) {
+        const auto addNames = [&](quint32 kind, const QVector<QByteArray> &names) {
+            int n = int(names.size());
+            while (n > 0 && names[n - 1].isEmpty())
+                --n;
+            addWord(0x100u + kind);
+            addWord(quint32(n));
+            for (int i = 0; i < n; ++i) {
+                const QByteArray name = names[i].left(LABEL_STORE_BYTES);
+                addWord(quint32(name.size()));
+                hash.addData(name);
+            }
+        };
+        addNames(LABEL_KIND_MESSAGE, tables.messageLabels);
+        addNames(LABEL_KIND_SIGNAL, tables.signalLabels);
+        addNames(LABEL_KIND_RELAY, tables.relayLabels);
+        // Phase 4, step 3b: the units and value names, where the unit keeps them.
+        if (tables.capacity.keepsUnits())
+            addNames(LABEL_KIND_UNIT, tables.unitLabels);
+        if (tables.capacity.keepsValueNames())
+            addNames(LABEL_KIND_VALUE_NAME, tables.valueNameLabels);
+        if (tables.capacity.keepsNotes())
+            addNames(LABEL_KIND_NOTE, tables.noteLabels);
+    }
+    return hash.result().left(kStoredProjectFingerprintBytes);
 }
 
 /* The guard behind a six-entry history. DeviceLink::isReadResponse() and
@@ -769,8 +1161,10 @@ void ConfigTransfer::validateReadClassification()
         const bool awaitsData = s.table != -1 || s.isVerify || s.captureName
                                 || s.captureBusSetup || s.captureDeviceChannels
                                 || s.captureDeviceChannelsExt || s.captureMsgPasswords
-                                || s.captureLabels >= 0 || s.cmd == CMD_GET_STATUS;
-        const bool rangeRead = s.table != -1 || s.isVerify || s.captureLabels >= 0;
+                                || s.captureLabels >= 0 || s.captureProject || s.captureUsage
+                                || s.cmd == CMD_GET_STATUS;
+        const bool rangeRead =
+            s.table != -1 || s.isVerify || s.captureLabels >= 0 || s.captureProject;
         if (awaitsData && !DeviceLink::isReadResponse(s.cmd)) {
             fault(s.cmd, s.stage,
                   QStringLiteral("awaits a data reply that isReadResponse() would discard"));
@@ -817,6 +1211,10 @@ QString ConfigTransfer::planClassificationFaultForTest(bool getPlan,
         tables.integrators.resize(1);
         tables.crc8.resize(1);
         tables.scriptChunks.resize(1);
+        // A project too, on a unit that keeps one, so its writes and its
+        // read-back are in the plan the check runs over.
+        if (capacity.keepsProject())
+            tables.storedProject = buildStoredProject(QByteArray(1, 'p'), StoredProjectHeader{});
         t.buildSendSteps(tables, /*verify=*/true, {}, /*saveToFlash=*/true,
                          /*configVersion=*/std::nullopt, {}, /*resetAfter=*/false);
     }
@@ -900,6 +1298,15 @@ void ConfigTransfer::runNext()
                                                .arg(cur.stage,
                                                     errCode ? DeviceLink::errorCodeText(errCode)
                                                             : QStringLiteral("no response")));
+                if (cur.captureProject) {
+                    // A project with a piece missing is no project: what was
+                    // read goes, and the rest is not asked for. (Only steps
+                    // after this one are removed, so `cur` stays where it is.)
+                    m_readTables.storedProject.clear();
+                    for (int i = m_steps.size() - 1; i > m_index; --i)
+                        if (m_steps[i].captureProject)
+                            m_steps.removeAt(i);
+                }
                 ++m_index;
                 runNext();
                 return;
@@ -1006,9 +1413,12 @@ void ConfigTransfer::runNext()
                 // optional, and a chunk the unit refused costs only its names,
                 // which stay empty, not the Get.
                 QVector<QByteArray> &labels =
-                    step.captureLabels == LABEL_KIND_MESSAGE ? m_readTables.messageLabels
-                    : step.captureLabels == LABEL_KIND_SIGNAL ? m_readTables.signalLabels
-                                                              : m_readTables.relayLabels;
+                    step.captureLabels == LABEL_KIND_MESSAGE      ? m_readTables.messageLabels
+                    : step.captureLabels == LABEL_KIND_SIGNAL     ? m_readTables.signalLabels
+                    : step.captureLabels == LABEL_KIND_UNIT       ? m_readTables.unitLabels
+                    : step.captureLabels == LABEL_KIND_VALUE_NAME ? m_readTables.valueNameLabels
+                    : step.captureLabels == LABEL_KIND_NOTE       ? m_readTables.noteLabels
+                                                                  : m_readTables.relayLabels;
                 const int asked = quint8(step.payload[1]) | (quint8(step.payload[2]) << 8);
                 const int start = payload.size() >= 5
                                       ? (quint8(payload[1]) | (quint8(payload[2]) << 8)) : -1;
@@ -1023,9 +1433,14 @@ void ConfigTransfer::runNext()
                     return;
                 }
                 labels.resize(start); // a refused chunk before this one: no names
+                // A value name is binary up front (ValueNameLabel), and a notes
+                // slot may end inside a character: both kept whole.
+                const bool whole = step.captureLabels == LABEL_KIND_VALUE_NAME
+                                   || step.captureLabels == LABEL_KIND_NOTE;
                 for (int i = 0; i < count; ++i) {
                     const char *slot = payload.constData() + 5 + i * LABEL_STORE_BYTES;
-                    labels.append(QByteArray(slot, int(qstrnlen(slot, LABEL_STORE_BYTES))));
+                    labels.append(whole ? QByteArray(slot, LABEL_STORE_BYTES)
+                                        : QByteArray(slot, int(qstrnlen(slot, LABEL_STORE_BYTES))));
                 }
             }
             if (step.table >= 0) {
@@ -1063,7 +1478,12 @@ void ConfigTransfer::runNext()
                 case 11: placed = appendItems(m_readTables.tables8x8Row, payload); break;
                 case 12: placed = appendItems(m_readTables.integrators, payload); break;
                 case 13: placed = appendItems(m_readTables.scriptChunks, payload); break;
-                case 14: placed = appendItems(m_readTables.crc8, payload); break;
+                case 14:
+                    placed = appendItems(m_readTables.crc8, payload,
+                                         sliceFor<Crc8Config>(
+                                             apart, m_readTables.capacity.crc8LongRules()));
+                    break;
+                case 15: placed = appendItems(m_readTables.uds, payload); break;
                 }
                 if (!placed) {
                     emit finished(false, QStringLiteral("%1 — out-of-order device response")
@@ -1071,6 +1491,54 @@ void ConfigTransfer::runNext()
                     deleteLater();
                     return;
                 }
+            }
+            if (step.captureProject) {
+                // u32 offset, u16 count, then the bytes: the reply to the read
+                // asked for, starting where what has been read so far ends.
+                // Last in this handler, because planning the body's reads
+                // appends to m_steps, which `step` points into.
+                const QByteArray asked = step.payload;
+                const QString stage = step.stage;
+                const int count = int(qFromLittleEndian<quint16>(asked.constData() + 4));
+                const int offset = int(qFromLittleEndian<quint32>(asked.constData()));
+                if (payload.size() != 6 + count || payload.left(6) != asked
+                    || offset != m_readTables.storedProject.size()) {
+                    // Not the reply asked for, or a gap where a read was
+                    // refused or lost: the project is not read, and the rest of
+                    // it is not asked for. The configuration stands on its own.
+                    m_readTables.storedProject.clear();
+                    for (int i = m_steps.size() - 1; i > m_index; --i)
+                        if (m_steps[i].captureProject)
+                            m_steps.removeAt(i);
+                    m_skippedStages.append(QStringLiteral("%1 (the unit's replies did not "
+                                                          "fit together)")
+                                               .arg(stage));
+                } else {
+                    m_readTables.storedProject += payload.mid(6);
+                    StoredProjectHeader header;
+                    if (offset == 0
+                        && parseStoredProjectHeader(m_readTables.storedProject, &header)
+                               == StoredProjectState::Valid)
+                        addProjectReads(kStoredProjectHeaderBytes,
+                                        kStoredProjectHeaderBytes + int(header.bodyBytes));
+                }
+            }
+            if (step.captureUsage) {
+                // What the running configuration holds, table by table: the
+                // reads of its records and names, planned right behind this
+                // step. Last in this handler, because that inserts into
+                // m_steps, which `step` points into.
+                QVector<int> ranges, labelSlots;
+                if (!usageRanges(payload, &ranges, &labelSlots)) {
+                    emit finished(false, QStringLiteral("%1 — the device's answer could not be read")
+                                             .arg(step.stage));
+                    deleteLater();
+                    return;
+                }
+                const QList<Step> reads = tableReadSteps(ranges, m_readTables.capacity, labelSlots);
+                for (int i = 0; i < reads.size(); ++i)
+                    m_steps.insert(m_index + 1 + i, reads[i]);
+                validateReadClassification();
             }
             ++m_index;
             runNext();

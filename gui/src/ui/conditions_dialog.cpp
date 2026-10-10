@@ -672,7 +672,8 @@ private:
             const QList<CommsSection> &sections = m_config->bus[b].sections;
             for (int i = 0; i < sections.size(); ++i) {
                 const CommsSection &s = sections[i];
-                if (wantTransmit ? !s.isTransmit() : !s.isReceive())
+                // A UDS request's name stands for its response in a message term.
+                if (wantTransmit ? !s.isTransmit() : !(s.isReceive() || s.isUds()))
                     continue;
                 const MessageRef ref{b + 1, s.name};
                 w.aMessageCombo->addItem(messageLabel(ref, i, s.isTransmit()),
@@ -1228,7 +1229,7 @@ void ConditionsDialog::rebuild()
 
 void ConditionsDialog::onAdd()
 {
-    const int limit = m_config->capacity().capacityOf(DeviceTable::Conditions);
+    const int limit = m_config->capacity().limitOf(DeviceTable::Conditions);
     if (m_rows.size() >= limit) {
         QMessageBox::warning(this, tr("User Conditions"),
                              tr("The device supports at most %1 User Conditions.").arg(limit));

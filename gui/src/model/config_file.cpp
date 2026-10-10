@@ -1,12 +1,14 @@
 #include "config_file.h"
 
 #include <QFile>
+#include <QtEndian>
 
 #include "secure_file.h"
 
 namespace ct {
 
 const char *const kConfigPreambleMagic = "CAN Triple Device Manager configuration";
+const QByteArray kConfigPackedBodyMagic = QByteArrayLiteral("CT3Z");
 
 namespace {
 
@@ -19,12 +21,42 @@ const QByteArray kKeySchema = QByteArrayLiteral("schema ");
 const QByteArray kKeyWrittenBy = QByteArrayLiteral("written-by ");
 constexpr char kDosEof = '\x1a';
 
-QByteArray buildPreamble(int schemaVersion, const QString &writtenBy)
+// The most a compressed body may say it inflates to. A configuration's JSON is
+// a megabyte or two at the very most; the cap stops a stated length asking for
+// gigabytes before a byte is inflated.
+constexpr quint32 kMaxBodyBytes = 64u * 1024u * 1024u;
+
+// FORMAT 3 (config_file.h): the marker, then qCompress's output.
+QByteArray packBody(const QByteArray &plainBody)
+{
+    return kConfigPackedBodyMagic + qCompress(plainBody, 9);
+}
+
+// The body a packed one holds; false for one that does not inflate to exactly
+// the length it states, or states more than kMaxBodyBytes.
+bool unpackBody(const QByteArray &packed, QByteArray *plainBody)
+{
+    const int at = int(kConfigPackedBodyMagic.size());
+    if (packed.size() < at + 4)
+        return false;
+    const quint32 stated = qFromBigEndian<quint32>(packed.constData() + at);
+    if (stated == 0 || stated > kMaxBodyBytes)
+        return false;
+    QByteArray plain = qUncompress(packed.mid(at));
+    if (quint32(plain.size()) != stated) {
+        plain.fill('\0');
+        return false;
+    }
+    *plainBody = plain;
+    return true;
+}
+
+QByteArray buildPreamble(int schemaVersion, const QString &writtenBy, int formatVersion)
 {
     QByteArray text;
     text += kConfigPreambleMagic;
     text += kCrLf;
-    text += kKeyFormat + QByteArray::number(kConfigFileFormatVersion) + kCrLf;
+    text += kKeyFormat + QByteArray::number(formatVersion) + kCrLf;
     text += kKeySchema + QByteArray::number(schemaVersion) + kCrLf;
     // Latin-1 and stripped of anything that would break the line structure. The
     // version comes from CT_APP_VERSION and has never been anything but digits
@@ -122,7 +154,7 @@ bool peekBinaryConfigFile(const QString &path, ConfigFileInfo *out, QString *err
 }
 
 bool writeBinaryConfigFile(const QString &path, const QByteArray &plainBody, int schemaVersion,
-                           const QString &writtenBy, QString *error)
+                           const QString &writtenBy, QString *error, int formatVersion)
 {
     const auto fail = [&](const QString &why) {
         if (error)
@@ -137,8 +169,14 @@ bool writeBinaryConfigFile(const QString &path, const QByteArray &plainBody, int
     SecureSaveOptions options;
     options.embeddedCommsKey = kNoAccessKey;
 
+    // Format 3 compresses before it seals (packBody). Format 2 seals the body as
+    // it is; nothing writes format 1 here — that is saveJsonToFile's job.
+    const int format = qBound(2, formatVersion, kConfigFileFormatVersion);
+    QByteArray packed = format >= 3 ? packBody(plainBody) : QByteArray();
     QByteArray blob;
-    if (!sealSecureBlob(plainBody, options, &blob, error))
+    const bool sealed = sealSecureBlob(format >= 3 ? packed : plainBody, options, &blob, error);
+    packed.fill('\0');
+    if (!sealed)
         return false;
 
     // QFile IN PLACE, not QSaveFile, and the reasoning is inherited from the
@@ -168,7 +206,7 @@ bool writeBinaryConfigFile(const QString &path, const QByteArray &plainBody, int
     //
     // The whole file is one buffer and one write() for that reason: there is no
     // state where the preamble landed and the body did not.
-    const QByteArray whole = buildPreamble(schemaVersion, writtenBy) + blob;
+    const QByteArray whole = buildPreamble(schemaVersion, writtenBy, format) + blob;
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly))
         return fail(f.errorString());
@@ -214,8 +252,18 @@ bool readBinaryConfigFile(const QString &path, QByteArray *plainBody, ConfigFile
         return fail(QStringLiteral("This file was saved by a newer version of "
                                    "CAN Triple Device Manager and can't be opened."));
     SecureFileInfo blobInfo;
-    if (!openSecureBlob(blob, plainBody, &blobInfo, nullptr))
+    QByteArray body;
+    if (!openSecureBlob(blob, &body, &blobInfo, nullptr))
         return fail(QStringLiteral("This configuration file is damaged and cannot be opened."));
+    // FORMAT 3, told by the marker inside the seal and never by the preamble.
+    if (body.startsWith(kConfigPackedBodyMagic)) {
+        const bool unpacked = unpackBody(body, plainBody);
+        body.fill('\0');
+        if (!unpacked)
+            return fail(QStringLiteral("This configuration file is damaged and cannot be opened."));
+    } else {
+        *plainBody = body;
+    }
 
     if (info)
         *info = parsed;

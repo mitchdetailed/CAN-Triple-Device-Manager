@@ -360,6 +360,65 @@ void testAChannelNothingTouchesIsUnused()
 
 } // namespace
 
+// The Kept column (phase 4, step 3a): a box per channel, offered only on a
+// target that keeps channels and never on a device channel; ticking it lists
+// the channel in the document, and the list is what the box shows next time.
+void testTheKeptColumn()
+{
+    Configuration config;
+    config.clear();
+    addChannel(config, "Odometer");
+    DeviceCapacity cap = DeviceCapacity::builtIn();
+    cap.reported = true;
+    cap.retainedChannels = true;
+    config.setCapacity(cap);
+    config.setDirty(false);
+    const auto find = [](ChannelEditorDialog &dialog, const QString &name, int *keptCol) {
+        auto *tree = dialog.findChild<QTreeWidget *>();
+        *keptCol = -1;
+        if (!tree)
+            return static_cast<QTreeWidgetItem *>(nullptr);
+        for (int c = 0; c < tree->columnCount(); ++c)
+            if (tree->headerItem()->text(c) == QStringLiteral("Kept"))
+                *keptCol = c;
+        for (int i = 0; i < tree->topLevelItemCount(); ++i)
+            if (tree->topLevelItem(i)->data(0, Qt::UserRole).toString() == name)
+                return tree->topLevelItem(i);
+        return static_cast<QTreeWidgetItem *>(nullptr);
+    };
+    {
+        ChannelEditorDialog dialog(&config);
+        int kept = -1;
+        QTreeWidgetItem *item = find(dialog, QStringLiteral("Odometer"), &kept);
+        CHECK(item != nullptr && kept >= 0);
+        if (!item || kept < 0)
+            return;
+        CHECK((item->flags() & Qt::ItemIsUserCheckable) && item->checkState(kept) == Qt::Unchecked);
+        CHECK(!config.isDirty()); // filling the table changed nothing
+        item->setCheckState(kept, Qt::Checked);
+        CHECK(config.isRetainedChannel(QStringLiteral("Odometer")) && config.isDirty());
+        // A device channel is the firmware's, written at every sample.
+        int k2 = -1;
+        QTreeWidgetItem *dev = find(dialog, QStringLiteral("Device OnTime"), &k2);
+        if (dev)
+            CHECK(!(dev->flags() & Qt::ItemIsUserCheckable));
+    }
+    {
+        ChannelEditorDialog dialog(&config);
+        int kept = -1;
+        QTreeWidgetItem *item = find(dialog, QStringLiteral("Odometer"), &kept);
+        CHECK(item != nullptr && kept >= 0 && item->checkState(kept) == Qt::Checked);
+    }
+    // A target that keeps none: the box shows the list, and is not offered.
+    config.setCapacity(DeviceCapacity::builtIn());
+    {
+        ChannelEditorDialog dialog(&config);
+        int kept = -1;
+        QTreeWidgetItem *item = find(dialog, QStringLiteral("Odometer"), &kept);
+        CHECK(item != nullptr && kept >= 0 && !(item->flags() & Qt::ItemIsUserCheckable));
+    }
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -377,6 +436,7 @@ int main(int argc, char **argv)
     testTwoWritersAreBothNamed();
     testADeviceChannelIsInternal();
     testAChannelNothingTouchesIsUnused();
+    testTheKeptColumn();
 
     if (fails == 0)
         std::printf("test_channel_source: all checks passed\n");

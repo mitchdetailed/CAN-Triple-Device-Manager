@@ -440,6 +440,19 @@ public:
     bool saveSecureToFile(const QString &path, const SecureSaveOptions &options,
                           QString *error = nullptr);
 
+    // THE STORED PROJECT (stored_project.h): this document as a CAN Triple 2.0
+    // keeps it beside the configuration sent from it. The body is what a .ct3
+    // seals, the same object with fileType and fileVersion, compressed and then
+    // sealed exactly as a .ct3 is, so what the unit holds is no more legible
+    // than the file would be, and four to ten times smaller. projectBody()
+    // leaves the document as it was (path, format, dirty flag); empty, with
+    // `error` set, if it cannot be sealed. loadProjectBody() loads over this
+    // document the way loadFromFile() loads a .ct3, and leaves it UNTITLED and
+    // modified: it came off a unit, not out of a file, and nothing on disk
+    // holds it yet.
+    QByteArray projectBody(QString *error = nullptr) const;
+    bool loadProjectBody(const QByteArray &body, QString *error = nullptr);
+
     // Write the document as INDENTED, LEGIBLE JSON — byte-for-byte the shape a
     // format-1 .ct3 had, which is why loadFromFile already reads it back with no
     // new code.
@@ -493,6 +506,18 @@ public:
     QList<Table2x16Row> table2x16Rows;   // v12: Calculations > Tables
     QList<Table8x8Row> table8x8Rows;     // the 4x4's replacement (schema 12)
     QString comments;
+    // The channels whose value the unit keeps across power cycles, by name, as
+    // typed (matched trimmed and case-insensitively, as the mapper matches
+    // names): any channel of the document, built-in ones too, which is why it
+    // is a list here and not a field of Channel. Only a CAN Triple 2.0 that
+    // says so keeps them (DeviceCapacity::retainsChannels); the mapper flags
+    // each listed channel's record for one and warns for any other target. A
+    // counter's or integrator's Preserve is its own setting, as ever.
+    QStringList retainedChannels;
+    bool isRetainedChannel(const QString &name) const;
+    // Adds or removes `name`; true when the list changed. Does not touch the
+    // dirty flag: callers that are an edit set it.
+    bool setRetainedChannel(const QString &name, bool retained);
 
     // ---- The device script -------------------------------------------------
     //
@@ -725,6 +750,10 @@ public:
 
 signals:
     void dirtyChanged(bool dirty);
+    // Every edit (setDirty(true)), the document dirty already or not, where
+    // dirtyChanged says only when the flag flips: for what is worked out from
+    // the whole document and kept in view, as the status bar's memory figures.
+    void edited();
     void documentReset(); // after clear/load
     // The target firmware changed under an open document (setCapacity) — the
     // menu gates and anything else sized by it should look again. Not emitted
@@ -789,6 +818,9 @@ private:
     bool sectionGrantProves(const CommsSection &section, int busIndex = -1) const;
 
     void loadBody(const QJsonObject &body, int fileVersion);
+    // What saveToFile seals and projectBody compresses: fileType, fileVersion,
+    // writtenBy and the content keys.
+    QJsonObject buildRoot() const;
     // The content keys, without the file/lock wrapper. Canonicalised by Qt's
     // key sorting, which is what makes the write-protection MAC reproducible.
     QJsonObject buildBody() const;

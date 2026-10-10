@@ -30,7 +30,7 @@
 
 #include "../model/channel_catalog.h"
 #include "../model/frame_layout.h"
-#include "../protocol/wire_structs.h" // CRC8_MAX_ELEMENTS, asserted == kCrcElementSlots
+#include "../protocol/wire_structs.h" // CRC8_ELEM_*; a rule's elements are the target's
 #include "add_channel_dialog.h"
 #include "channel_field.h"
 #include "name_limits.h"
@@ -38,6 +38,11 @@
 #include "select_channel_dialog.h"
 
 namespace ct {
+
+// A UDS request's bytes as the Request field shows them, and back (defined
+// with the UDS controls below).
+static QString udsHexText(const QByteArray &bytes);
+static QByteArray udsParseHex(QString text, bool *ok);
 
 namespace {
 
@@ -287,6 +292,7 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
     // transmit message (isTransmit() answers true) with a checksum stamped on
     // top, and the combo's order is the user's taxonomy.
     m_deviceCombo->addItem(tr("Transmit CRC8"), int(SectionDevice::TransmitCrc8));
+    m_deviceCombo->addItem(tr("UDS Request"), int(SectionDevice::UdsRequest));
     m_deviceCombo->addItem(tr("Message Relay"), int(SectionDevice::MessageRelay));
     m_deviceCombo->setCurrentIndex(m_deviceCombo->findData(int(m_section.device)));
     connect(m_deviceCombo, &QComboBox::currentIndexChanged, this,
@@ -448,6 +454,23 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
     // layout map draws for a receive message.
     connect(m_fdCheck, &QCheckBox::toggled, this, &SectionEditorDialog::refreshBitTable);
     radioRow->addWidget(m_fdCheck);
+    // THE BIT RATE SWITCH, beside it (Mitch, 2026-10-08), on Transmit Message and
+    // Transmit CRC8: live while CAN FD frame is ticked, where the target sends
+    // CAN FD without it. Elsewhere it shows what the frame will do.
+    m_brsCheck = new QCheckBox(tr("BRS"));
+    m_brsAllowed = m_config->capacity().brsPerMessage();
+    m_brsChoice = m_section.brs;
+    m_brsCheck->setToolTip(
+        m_brsAllowed
+            ? tr("Bit Rate Switch: the frame's data goes at the bus's FD data rate. Untick to "
+                 "send the whole frame at the base rate.")
+            : tr("Bit Rate Switch. This target firmware switches the bit rate on every CAN FD "
+                 "frame; a CAN Triple 2.0 with firmware 2.0.3 or later can send one without it."));
+    // The user's choice only: updateBrsCheck sets the box with its signals blocked.
+    connect(m_brsCheck, &QCheckBox::toggled, this, [this](bool on) { m_brsChoice = on; });
+    connect(m_fdCheck, &QCheckBox::toggled, this,
+            [this]() { updateBrsCheck(protocolFieldsEnabled()); });
+    radioRow->addWidget(m_brsCheck);
     radioRow->addStretch();
     canGrid->addLayout(radioRow, r, 1, 1, 3);
     connect(m_extendedRadio, &QRadioButton::toggled, this, [this]() {
@@ -457,7 +480,8 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
     });
     ++r;
 
-    canGrid->addWidget(new QLabel(tr("Base Address :")), r, 0);
+    m_addressLabel = new QLabel(tr("Base Address :"));
+    canGrid->addWidget(m_addressLabel, r, 0);
     m_addressEdit = new QLineEdit;
     m_addressEdit->setValidator(new QRegularExpressionValidator(
         QRegularExpression(QStringLiteral("(0[xX])?[0-9A-Fa-f]{1,8}")), this));
@@ -473,7 +497,7 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
     canGrid->addWidget(m_lengthLabel, r, 0);
     m_lengthEdit = new QLineEdit(QString::number(m_section.messageLengthBytes));
     m_lengthEdit->setValidator(new QRegularExpressionValidator(
-        QRegularExpression(QStringLiteral("[0-9]{1,2}|0[xX][0-9A-Fa-f]{1,2}")), this));
+        QRegularExpression(QStringLiteral("[0-9]{1,4}|0[xX][0-9A-Fa-f]{1,3}")), this));
     // Live, per keystroke: the layout map is how you judge whether a length is
     // the right one, so it has to follow the field as it is typed.
     connect(m_lengthEdit, &QLineEdit::textChanged, this, &SectionEditorDialog::refreshBitTable);
@@ -573,6 +597,104 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
 
     layout->addWidget(canGroup);
 
+    // ---- UDS Request (SectionDevice::UdsRequest; a CAN Triple 2.0 from
+    // firmware 2.0.4). The request's identifier is the Base Address above,
+    // relabelled Request ID, and its timing the Cyclic / Triggered and Transmit
+    // Rate controls; Message Length, relabelled Response Length, is the bytes
+    // of the response the Received Channels decode. This group is the rest.
+    // Built for every section and shown for a UDS Request (updateUdsControls),
+    // as the relay group is.
+    m_udsGroup = new QGroupBox(tr("UDS Request"));
+    auto *udsGrid = new QGridLayout(m_udsGroup);
+    int ur = 0;
+    udsGrid->addWidget(new QLabel(tr("Response ID :")), ur, 0);
+    m_udsResponseEdit = new QLineEdit(
+        QStringLiteral("0x%1").arg(QString::number(m_section.udsResponseAddress, 16).toUpper()));
+    m_udsResponseEdit->setValidator(new QRegularExpressionValidator(
+        QRegularExpression(QStringLiteral("(0[xX])?[0-9A-Fa-f]{1,8}")), this));
+    m_udsResponseEdit->setToolTip(
+        tr("The identifier the ECU answers on (0x7E8 for a request on 0x7E0). Its frames are "
+           "reassembled into the response the Received Channels decode."));
+    udsGrid->addWidget(m_udsResponseEdit, ur, 1);
+    m_udsAwaitCheck = new QCheckBox(tr("Await a response"));
+    m_udsAwaitCheck->setChecked(m_section.udsAwaitResponse);
+    m_udsAwaitCheck->setToolTip(tr("Untick for a request that is not answered, such as Tester "
+                                   "Present with its positive response suppressed (3E 80)."));
+    udsGrid->addWidget(m_udsAwaitCheck, ur, 2, 1, 2);
+    ++ur;
+    udsGrid->addWidget(new QLabel(tr("Request :")), ur, 0);
+    m_udsRequestEdit = new QLineEdit(udsHexText(m_section.udsRequest));
+    m_udsRequestEdit->setPlaceholderText(QStringLiteral("22 F1 90"));
+    m_udsRequestEdit->setToolTip(
+        tr("The request's bytes in hex, the service first: 22 F1 90 reads identifier F190, "
+           "2E F1 90 … writes it, 19 02 FF reads DTCs, 3E 80 is Tester Present. Up to 64 "
+           "bytes; more than 7 go as a multi-frame request."));
+    udsGrid->addWidget(m_udsRequestEdit, ur, 1, 1, 3);
+    ++ur;
+    udsGrid->addWidget(new QLabel(tr("Response Timeout :")), ur, 0);
+    m_udsTimeoutSpin = new QSpinBox;
+    m_udsTimeoutSpin->setRange(1, 65535);
+    m_udsTimeoutSpin->setSuffix(tr(" ms"));
+    m_udsTimeoutSpin->setValue(m_section.udsTimeoutMs);
+    m_udsTimeoutSpin->setToolTip(tr("How long the unit waits for the response (P2)."));
+    udsGrid->addWidget(m_udsTimeoutSpin, ur, 1);
+    udsGrid->addWidget(new QLabel(tr("After Response Pending :")), ur, 2);
+    m_udsPendingSpin = new QSpinBox;
+    m_udsPendingSpin->setRange(1, 65535);
+    m_udsPendingSpin->setSuffix(tr(" ms"));
+    m_udsPendingSpin->setValue(m_section.udsPendingMs);
+    m_udsPendingSpin->setToolTip(
+        tr("How long the unit waits after the ECU answers 7F xx 78, response pending (P2*)."));
+    udsGrid->addWidget(m_udsPendingSpin, ur, 3);
+    ++ur;
+    udsGrid->addWidget(new QLabel(tr("Padding :")), ur, 0);
+    m_udsPadCombo = new QComboBox;
+    for (int pad : {0x00, 0x55, 0xAA, 0xFF})
+        m_udsPadCombo->addItem(QStringLiteral("0x%1").arg(pad, 2, 16, QLatin1Char('0')).toUpper(),
+                               pad);
+    m_udsPadCombo->addItem(tr("None"), -1);
+    if (m_udsPadCombo->findData(m_section.udsPadByte) < 0)
+        m_udsPadCombo->addItem(
+            QStringLiteral("0x%1").arg(m_section.udsPadByte, 2, 16, QLatin1Char('0')).toUpper(),
+            m_section.udsPadByte);
+    m_udsPadCombo->setCurrentIndex(m_udsPadCombo->findData(m_section.udsPadByte));
+    m_udsPadCombo->setToolTip(tr("Every frame of the request and the unit's flow control is "
+                                 "padded to 8 bytes with this byte, as most ECUs expect."));
+    udsGrid->addWidget(m_udsPadCombo, ur, 1);
+    udsGrid->addWidget(new QLabel(tr("Flow Control :")), ur, 2);
+    auto *fcRow = new QHBoxLayout;
+    m_udsBlockSpin = new QSpinBox;
+    m_udsBlockSpin->setRange(0, 255);
+    m_udsBlockSpin->setPrefix(tr("block size "));
+    m_udsBlockSpin->setSpecialValueText(tr("block size all"));
+    m_udsBlockSpin->setValue(m_section.udsBlockSize);
+    m_udsBlockSpin->setToolTip(tr("For a multi-frame response: how many consecutive frames the "
+                                  "ECU may send before the unit's next flow control (0: all)."));
+    fcRow->addWidget(m_udsBlockSpin);
+    m_udsStMinSpin = new QSpinBox;
+    m_udsStMinSpin->setRange(0, 127);
+    m_udsStMinSpin->setPrefix(tr("STmin "));
+    m_udsStMinSpin->setSuffix(tr(" ms"));
+    m_udsStMinSpin->setValue(m_section.udsStMin);
+    m_udsStMinSpin->setToolTip(tr("The gap the unit asks the ECU to keep between its "
+                                  "consecutive frames."));
+    fcRow->addWidget(m_udsStMinSpin);
+    udsGrid->addLayout(fcRow, ur, 3);
+    ++ur;
+    udsGrid->addWidget(new QLabel(tr("Result Channel :")), ur, 0);
+    m_udsResultEdit = new QLineEdit;
+    m_udsResultEdit->setReadOnly(true);
+    ct::setChannelField(m_udsResultEdit, m_section.udsResultChannel, m_config->catalog());
+    m_udsResultEdit->setToolTip(tr("Told how each request ended: 0 a positive response, 1 to 255 "
+                                   "a negative response's code, 256 no response in time, 257 a "
+                                   "transport fault. Optional."));
+    udsGrid->addWidget(m_udsResultEdit, ur, 1, 1, 2);
+    m_udsResultButton = new QPushButton(tr("Select…"));
+    connect(m_udsResultButton, &QPushButton::clicked, this,
+            &SectionEditorDialog::onSelectUdsResultChannel);
+    udsGrid->addWidget(m_udsResultButton, ur, 3);
+    layout->addWidget(m_udsGroup);
+
     // CAN Triple-specific: gateway routing of this message.
     m_routeGroup = new QGroupBox(tr("Gateway Routing (CAN Triple)"));
     auto *routeRow = new QHBoxLayout(m_routeGroup);
@@ -657,6 +779,74 @@ void SectionEditorDialog::buildParametersTab(QWidget *page)
 //
 // `editable` is the tier's verdict, ANDed into every line rather than applied as
 // a second pass, so there is no window in which a locked field is briefly live.
+// A UDS request's bytes as the Request field shows them ("22 F1 90"), and
+// back: hex pairs, spaces, commas and 0x prefixes allowed, nothing else.
+static QString udsHexText(const QByteArray &bytes)
+{
+    return QString::fromLatin1(bytes.toHex(' ')).toUpper();
+}
+
+static QByteArray udsParseHex(QString text, bool *ok)
+{
+    text.remove(QLatin1Char(' ')).remove(QLatin1Char(',')).remove(QLatin1Char('\t'));
+    text.replace(QLatin1String("0x"), QString(), Qt::CaseInsensitive);
+    const bool valid = !text.isEmpty() && text.size() % 2 == 0
+                       && QRegularExpression(QStringLiteral("^[0-9A-Fa-f]+$")).match(text).hasMatch();
+    if (ok)
+        *ok = valid;
+    return valid ? QByteArray::fromHex(text.toLatin1()) : QByteArray();
+}
+
+void SectionEditorDialog::updateUdsControls(bool editable)
+{
+    if (!m_udsGroup)
+        return;
+    const bool uds = SectionDevice(m_deviceCombo->currentData().toInt()) == SectionDevice::UdsRequest;
+    m_udsGroup->setVisible(uds);
+    const QList<QWidget *> fields = {m_udsResponseEdit, m_udsRequestEdit, m_udsAwaitCheck,
+                                     m_udsTimeoutSpin,  m_udsPendingSpin, m_udsPadCombo,
+                                     m_udsBlockSpin,    m_udsStMinSpin,   m_udsResultEdit,
+                                     m_udsResultButton};
+    for (QWidget *w : fields)
+        w->setEnabled(editable);
+    if (m_addressLabel)
+        m_addressLabel->setText(uds ? tr("Request ID :") : tr("Base Address :"));
+    m_lengthLabel->setText(uds ? tr("Response Length :") : tr("Message Length :"));
+    m_lengthEdit->setToolTip(
+        uds ? tr("The bytes of the response kept for the channels, 1 to 4,095. Byte 0 is the "
+                 "response's service byte, so a Read Data By Identifier's data begins at byte 3.")
+            : QString());
+}
+
+void SectionEditorDialog::onSelectUdsResultChannel()
+{
+    // The request WRITES this channel (how it ended), so an output pick, as the
+    // CRC channel's is.
+    syncParametersFromUi();
+    const QString current = ct::channelField(m_udsResultEdit);
+    const QString picked = SelectChannelDialog::pickOutput(m_config, current, this, liveView());
+    if (picked.isEmpty())
+        return;
+    ct::setChannelField(m_udsResultEdit, picked, m_config->catalog());
+}
+
+void SectionEditorDialog::updateBrsCheck(bool editable)
+{
+    if (!m_brsCheck)
+        return;
+    const auto device = SectionDevice(m_deviceCombo->currentData().toInt());
+    const bool transmit = device == SectionDevice::TransmitMessage
+                          || device == SectionDevice::TransmitCrc8
+                          || device == SectionDevice::UdsRequest; // its request's frames
+    const bool fd = m_fdCheck->isChecked();
+    m_brsCheck->setVisible(transmit);
+    m_brsCheck->setEnabled(editable && transmit && fd && m_brsAllowed);
+    // What the frame will do: a classic frame has no bit rate switch, and a
+    // target that cannot send FD without it always switches.
+    const QSignalBlocker blocked(m_brsCheck);
+    m_brsCheck->setChecked(fd && (!m_brsAllowed || m_brsChoice));
+}
+
 void SectionEditorDialog::applyDeviceKindEnablement(bool editable)
 {
     const auto device = SectionDevice(m_deviceCombo->currentData().toInt());
@@ -665,8 +855,11 @@ void SectionEditorDialog::applyDeviceKindEnablement(bool editable)
     // `transmit` line below. Left out, the CRC variant would arrive with its
     // Transmit Rate and Message Length dead, which is how "behaves exactly like
     // Transmit Message" quietly stops being true.
-    const bool transmit =
-        device == SectionDevice::TransmitMessage || device == SectionDevice::TransmitCrc8;
+    // A UDS request is timed like a transmit message (its request) and decodes
+    // like a receive one (its response), so it takes both kinds' controls.
+    const bool uds = device == SectionDevice::UdsRequest;
+    const bool transmit = device == SectionDevice::TransmitMessage
+                          || device == SectionDevice::TransmitCrc8 || uds;
     const bool relay = device == SectionDevice::MessageRelay;
     // A relay is a whole-frame gateway rule — none of the message framing,
     // timeout, alignment, length or channel controls apply to it.
@@ -680,10 +873,12 @@ void SectionEditorDialog::applyDeviceKindEnablement(bool editable)
     // message kind never allowed.
     m_txConditionLabel->setEnabled(editable && transmit);
     m_txConditionCombo->setEnabled(editable && transmit);
-    m_timeoutSpin->setEnabled(editable && !transmit && !relay);
-    m_defaultTimeoutCheck->setEnabled(editable && !transmit && !relay);
+    m_timeoutSpin->setEnabled(editable && (!transmit || uds) && !relay);
+    m_defaultTimeoutCheck->setEnabled(editable && (!transmit || uds) && !relay);
     m_alignmentCombo->setEnabled(editable && !relay);
     m_fdCheck->setEnabled(editable && !relay && m_fdAllowed);
+    updateBrsCheck(editable); // BRS beside it: a transmit message's alone
+    updateUdsControls(editable);
     // Message length is the DLC of a frame you compose; a receive message's
     // length comes from the sender, so only a transmit message sets it.
     m_lengthLabel->setEnabled(editable && transmit);
@@ -696,7 +891,7 @@ void SectionEditorDialog::applyDeviceKindEnablement(bool editable)
     m_addressEdit->setEnabled(editable);
     m_bitmaskEdit->setEnabled(editable);
     m_relayInvertCheck->setEnabled(editable);
-    m_routeEnableCheck->setEnabled(editable);
+    m_routeEnableCheck->setEnabled(editable && !uds); // a response is not routed
     for (int i = 0; i < 3; ++i) {
         // The source bus is never a forward target, whatever the tier says.
         m_routeBusCheck[i]->setEnabled(editable && m_routeEnableCheck->isChecked()
@@ -707,12 +902,13 @@ void SectionEditorDialog::applyDeviceKindEnablement(bool editable)
     // Null until buildChannelsTab has run.
     if (m_singleRadio) {
         m_singleRadio->setEnabled(editable);
-        m_compoundRadio->setEnabled(editable);
+        m_compoundRadio->setEnabled(editable && !uds); // one response, one layout
     }
     if (m_txModeCombo)
         m_txModeCombo->setEnabled(editable);
     if (m_tabs && m_tabs->count() > 1) {
-        m_tabs->setTabText(1, transmit ? tr("Transmitted Channels") : tr("Received Channels"));
+        m_tabs->setTabText(1, transmit && !uds ? tr("Transmitted Channels")
+                                               : tr("Received Channels"));
         // Neither a relay nor an OFF message carries channels the device acts
         // on: a relay is a whole-frame gateway rule, and an Off message is not
         // laid out at all — findLayoutClashes and mapToDevice both skip it. So
@@ -767,8 +963,9 @@ void SectionEditorDialog::updateRelayControls()
 void SectionEditorDialog::updateTriggerControls()
 {
     const auto device = SectionDevice(m_deviceCombo->currentData().toInt());
-    const bool transmit =
-        device == SectionDevice::TransmitMessage || device == SectionDevice::TransmitCrc8;
+    const bool transmit = device == SectionDevice::TransmitMessage
+                          || device == SectionDevice::TransmitCrc8
+                          || device == SectionDevice::UdsRequest;
     // Hidden rather than merely disabled on a Cyclic message: the two settings
     // have no meaning at all without a trigger, and a greyed-out control invites
     // the reader to wonder what would happen if they could reach it.
@@ -1458,6 +1655,27 @@ void SectionEditorDialog::syncParametersFromUi()
         text = text.mid(2);
     m_section.baseAddress = text.toUInt(nullptr, 16);
     m_section.fd = m_fdCheck->isChecked();
+    m_section.brs = m_brsChoice; // kept for a classic frame too, for when it is FD again
+    if (m_udsGroup) {
+        QString rt = m_udsResponseEdit->text();
+        if (rt.startsWith(QLatin1String("0x"), Qt::CaseInsensitive))
+            rt = rt.mid(2);
+        bool rOk = false;
+        const uint resp = rt.toUInt(&rOk, 16);
+        if (rOk)
+            m_section.udsResponseAddress = resp;
+        bool reqOk = false;
+        const QByteArray req = udsParseHex(m_udsRequestEdit->text(), &reqOk);
+        if (reqOk)
+            m_section.udsRequest = req;
+        m_section.udsAwaitResponse = m_udsAwaitCheck->isChecked();
+        m_section.udsTimeoutMs = m_udsTimeoutSpin->value();
+        m_section.udsPendingMs = m_udsPendingSpin->value();
+        m_section.udsPadByte = m_udsPadCombo->currentData().toInt();
+        m_section.udsBlockSize = m_udsBlockSpin->value();
+        m_section.udsStMin = m_udsStMinSpin->value();
+        m_section.udsResultChannel = ct::channelField(m_udsResultEdit);
+    }
     bool lengthOk = false;
     const int length = ct::parseIntText(m_lengthEdit->text(), &lengthOk);
     if (lengthOk) // keep the previous value while the field is cleared mid-edit
@@ -1536,28 +1754,30 @@ void SectionEditorDialog::syncParametersFromUi()
         m_section.crcRefOut = m_crcRefOutCheck->isChecked();
 
         QList<CommsSection::CrcElement> elements;
-        const int count = m_crcCountSpin->value();
+        ensureCrcRows(m_crcCountSpin->value());
+        const int count = qMin(m_crcCountSpin->value(), int(m_crcRows.size()));
         elements.reserve(count);
         for (int i = 0; i < count; ++i) {
+            const CrcRow &row = m_crcRows.at(i);
             CommsSection::CrcElement e;
-            e.type = m_crcElemType[i]->currentData().toInt();
+            e.type = row.type->currentData().toInt();
             if (e.type == CommsSection::CrcElement::Id) {
-                e.value = m_crcElemId[i]->currentData().toInt();
+                e.value = row.id->currentData().toInt();
             } else if (e.type == CommsSection::CrcElement::Raw) {
                 bool rawOk = false;
-                const int raw = parseHexByte(m_crcElemRaw[i]->text(), &rawOk);
+                const int raw = parseHexByte(row.raw->text(), &rawOk);
                 const bool wasRaw = i < m_section.crcElements.size()
                                     && m_section.crcElements.at(i).type
                                            == CommsSection::CrcElement::Raw;
                 e.value = rawOk ? raw : (wasRaw ? m_section.crcElements.at(i).value : 0);
             } else if (e.type == CommsSection::CrcElement::IdAll) {
-                e.value = m_crcElemIdBytes[i]->currentData().toInt();
-                e.lsbFirst = m_crcElemIdOrder[i]->currentData().toBool();
+                e.value = row.idBytes->currentData().toInt();
+                e.lsbFirst = row.idOrder->currentData().toBool();
             } else if (e.type == CommsSection::CrcElement::DataRun) {
-                e.value = m_crcElemRunFirst[i]->currentData().toInt();
-                e.last = m_crcElemRunLast[i]->currentData().toInt();
+                e.value = row.runFirst->currentData().toInt();
+                e.last = row.runLast->currentData().toInt();
             } else {
-                e.value = m_crcElemData[i]->currentData().toInt();
+                e.value = row.data->currentData().toInt();
             }
             elements.append(e);
         }
@@ -1586,6 +1806,7 @@ void SectionEditorDialog::syncParametersFromUi()
 
     if (m_section.name.isEmpty()) {
         const QString direction = m_section.isTransmit() ? tr("Transmit")
+                                  : m_section.isUds()    ? tr("UDS")
                                   : m_section.isRelay()  ? tr("Relay")
                                                          : tr("Receive");
         m_section.name = QStringLiteral("%1 0x%2").arg(direction,
@@ -1706,13 +1927,6 @@ void SectionEditorDialog::buildChannelsTab(QWidget *page)
 // other two tabs, and read back in syncParametersFromUi.
 void SectionEditorDialog::buildCrcTab(QWidget *page)
 {
-    // kCrcElementSlots restates the WIRE's maximum so the header can size the
-    // widget arrays without including the wire header. If the firmware ever
-    // grows the element table this trips at compile time, instead of the UI
-    // silently truncating every recipe to fifteen.
-    static_assert(kCrcElementSlots == CRC8_MAX_ELEMENTS,
-                  "the pre-built element rows must match the wire's element table");
-
     auto *layout = new QVBoxLayout(page);
 
     // The frame bytes a recipe may name: 0..63 on a CAN Triple 2.0 (its
@@ -1729,6 +1943,19 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
             maxByte = qMax(maxByte, e.last);
     }
     maxByte = qBound(7, maxByte, 63);
+    m_crcMaxByte = maxByte;
+    // The elements a rule takes on the target: 15, or 70 on a CAN Triple 2.0
+    // whose rules run on into more records (long rules). Never fewer than the
+    // section already has, for the bytes' reason above.
+    m_crcMaxElements = qMax(target.crc8MaxElements(), int(m_section.crcElements.size()));
+    // One list of the bytes for every row's byte combos to share: seventy rows
+    // of three would otherwise build thirteen thousand items at every open.
+    m_crcByteModel = new QStandardItemModel(this);
+    for (int b = 0; b <= maxByte; ++b) {
+        auto *item = new QStandardItem(tr("Byte %1").arg(b));
+        item->setData(b, Qt::UserRole);
+        m_crcByteModel->appendRow(item);
+    }
 
     auto *paramGroup = new QGroupBox(tr("CRC8 Checksum"));
     auto *grid = new QGridLayout(paramGroup);
@@ -1827,7 +2054,7 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
     auto *countRow = new QHBoxLayout;
     countRow->addWidget(new QLabel(tr("Element Count :")));
     m_crcCountSpin = new ct::HexSpinBox;
-    m_crcCountSpin->setRange(0, kCrcElementSlots);
+    m_crcCountSpin->setRange(0, m_crcMaxElements);
     // Typed, not spun — the arrows are off by request, this is a number you
     // know, not one you nudge. The range starts at ZERO: an element-less
     // recipe is legal (nothing feeds the register, so the stamp degenerates to
@@ -1837,36 +2064,63 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
     // typed.
     m_crcCountSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     // Stripped of its buttons the spin box's width hint collapses to a slot
-    // barely one digit wide. Sized off the font rather than in pixels so "15"
+    // barely one digit wide. Sized off the font rather than in pixels so "70"
     // types comfortably at any DPI.
     m_crcCountSpin->setMinimumWidth(
         m_crcCountSpin->fontMetrics().horizontalAdvance(QStringLiteral("000")) + 24);
-    m_crcCountSpin->setValue(qBound(0, int(m_section.crcElements.size()), kCrcElementSlots));
+    m_crcCountSpin->setValue(qBound(0, int(m_section.crcElements.size()), m_crcMaxElements));
     m_crcCountSpin->setToolTip(
-        tr("How many of the element rows below feed the checksum, in order. An ID, "
-           "Data or Raw Value element contributes one byte; on a CAN Triple 2.0, "
-           "ID (Whole) contributes the identifier's bytes and Data Run a range of "
-           "the frame's bytes."));
-    connect(m_crcCountSpin, &QSpinBox::valueChanged, this,
-            [this]() { applyCrcEnablement(protocolFieldsEnabled()); });
+        tr("How many of the element rows below feed the checksum, in order: up to %1 "
+           "here. An ID, Data or Raw Value element contributes one byte; on a CAN "
+           "Triple 2.0, ID (Whole) contributes the identifier's bytes and Data Run a "
+           "range of the frame's bytes, and a rule takes up to 70 elements.")
+            .arg(m_crcMaxElements));
+    connect(m_crcCountSpin, &QSpinBox::valueChanged, this, [this](int count) {
+        ensureCrcRows(count);
+        applyCrcEnablement(protocolFieldsEnabled());
+    });
     countRow->addWidget(m_crcCountSpin);
     countRow->addStretch();
     elemLayout->addLayout(countRow);
 
-    // Fifteen pre-built rows in one grid, a per-row stack for the value side.
-    // Deliberately no add/remove churn: rows past Element Count are HIDDEN
-    // (applyCrcEnablement), but their widgets keep their contents — a count
-    // lowered by accident and raised again hands the user their elements back
-    // instead of fresh defaults.
+    // The element rows in one grid, a per-row stack for the value side, built
+    // as Element Count first reaches them (ensureCrcRows). Deliberately no
+    // add/remove churn: rows past Element Count are HIDDEN (applyCrcEnablement),
+    // but their widgets keep their contents — a count lowered by accident and
+    // raised again hands the user their elements back instead of fresh
+    // defaults.
     auto *rowsHost = new QWidget;
-    auto *rowsGrid = new QGridLayout(rowsHost);
-    rowsGrid->setContentsMargins(0, 0, 0, 0);
+    m_crcRowsGrid = new QGridLayout(rowsHost);
+    m_crcRowsGrid->setContentsMargins(0, 0, 0, 0);
     // No stretch on the widget columns: every field hugs its own text — the
     // type combo already did, the value side must match — and the leftover
     // width pools in the empty trailing column instead of ballooning the
     // right-hand field across the tab.
-    rowsGrid->setColumnStretch(3, 1);
-    for (int i = 0; i < kCrcElementSlots; ++i) {
+    m_crcRowsGrid->setColumnStretch(3, 1);
+    ensureCrcRows(m_crcCountSpin->value());
+
+    // Rows of combos outrun a 768-tall screen once the recipe group
+    // sits above them, and a grid does not scroll — the same arithmetic that
+    // capped the frame map's size hint. Scrolling here keeps this tab from
+    // setting the whole dialog's minimum height.
+    auto *scroll = new QScrollArea;
+    scroll->setWidget(rowsHost);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    elemLayout->addWidget(scroll, 1);
+    layout->addWidget(elemGroup, 1);
+}
+
+void SectionEditorDialog::ensureCrcRows(int count)
+{
+    if (!m_crcRowsGrid)
+        return;
+    count = qBound(0, count, m_crcMaxElements);
+    const DeviceCapacity &target = m_config->capacity();
+    while (m_crcRows.size() < count) {
+        const int i = int(m_crcRows.size());
+        CrcRow row;
         // Data / Byte 0 for a slot the section does not fill — the default the
         // contract names, and safer than a zeroed struct's accidents would be if
         // the encoding ever changed: a frame byte, not a surprise ID byte.
@@ -1874,23 +2128,23 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
         if (i < m_section.crcElements.size())
             initial = m_section.crcElements.at(i);
 
-        m_crcElemLabel[i] = new QLabel(tr("Element %1 :").arg(i + 1));
-        rowsGrid->addWidget(m_crcElemLabel[i], i, 0);
+        row.label = new QLabel(tr("Element %1 :").arg(i + 1));
+        m_crcRowsGrid->addWidget(row.label, i, 0);
 
-        m_crcElemType[i] = new QComboBox;
+        row.type = new QComboBox;
         // Item order matches CrcElement::Type's encoding, and the stack's pages
         // are added in the same order — which is what lets an index drive all
         // three with no mapping table to fall out of step.
-        m_crcElemType[i]->addItem(tr("ID"), int(CommsSection::CrcElement::Id));
-        m_crcElemType[i]->addItem(tr("Data"), int(CommsSection::CrcElement::Data));
-        m_crcElemType[i]->addItem(tr("Raw Value"), int(CommsSection::CrcElement::Raw));
-        m_crcElemType[i]->addItem(tr("ID (Whole)"), int(CommsSection::CrcElement::IdAll));
-        m_crcElemType[i]->addItem(tr("Data Run"), int(CommsSection::CrcElement::DataRun));
+        row.type->addItem(tr("ID"), int(CommsSection::CrcElement::Id));
+        row.type->addItem(tr("Data"), int(CommsSection::CrcElement::Data));
+        row.type->addItem(tr("Raw Value"), int(CommsSection::CrcElement::Raw));
+        row.type->addItem(tr("ID (Whole)"), int(CommsSection::CrcElement::IdAll));
+        row.type->addItem(tr("Data Run"), int(CommsSection::CrcElement::DataRun));
         // The last two are the CAN Triple 2.0's (its capacity report says so): a
         // firmware without them skips the element and stamps a different CRC.
         // Greyed where the target lacks them rather than left out, so an item's
         // index stays its type, and a section that already uses one shows it.
-        if (auto *model = qobject_cast<QStandardItemModel *>(m_crcElemType[i]->model())) {
+        if (auto *model = qobject_cast<QStandardItemModel *>(row.type->model())) {
             const QString needs =
                 tr("Needs a CAN Triple 2.0: choose one as the target, or connect one.");
             if (!target.crc8WholeId()) {
@@ -1902,145 +2156,134 @@ void SectionEditorDialog::buildCrcTab(QWidget *page)
                 model->item(int(CommsSection::CrcElement::DataRun))->setToolTip(needs);
             }
         }
-        m_crcElemType[i]->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-        rowsGrid->addWidget(m_crcElemType[i], i, 1);
+        row.type->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+        m_crcRowsGrid->addWidget(row.type, i, 1);
 
-        m_crcElemStack[i] = new QStackedWidget;
+        row.stack = new QStackedWidget;
         // The stack's default policy lets it grow vertically, and inside a
         // widgetResizable scroll area a nearly-empty grid has height to hand
         // out — the combos refuse it (their vertical hint is Fixed), the stack
         // would take it and tower over its own row. Its faces are all one
         // combo tall; hold it there.
-        m_crcElemStack[i]->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-        m_crcElemId[i] = new QComboBox;
+        row.stack->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        row.id = new QComboBox;
         // Which byte of the CAN identifier feeds the CRC — spelt as the shift
         // the firmware performs, because that is how OEM checksum specs quote it.
-        m_crcElemId[i]->addItem(tr("ID"), 0);
-        m_crcElemId[i]->addItem(tr("ID >> 8"), 1);
-        m_crcElemId[i]->addItem(tr("ID >> 16"), 2);
-        m_crcElemId[i]->addItem(tr("ID >> 24"), 3);
-        m_crcElemId[i]->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-        m_crcElemStack[i]->addWidget(m_crcElemId[i]);
-        m_crcElemData[i] = new QComboBox;
-        for (int b = 0; b <= maxByte; ++b)
-            m_crcElemData[i]->addItem(tr("Byte %1").arg(b), b);
-        m_crcElemData[i]->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-        m_crcElemStack[i]->addWidget(m_crcElemData[i]);
-        m_crcElemRaw[i] = new QLineEdit;
-        m_crcElemRaw[i]->setValidator(new QRegularExpressionValidator(
+        row.id->addItem(tr("ID"), 0);
+        row.id->addItem(tr("ID >> 8"), 1);
+        row.id->addItem(tr("ID >> 16"), 2);
+        row.id->addItem(tr("ID >> 24"), 3);
+        row.id->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+        row.stack->addWidget(row.id);
+        row.data = new QComboBox;
+        row.data->setModel(m_crcByteModel);
+        row.data->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+        row.stack->addWidget(row.data);
+        row.raw = new QLineEdit;
+        row.raw->setValidator(new QRegularExpressionValidator(
             QRegularExpression(QStringLiteral("(0[xX])?[0-9A-Fa-f]{1,2}")), this));
-        m_crcElemRaw[i]->setToolTip(tr("A literal byte fed to the CRC as-is (e.g. 0x5A)."));
+        row.raw->setToolTip(tr("A literal byte fed to the CRC as-is (e.g. 0x5A)."));
         // A QLineEdit's default hint is paragraph-wide; the domain is four
         // characters. Font-sized like the count spin, so the value column's
         // width is the widest of its three faces, not the widest of the tab.
-        m_crcElemRaw[i]->setFixedWidth(
-            m_crcElemRaw[i]->fontMetrics().horizontalAdvance(QStringLiteral("0x00")) + 24);
-        m_crcElemStack[i]->addWidget(m_crcElemRaw[i]);
+        row.raw->setFixedWidth(row.raw->fontMetrics().horizontalAdvance(QStringLiteral("0x00"))
+                               + 24);
+        row.stack->addWidget(row.raw);
 
         // ID (Whole): how many bytes of the identifier, and which end first.
         auto *idAllPage = new QWidget;
         auto *idAllRow = new QHBoxLayout(idAllPage);
         idAllRow->setContentsMargins(0, 0, 0, 0);
-        m_crcElemIdBytes[i] = new QComboBox;
-        m_crcElemIdBytes[i]->addItem(tr("By Frame (2 or 4 Bytes)"), 0);
+        row.idBytes = new QComboBox;
+        row.idBytes->addItem(tr("By Frame (2 or 4 Bytes)"), 0);
         for (int n = 1; n <= 4; ++n)
-            m_crcElemIdBytes[i]->addItem(n == 1 ? tr("1 Byte") : tr("%1 Bytes").arg(n), n);
-        m_crcElemIdBytes[i]->setToolTip(
+            row.idBytes->addItem(n == 1 ? tr("1 Byte") : tr("%1 Bytes").arg(n), n);
+        row.idBytes->setToolTip(
             tr("How many bytes of the identifier feed the CRC. By Frame is 2 for an "
                "11-bit identifier and 4 for a 29-bit one."));
-        m_crcElemIdOrder[i] = new QComboBox;
-        m_crcElemIdOrder[i]->addItem(tr("MSB First"), false);
-        m_crcElemIdOrder[i]->addItem(tr("LSB First"), true);
-        m_crcElemIdOrder[i]->setToolTip(
+        row.idOrder = new QComboBox;
+        row.idOrder->addItem(tr("MSB First"), false);
+        row.idOrder->addItem(tr("LSB First"), true);
+        row.idOrder->setToolTip(
             tr("Which end of the identifier goes first: MSB First feeds 0x18DAF110 as "
                "0x18, 0xDA, 0xF1, 0x10."));
-        for (QComboBox *c : {m_crcElemIdBytes[i], m_crcElemIdOrder[i]}) {
+        for (QComboBox *c : {row.idBytes, row.idOrder}) {
             c->setSizeAdjustPolicy(QComboBox::AdjustToContents);
             idAllRow->addWidget(c);
         }
         idAllRow->addStretch();
-        m_crcElemStack[i]->addWidget(idAllPage);
+        row.stack->addWidget(idAllPage);
 
         // Data Run: the first byte to the last, in either direction.
         auto *runPage = new QWidget;
         auto *runRow = new QHBoxLayout(runPage);
         runRow->setContentsMargins(0, 0, 0, 0);
-        m_crcElemRunFirst[i] = new QComboBox;
-        m_crcElemRunLast[i] = new QComboBox;
-        for (int b = 0; b <= maxByte; ++b) {
-            m_crcElemRunFirst[i]->addItem(tr("Byte %1").arg(b), b);
-            m_crcElemRunLast[i]->addItem(tr("Byte %1").arg(b), b);
-        }
+        row.runFirst = new QComboBox;
+        row.runLast = new QComboBox;
         const QString runTip =
             tr("Every frame byte from the first to the last, in that order — counting "
                "down when the first is the higher — with the CRC's own byte left out "
                "wherever it falls.");
-        for (QComboBox *c : {m_crcElemRunFirst[i], m_crcElemRunLast[i]}) {
+        for (QComboBox *c : {row.runFirst, row.runLast}) {
+            c->setModel(m_crcByteModel);
             c->setToolTip(runTip);
             c->setSizeAdjustPolicy(QComboBox::AdjustToContents);
         }
-        runRow->addWidget(m_crcElemRunFirst[i]);
+        runRow->addWidget(row.runFirst);
         runRow->addWidget(new QLabel(tr("to")));
-        runRow->addWidget(m_crcElemRunLast[i]);
+        runRow->addWidget(row.runLast);
         runRow->addStretch();
-        m_crcElemStack[i]->addWidget(runPage);
-        rowsGrid->addWidget(m_crcElemStack[i], i, 2);
+        row.stack->addWidget(runPage);
+        m_crcRowsGrid->addWidget(row.stack, i, 2);
 
         // Every side is primed, not only the one the type names: the element's
         // value lands on its own side, the other two show defaults, so trying a
         // different type mid-edit starts somewhere sensible instead of at
         // whatever the last visit left behind.
-        m_crcElemId[i]->setCurrentIndex(
+        const int maxByte = m_crcMaxByte;
+        row.id->setCurrentIndex(
             initial.type == CommsSection::CrcElement::Id ? qBound(0, initial.value, 3) : 0);
-        m_crcElemData[i]->setCurrentIndex(
+        row.data->setCurrentIndex(
             initial.type == CommsSection::CrcElement::Data ? qBound(0, initial.value, maxByte)
                                                            : 0);
-        m_crcElemIdBytes[i]->setCurrentIndex(
+        row.idBytes->setCurrentIndex(
             initial.type == CommsSection::CrcElement::IdAll ? qBound(0, initial.value, 4) : 0);
-        m_crcElemIdOrder[i]->setCurrentIndex(
+        row.idOrder->setCurrentIndex(
             initial.type == CommsSection::CrcElement::IdAll && initial.lsbFirst ? 1 : 0);
         // A new run starts as the whole message: Byte 0 to its last byte.
-        m_crcElemRunFirst[i]->setCurrentIndex(
+        row.runFirst->setCurrentIndex(
             initial.type == CommsSection::CrcElement::DataRun ? qBound(0, initial.value, maxByte)
                                                               : 0);
-        m_crcElemRunLast[i]->setCurrentIndex(
+        row.runLast->setCurrentIndex(
             initial.type == CommsSection::CrcElement::DataRun
                 ? qBound(0, initial.last, maxByte)
                 : qBound(0, m_section.messageLengthBytes - 1, maxByte));
-        reformatHexByteEdit(m_crcElemRaw[i],
+        reformatHexByteEdit(row.raw,
                             initial.type == CommsSection::CrcElement::Raw ? initial.value : 0);
-        connect(m_crcElemRaw[i], &QLineEdit::editingFinished, this, [this, i]() {
+
+        const int typeIndex = qBound(0, initial.type, int(CommsSection::CrcElement::DataRun));
+        row.type->setCurrentIndex(typeIndex);
+        row.stack->setCurrentIndex(typeIndex);
+        m_crcRows.append(row);
+        // Connected once the row is in m_crcRows, which the handlers index.
+        connect(row.raw, &QLineEdit::editingFinished, this, [this, i]() {
             // Fall back to what the section holds for this slot — kept fresh by
             // syncParametersFromUi — matching the other hex fields' recovery.
             const auto &elems = m_section.crcElements;
             const bool wasRaw = i < elems.size()
                                 && elems.at(i).type == CommsSection::CrcElement::Raw;
-            reformatHexByteEdit(m_crcElemRaw[i], wasRaw ? elems.at(i).value : 0);
+            reformatHexByteEdit(m_crcRows[i].raw, wasRaw ? elems.at(i).value : 0);
         });
-
-        const int typeIndex = qBound(0, initial.type, int(CommsSection::CrcElement::DataRun));
-        m_crcElemType[i]->setCurrentIndex(typeIndex);
-        m_crcElemStack[i]->setCurrentIndex(typeIndex);
-        connect(m_crcElemType[i], &QComboBox::currentIndexChanged, this,
-                [this, i](int index) { m_crcElemStack[i]->setCurrentIndex(index); });
+        connect(row.type, &QComboBox::currentIndexChanged, this,
+                [this, i](int index) { m_crcRows[i].stack->setCurrentIndex(index); });
     }
     // The vertical twin of the trailing stretch column: with most rows hidden
     // behind a low Element Count, the viewport's spare height pools in this
-    // empty bottom row, so the visible rows pack to the top at combo height
-    // instead of drifting apart to share the space.
-    rowsGrid->setRowStretch(kCrcElementSlots, 1);
-
-    // Fifteen rows of combos outrun a 768-tall screen once the recipe group
-    // sits above them, and a grid does not scroll — the same arithmetic that
-    // capped the frame map's size hint. Scrolling here keeps this tab from
-    // setting the whole dialog's minimum height.
-    auto *scroll = new QScrollArea;
-    scroll->setWidget(rowsHost);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    elemLayout->addWidget(scroll, 1);
-    layout->addWidget(elemGroup, 1);
+    // empty row below the last one built, so the visible rows pack to the top
+    // at combo height instead of drifting apart to share the space.
+    m_crcRowsGrid->setRowStretch(m_crcStretchRow, 0);
+    m_crcStretchRow = int(m_crcRows.size());
+    m_crcRowsGrid->setRowStretch(m_crcStretchRow, 1);
 }
 
 void SectionEditorDialog::onSelectCrcChannel()
@@ -2085,18 +2328,20 @@ void SectionEditorDialog::applyCrcEnablement(bool editable)
     m_crcRefOutCheck->setEnabled(live);
     m_crcCountSpin->setEnabled(live);
     const int count = m_crcCountSpin->value();
-    for (int i = 0; i < kCrcElementSlots; ++i) {
+    ensureCrcRows(count);
+    for (int i = 0; i < m_crcRows.size(); ++i) {
         // Rows past Element Count are not shown at all — the tab presents
         // exactly the recipe's length, because only the first `count` rows are
         // read back. The hidden widgets keep their contents (see buildCrcTab).
         // Enablement stays the tier's: a locked section shows its rows dead.
         const bool rowUsed = i < count;
-        m_crcElemLabel[i]->setVisible(rowUsed);
-        m_crcElemType[i]->setVisible(rowUsed);
-        m_crcElemStack[i]->setVisible(rowUsed);
-        m_crcElemLabel[i]->setEnabled(live);
-        m_crcElemType[i]->setEnabled(live);
-        m_crcElemStack[i]->setEnabled(live);
+        const CrcRow &row = m_crcRows.at(i);
+        row.label->setVisible(rowUsed);
+        row.type->setVisible(rowUsed);
+        row.stack->setVisible(rowUsed);
+        row.label->setEnabled(live);
+        row.type->setEnabled(live);
+        row.stack->setEnabled(live);
     }
 }
 
@@ -2113,9 +2358,12 @@ void SectionEditorDialog::refreshBitTable()
     // map is its Message Length, not the bus's frame kind.
     const bool transmit =
         device == SectionDevice::TransmitMessage || device == SectionDevice::TransmitCrc8;
+    // A UDS request's map is its response, as long as the Response Length says.
+    const bool uds = device == SectionDevice::UdsRequest;
     bool lengthOk = false;
     const int typed = ct::parseIntText(m_lengthEdit->text(), &lengthOk);
-    const int length = qBound(0, lengthOk ? typed : m_section.messageLengthBytes, 64);
+    const int length = qBound(0, lengthOk ? typed : m_section.messageLengthBytes,
+                              uds ? UDS_RESPONSE_MAX : 64);
 
     // A transmit message IS the frame it composes, so its Message Length is the
     // whole story. A receive message takes whatever the sender puts on the
@@ -2124,7 +2372,7 @@ void SectionEditorDialog::refreshBitTable()
     // beyond which nothing is extracted. qMax keeps a length that exceeds the
     // frame kind (its own validation Error) visible rather than cropping the
     // signals sitting in it.
-    const int frameBytes = transmit ? length : (m_fdCheck->isChecked() ? 64 : 8);
+    const int frameBytes = (transmit || uds) ? length : (m_fdCheck->isChecked() ? 64 : 8);
     const int byteCount = qBound(1, qMax(frameBytes, length), 64);
 
     const auto alignment = SectionAlignment(m_alignmentCombo->currentData().toInt());
@@ -2322,7 +2570,7 @@ void SectionEditorDialog::rebuildChannelList()
     // uncoloured — ColorItemDelegate passes anything without a background
     // straight through to the stock painter.
     const auto addRows = [this](const QList<CommsChannelRow> &rows) {
-        const bool receive = m_section.isReceive();
+        const bool receive = m_section.isReceive() || m_section.isUds(); // rows decode a frame
         for (int i = 0; i < rows.size(); ++i) {
             auto *item = new QListWidgetItem(rowSummary(rows[i], m_config->catalog(), receive),
                                              m_channelList);
@@ -2562,7 +2810,46 @@ void SectionEditorDialog::accept()
     const int length = ct::parseIntText(m_lengthEdit->text(), &lengthOk);
     static const QList<int> kFdLengths = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64};
     const bool fd = m_fdCheck->isChecked();
-    if (!relay && (!lengthOk || (fd ? !kFdLengths.contains(length) : (length < 0 || length > 8)))) {
+    // A UDS request: its bytes, its response's identifier and length.
+    const bool udsSection =
+        SectionDevice(m_deviceCombo->currentData().toInt()) == SectionDevice::UdsRequest;
+    if (udsSection) {
+        bool reqOk = false;
+        const QByteArray req = udsParseHex(m_udsRequestEdit->text(), &reqOk);
+        if (!reqOk || req.isEmpty() || req.size() > UDS_REQUEST_MAX) {
+            QMessageBox::warning(this, windowTitle(),
+                                 tr("Enter the request as hex bytes, the service first (e.g. 22 "
+                                    "F1 90): 1 to 64 bytes."));
+            m_udsRequestEdit->setFocus();
+            return;
+        }
+        QString rt = m_udsResponseEdit->text();
+        if (rt.startsWith(QLatin1String("0x"), Qt::CaseInsensitive))
+            rt = rt.mid(2);
+        bool rOk = false;
+        const uint resp = rt.toUInt(&rOk, 16);
+        if (!rOk) {
+            QMessageBox::warning(this, windowTitle(),
+                                 tr("Enter a valid hexadecimal response ID (e.g. 0x7E8)."));
+            m_udsResponseEdit->setFocus();
+            return;
+        }
+        if (resp == addressText.toUInt(nullptr, 16)) {
+            QMessageBox::warning(this, windowTitle(),
+                                 tr("The response ID must differ from the request ID."));
+            m_udsResponseEdit->setFocus();
+            return;
+        }
+        if (!lengthOk || length < 1 || length > UDS_RESPONSE_MAX) {
+            QMessageBox::warning(this, windowTitle(),
+                                 tr("Response length must be 1 to 4,095 bytes: the bytes of the "
+                                    "response the channels decode."));
+            m_lengthEdit->setFocus();
+            return;
+        }
+    }
+    if (!relay && !udsSection
+        && (!lengthOk || (fd ? !kFdLengths.contains(length) : (length < 0 || length > 8)))) {
         QMessageBox::warning(this, windowTitle(),
                              fd ? tr("Message length must be 0–8, 12, 16, 20, 24, 32, 48 or "
                                      "64 bytes for a CAN FD frame.")
@@ -2599,19 +2886,20 @@ void SectionEditorDialog::accept()
         // reformats — but Return inside a cleared field skips editingFinished
         // (an Intermediate value never emits it) and lands straight here, and
         // that path must not hand syncParametersFromUi garbage to guess at.
-        for (int i = 0; i < m_crcCountSpin->value(); ++i) {
-            if (m_crcElemType[i]->currentData().toInt() != CommsSection::CrcElement::Raw)
+        ensureCrcRows(m_crcCountSpin->value());
+        for (int i = 0; i < qMin(m_crcCountSpin->value(), int(m_crcRows.size())); ++i) {
+            if (m_crcRows[i].type->currentData().toInt() != CommsSection::CrcElement::Raw)
                 continue;
             bool rawOk = false;
-            parseHexByte(m_crcElemRaw[i]->text(), &rawOk);
+            parseHexByte(m_crcRows[i].raw->text(), &rawOk);
             if (!rawOk) {
                 QMessageBox::warning(this, windowTitle(),
                                      tr("Element %1: enter the raw value as one hexadecimal "
                                         "byte (e.g. 0x5A).")
                                          .arg(i + 1));
                 m_tabs->setCurrentIndex(2);
-                m_crcElemRaw[i]->setFocus();
-                m_crcElemRaw[i]->selectAll();
+                m_crcRows[i].raw->setFocus();
+                m_crcRows[i].raw->selectAll();
                 return;
             }
         }

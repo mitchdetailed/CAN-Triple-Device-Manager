@@ -435,7 +435,7 @@ void MathDialog::rebuild()
 
 void MathDialog::onAdd()
 {
-    const int limit = m_config->capacity().capacityOf(DeviceTable::Math);
+    const int limit = m_config->capacity().limitOf(DeviceTable::Math);
     if (m_rows.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
                              tr("The device supports at most %1 math channels.").arg(limit));

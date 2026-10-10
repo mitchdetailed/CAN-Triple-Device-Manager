@@ -36,6 +36,7 @@ enum Column {
     ColMax,
     ColUnit,
     ColDefault,
+    ColKept,
     ColSource,
     ColCount
 };
@@ -50,7 +51,7 @@ bool timeoutDefaultFor(const Configuration &config, const QString &channelName, 
 {
     for (const BusConfig &bus : config.bus) {
         for (const CommsSection &s : bus.sections) {
-            if (!s.isReceive() || !s.defaultValueOnTimeout || s.receiveTimeoutMs <= 0)
+            if (!(s.isReceive() || s.isUds()) || !s.defaultValueOnTimeout || s.receiveTimeoutMs <= 0)
                 continue;
             for (const CommsChannelRow &row : s.allRows()) {
                 if (row.channelName.compare(channelName, Qt::CaseInsensitive) != 0)
@@ -143,7 +144,21 @@ ChannelEditorDialog::ChannelEditorDialog(Configuration *config, QWidget *parent)
     m_tree->setColumnCount(ColCount);
     m_tree->setHeaderLabels({tr("Channel"), tr("Data Type"), tr("Dec"), tr("Resolution"),
                              tr("Minimum"), tr("Maximum"), tr("Unit"), tr("Default on Timeout"),
-                             tr("Source")});
+                             tr("Kept"), tr("Source")});
+    m_tree->headerItem()->setToolTip(
+        ColKept, tr("Keep the channel's value across power cycles: a CAN Triple 2.0 puts it back "
+                    "when it starts. A received channel reads it until its message arrives, and "
+                    "a Set/Reset User Condition comes back latched as it was."));
+    // The Kept box is the one thing edited in place here: ticking it lists or
+    // unlists the channel (Configuration::retainedChannels). Ignored while the
+    // table is being filled, when every box is set from the list.
+    connect(m_tree, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
+        if (m_filling || column != ColKept)
+            return;
+        const QString name = item->data(ColName, Qt::UserRole).toString();
+        if (m_config->setRetainedChannel(name, item->checkState(ColKept) == Qt::Checked))
+            m_config->setDirty();
+    });
     m_tree->setRootIsDecorated(false);
     m_tree->setAllColumnsShowFocus(true);
     m_tree->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -182,7 +197,10 @@ void ChannelEditorDialog::rebuild()
     const QString previous = currentChannelName();
     // Sorting has to be off while filling or every insert re-sorts the view.
     m_tree->setSortingEnabled(false);
+    m_filling = true;
     m_tree->clear();
+    // Whether the target keeps channels at all: the box is offered only then.
+    const bool keeps = m_config->capacity().retainsChannels();
 
     const QList<Channel> all = m_config->catalog().allChannels();
     const QList<Channel> shown = m_config->catalog().search(m_searchEdit->text());
@@ -243,6 +261,20 @@ void ChannelEditorDialog::rebuild()
             item->setToolTip(ColDefault, tr("Applied when \"%1\" times out").arg(where));
         }
         item->setText(ColSource, sourceFor(usage, c.name));
+        // Kept across power cycles. A device channel is the firmware's, written
+        // afresh at every sample, so there is nothing to keep.
+        const bool deviceChannel = ChannelCatalog::isDeviceChannel(c.name);
+        item->setCheckState(ColKept, m_config->isRetainedChannel(c.name) ? Qt::Checked
+                                                                        : Qt::Unchecked);
+        if (!keeps || deviceChannel) {
+            item->setFlags(item->flags() & ~Qt::ItemIsUserCheckable);
+            item->setToolTip(ColKept, deviceChannel
+                                          ? tr("The device writes this channel afresh at every "
+                                               "sample: there is nothing to keep.")
+                                          : tr("The target firmware does not keep channels "
+                                               "across power cycles (a CAN Triple 2.0 does) — "
+                                               "see File > Target Firmware."));
+        }
 
         // An integer channel holds a scaled integer, so its reach is
         // rawRange x 10^-decimals. A type too small for the channel's own range
@@ -321,6 +353,7 @@ void ChannelEditorDialog::rebuild()
     }
 
     m_tree->setSortingEnabled(true);
+    m_filling = false;
     for (int col = 0; col < ColCount - 1; ++col)
         m_tree->resizeColumnToContents(col);
 

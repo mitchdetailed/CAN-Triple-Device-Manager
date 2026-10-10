@@ -27,6 +27,7 @@
 #include "../src/model/configuration.h"
 #include "../src/model/dbc_import.h"
 #include "../src/model/device_mapper.h"
+#include "../src/model/plan_budget.h"
 #include "../src/model/config_file.h"
 #include "../src/model/secure_file.h"
 #include "../src/model/sealed_stream.h"
@@ -40,6 +41,7 @@
 #include "../src/protocol/crc16.h"
 #include "../src/protocol/device_link.h"
 #include "../src/protocol/framer.h"
+#include "../src/protocol/stored_project.h"
 #include "fake_device_link.h"
 
 // The bytecode format a retained script image is written in, so this file can
@@ -56,7 +58,7 @@ static int failures = 0;
 // re-reading something this build just WROTE passes it: the pre-14 legacy
 // protection keys migrate only when the file actually predates 14, so handing
 // such a call a stale number would ratchet a Read Only section into Hidden.
-static constexpr int kCurrentSchemaVersion = 22;
+static constexpr int kCurrentSchemaVersion = 25;
 // A .ct3 fileVersion this build has never heard of, for checking that a file
 // from a NEWER release is refused rather than half-read. DERIVED, not typed:
 // it was the literal 14 until 2.3.0, the 13 -> 14 schema bump caught it up, and
@@ -3605,6 +3607,7 @@ static int v2RecordBytes(quint8 writeCmd)
     case CMD_WRITE_TABLE8X8_ROW: return int(sizeof(Table8x8GridRow));
     case CMD_WRITE_INTEG_CFG: return int(sizeof(IntegratorConfig));
     case CMD_WRITE_CRC8_CFG: return int(sizeof(Crc8Config));
+    case CMD_WRITE_UDS_CFG: return int(sizeof(UdsConfig));
     case CMD_WRITE_SCRIPT: return int(sizeof(ScriptChunk));
     default: return 0;
     }
@@ -3621,10 +3624,18 @@ static int v2RecordBytes(quint8 writeCmd)
 // tools/hwtest/labels_hw_test.py, and a Send and Get through these classes);
 // this keeps the Manager's half of it in every test run.
 struct LabelStoreUnit {
-    QHash<int, QByteArray> tables; // by WRITE command: the records, back to back
-    QByteArray names[3];           // by LABEL_KIND_*: the 32-byte slots, back to back
+    QHash<int, QByteArray> tables;         // by WRITE command: the records, back to back
+    QByteArray names[LABEL_KIND_COUNT];    // by LABEL_KIND_*: the 32-byte slots, back to back
+    int kinds = LABEL_KINDS_NAMES;         // the label kinds it knows (step 3b: all of them)
     int labelWrites = 0;
     int refuseSignalNamesAt = -1; // a READ_LABELS of channel names from here is refused
+    // Its CRC8 record: the 1.x one's 40 bytes, or 26 from the 2.0's store v22
+    // (PlanUnit sets it from its report).
+    int crc8Bytes = int(sizeof(Crc8Config));
+    int recordBytes(quint8 writeCmd) const
+    {
+        return writeCmd == CMD_WRITE_CRC8_CFG ? crc8Bytes : v2RecordBytes(writeCmd);
+    }
 
     FakeDeviceLink::Reply answer(quint8 cmd, const QByteArray &p)
     {
@@ -3651,7 +3662,7 @@ struct LabelStoreUnit {
                 return Reply::nack(ERR_INVALID_LEN);
             const int kind = quint8(p[0]), count = u16(3);
             const int at = u16(1) * LABEL_STORE_BYTES, bytes = count * LABEL_STORE_BYTES;
-            if (kind > LABEL_KIND_RELAY || count == 0)
+            if (kind >= kinds || count == 0)
                 return Reply::nack(ERR_OUT_OF_BOUNDS);
             if (cmd == CMD_READ_LABELS && kind == LABEL_KIND_SIGNAL && u16(1) == refuseSignalNamesAt)
                 return Reply::nack(ERR_FLASH_WRITE);
@@ -3664,13 +3675,13 @@ struct LabelStoreUnit {
             ++labelWrites;
             return Reply::ack();
         }
-        if (const int size = v2RecordBytes(cmd)) {
+        if (const int size = recordBytes(cmd)) {
             if (p.size() < 4 || p.size() != 4 + u16(2) * size)
                 return Reply::nack(ERR_INVALID_LEN);
             put(tables[cmd], u16(0) * size, p.mid(4));
             return Reply::ack();
         }
-        if (const int size = v2RecordBytes(quint8(cmd - 1))) {
+        if (const int size = recordBytes(quint8(cmd - 1))) {
             if (p.size() != 4)
                 return Reply::nack(ERR_INVALID_LEN);
             return Reply::ack(p + take(tables.value(cmd - 1), u16(0) * size, u16(2) * size));
@@ -3679,8 +3690,289 @@ struct LabelStoreUnit {
     }
 };
 
+// The label-store unit with the stored project beside it, staged the way the
+// 2.0 stages it (firmware/v2 protocol.h, "The stored project"): a CLEAR opens a
+// Send and its copy; writes land only there, each byte erased (0xFF) or already
+// that byte; reads answer from it while the Send is open and from the running
+// copy otherwise, 0xFF where nothing was written; the SAVE makes the Send's copy
+// the running one, so a Send that wrote none leaves the unit with none. The
+// tables and names stay LabelStoreUnit's, written in place: what is modelled
+// here is the project's own staging. firmware/v2 tools/hwtest/project_hw_test.py
+// holds the unit itself to the same rules.
+struct ProjectUnit : LabelStoreUnit {
+    QByteArray staged, live; // each up to the last byte written; 0xFF beyond
+    bool sendOpen = false;
+    int projectWrites = 0;
+    int refuseProjectReadAt = -1;  // a CMD_READ_PROJECT at this offset is refused
+    int refuseProjectWriteAt = -1; // a CMD_WRITE_PROJECT at this offset is refused
+    int lieAt = -1;                // a read covering this offset answers that byte flipped
+
+    FakeDeviceLink::Reply answer(quint8 cmd, const QByteArray &p)
+    {
+        using Reply = FakeDeviceLink::Reply;
+        if (cmd == CMD_CLEAR_CONFIG) {
+            sendOpen = true;
+            staged.clear();
+        } else if (cmd == CMD_SAVE_TO_FLASH) {
+            if (sendOpen) {
+                live = staged;
+                staged.clear();
+                sendOpen = false;
+            }
+        } else if (cmd == CMD_WRITE_PROJECT) {
+            if (p.size() <= 4)
+                return Reply::nack(ERR_INVALID_LEN);
+            const qint64 at = qFromLittleEndian<quint32>(p.constData());
+            const int n = int(p.size()) - 4;
+            if (at + n > PROJECT_BYTES)
+                return Reply::nack(ERR_OUT_OF_BOUNDS);
+            if (!sendOpen || at == refuseProjectWriteAt)
+                return Reply::nack(ERR_FLASH_WRITE);
+            if (staged.size() < at + n)
+                staged.append(int(at + n - staged.size()), '\xFF');
+            for (int i = 0; i < n; ++i) {
+                const char have = staged[int(at) + i];
+                if (have != p[4 + i] && have != '\xFF')
+                    return Reply::nack(ERR_FLASH_WRITE);
+            }
+            staged.replace(int(at), n, p.mid(4));
+            ++projectWrites;
+            return Reply::ack();
+        } else if (cmd == CMD_READ_PROJECT) {
+            if (p.size() != 6)
+                return Reply::nack(ERR_INVALID_LEN);
+            const qint64 at = qFromLittleEndian<quint32>(p.constData());
+            const int n = qFromLittleEndian<quint16>(p.constData() + 4);
+            if (n == 0 || n > PROJECT_READ_MAX || at + n > PROJECT_BYTES)
+                return Reply::nack(ERR_OUT_OF_BOUNDS);
+            if (at == refuseProjectReadAt)
+                return Reply::nack(ERR_FLASH_WRITE);
+            QByteArray out = (sendOpen ? staged : live).mid(int(at), n);
+            out.append(n - int(out.size()), '\xFF');
+            if (lieAt >= at && lieAt < at + n)
+                out[int(lieAt - at)] = char(out[int(lieAt - at)] ^ 0x01);
+            return Reply::ack(p + out);
+        }
+        return LabelStoreUnit::answer(cmd, p);
+    }
+};
+
 // Runs a transfer to its end: true when it finished well. A Get's tables land
 // in *tables. A transfer that never finishes fails rather than hangs.
+// ---- A CAN Triple 2.0 that takes a plan (phase 4) --------------------------
+
+// What a CAN Triple 2.0 states from phase 4 on: the label store's records, the
+// 2.0's store version, and its report's plan block — the ceilings a Send may
+// declare and what a plan costs. The rooms are the 2.0's own; the slices are a
+// short stand-in with every kind of measure in it (test_plan_v2 holds the
+// Manager's arithmetic to the unit's real ones).
+static DeviceCapacity planTarget()
+{
+    DeviceCapacity cap = labelStoreTarget();
+    cap.storeVersion = EXPECTED_STORE_VERSION_2;
+    cap.label = QStringLiteral("a CAN Triple 2.0 that takes a plan");
+    // And its CRC8, store v22: the 2.0's elements, and rules of up to 70 in
+    // records of 8, 26 bytes each.
+    cap.crc8Features = CAPACITY_CRC8_WHOLE_ID | CAPACITY_CRC8_DATA_RUNS | CAPACITY_CRC8_LONG_RULES;
+    cap.tables[int(DeviceTable::Crc8)].itemSize = V2_CRC8_BYTES + V2_CRC8_VALUES_BYTES;
+    // And its UDS requests, store v23: the sixteenth table (builtIn(), the 1.x
+    // layout this starts from, has fifteen), 32 records of 82 bytes. The
+    // declaration below counts the ceiling's entries, which the unit holds to
+    // its table count.
+    cap.canFeatures |= CAPACITY_CAN_UDS_REQUESTS;
+    cap.tables.resize(int(DeviceTable::Uds) + 1);
+    cap.tables[int(DeviceTable::Uds)] = TableCapacity{32, int(sizeof(UdsConfig))};
+    PlanBudget &p = cap.plan;
+    p.flags = CAPACITY_PLAN_STAGE;
+    p.headerBytes = 512;
+    p.flashBytes = 229296;
+    p.arenaBytes = 65536;
+    p.labelRegionBytes = 786432;
+    p.labelAlign = 4096;
+    p.refBytes = 2;
+    p.ceiling = {SIG_MSG_MAX, 65534, 4095, 4095, 4095, 4095, 4095, 4095,
+                 4095, 4095, 4095, 4095 * TABLE_8X8_SITES, 4095, MAX_SCRIPT_CHUNKS, 0xFFFE,
+                 4095};
+    p.measureCount = ARENA_MEASURE_COUNT;
+    p.stageTables = {6, 8, 10, 2, 4, 3};
+    using S = PlanBudget::Slice;
+    p.slices = {S{ARENA_MEASURE_CHANNEL, 4, 8},       S{ARENA_MEASURE_MESSAGE, 4, 16},
+                S{ARENA_MEASURE_MESSAGE_BIT, 4, 8},   S{ARENA_MEASURE_MESSAGE_WORD, 4, 8},
+                S{ARENA_MEASURE_CONDITION, 4, 24},    S{ARENA_MEASURE_COUNTER, 4, 8},
+                S{ARENA_MEASURE_INTEGRATOR, 4, 4},    S{ARENA_MEASURE_STAGE_ROW_BIT, 4, 12},
+                S{ARENA_MEASURE_CHANNEL_END, 2, 2},   S{ARENA_MEASURE_CONDITION, 2, 2},
+                S{ARENA_MEASURE_CHANNEL_BIT, 1, 1},   S{ARENA_MEASURE_TIMER, 1, 3}};
+    return cap;
+}
+
+// The table a record command writes (its READ is the command plus one); -1 for
+// a command that writes no table.
+static int tableOfWrite(quint8 writeCmd)
+{
+    switch (writeCmd) {
+    case CMD_WRITE_MSG_CFG: return int(DeviceTable::Messages);
+    case CMD_WRITE_SIG_CFG: return int(DeviceTable::Signals);
+    case CMD_WRITE_MATH_CFG: return int(DeviceTable::Math);
+    case CMD_WRITE_COND_CFG: return int(DeviceTable::Conditions);
+    case CMD_WRITE_COUNTER_CFG: return int(DeviceTable::Counters);
+    case CMD_WRITE_TIMER_CFG: return int(DeviceTable::Timers);
+    case CMD_WRITE_CONST_CFG: return int(DeviceTable::Constants);
+    case CMD_WRITE_RELAY_CFG: return int(DeviceTable::Relays);
+    case CMD_WRITE_TABLE2X16_DEF: return int(DeviceTable::Tables2x16Def);
+    case CMD_WRITE_TABLE2X16_OUT: return int(DeviceTable::Tables2x16Out);
+    case CMD_WRITE_TABLE8X8_DEF: return int(DeviceTable::Tables8x8Def);
+    case CMD_WRITE_TABLE8X8_ROW: return int(DeviceTable::Tables8x8Row);
+    case CMD_WRITE_INTEG_CFG: return int(DeviceTable::Integrators);
+    case CMD_WRITE_SCRIPT: return int(DeviceTable::Script);
+    case CMD_WRITE_CRC8_CFG: return int(DeviceTable::Crc8);
+    case CMD_WRITE_UDS_CFG: return int(DeviceTable::Uds);
+    default: return -1;
+    }
+}
+
+// The label-store unit as it takes a plan (firmware/v2, phase 4): CLEAR opens a
+// Send on the default plan; CMD_STAGE_PLAN declares the Send's own, only before
+// its first record, refused past a ceiling or past the unit's rooms by the
+// report's own arithmetic; records and names are taken only inside the plan,
+// and read only inside the running one; SAVE makes the Send's plan the running
+// one; CMD_GET_USAGE answers each table's plan and how many records it holds.
+struct PlanUnit : LabelStoreUnit {
+    DeviceCapacity report = planTarget();
+    QVector<int> running; // the running configuration's plan; empty: the default
+    QVector<int> staged;  // the open Send's
+    bool sendOpen = false;
+    bool written = false; // a record of the open Send
+    QList<QByteArray> plans; // every plan taken
+    // Step 3b: the value names the open Send's plan declared, and the running
+    // configuration's; the kinds its names have (the report's, at its SAVE).
+    int stagedValueNames = 0, runningValueNames = 0;
+    int stagedNotes = 0, runningNotes = 0; // Config Notes: the notes' slots declared
+    int runningKinds = LABEL_KINDS_NAMES;
+
+    QVector<int> defaults() const
+    {
+        QVector<int> d;
+        for (const TableCapacity &t : report.tables)
+            d.append(t.capacity);
+        return d;
+    }
+    int room(int table) const
+    {
+        const QVector<int> &p = sendOpen ? staged : running;
+        return (p.isEmpty() ? defaults() : p).value(table);
+    }
+
+    FakeDeviceLink::Reply answer(quint8 cmd, const QByteArray &p)
+    {
+        using Reply = FakeDeviceLink::Reply;
+        const auto u16 = [&p](int at) { return int(quint8(p[at])) | int(quint8(p[at + 1])) << 8; };
+        // The kinds it knows, as its report says (step 3b).
+        kinds = report.keepsNotes()        ? LABEL_KIND_COUNT
+                : report.keepsValueNames() ? LABEL_KIND_NOTE
+                : report.keepsUnits()      ? LABEL_KIND_VALUE_NAME
+                                           : LABEL_KINDS_NAMES;
+        // Its CRC8 record, as its report says (store v22: 26 bytes).
+        crc8Bytes = report.crc8LongRules() ? V2_CRC8_BYTES + V2_CRC8_VALUES_BYTES
+                                           : int(sizeof(Crc8Config));
+        if (cmd == CMD_CLEAR_CONFIG) {
+            sendOpen = true;
+            written = false;
+            staged = defaults();
+            stagedValueNames = 0;
+            stagedNotes = 0;
+        } else if (cmd == CMD_STAGE_PLAN) {
+            const int count = p.size() >= 2 ? quint8(p[1]) : -1;
+            // Step 3b: the value names after the capacities, on a unit that
+            // keeps them, and (Config Notes) the notes' slots after those.
+            const int tail = report.keepsNotes() && p.size() == 2 + 2 * count + 4    ? 4
+                             : report.keepsValueNames() && p.size() == 2 + 2 * count + 2 ? 2
+                                                                                         : 0;
+            if (count != int(report.tables.size()) || quint8(p[0]) != STAGE_PLAN_FORMAT
+                || p.size() != 2 + 2 * count + tail)
+                return Reply::nack(ERR_INVALID_LEN);
+            if (!sendOpen || written)
+                return Reply::nack(ERR_FLASH_WRITE);
+            QVector<int> plan;
+            for (int t = 0; t < count; ++t)
+                plan.append(u16(2 + 2 * t));
+            const int valueNames = tail ? u16(2 + 2 * count) : 0;
+            const int notes = tail == 4 ? u16(2 + 2 * count + 2) : 0;
+            if (notes > LABEL_NOTE_SLOTS_MAX)
+                return Reply::nack(ERR_OUT_OF_BOUNDS);
+            const PlanCostResult cost = report.planCost(plan, valueNames, notes);
+            if (!cost.fits())
+                return Reply::nack(cost.verdict);
+            staged = plan;
+            stagedValueNames = valueNames;
+            stagedNotes = notes;
+            plans.append(p);
+            return Reply::ack();
+        } else if (cmd == CMD_SAVE_TO_FLASH) {
+            if (sendOpen) {
+                running = staged;
+                runningValueNames = stagedValueNames;
+                runningNotes = stagedNotes;
+                runningKinds = kinds;
+                sendOpen = false;
+            }
+        } else if (cmd == CMD_GET_USAGE) {
+            if (!p.isEmpty())
+                return Reply::nack(ERR_INVALID_LEN);
+            UsageReportHeader h{};
+            h.format = USAGE_REPORT_FORMAT;
+            h.table_count = quint8(report.tables.size());
+            h.flags = USAGE_NAMES_KEPT;
+            QByteArray out(reinterpret_cast<const char *>(&h), int(sizeof(h)));
+            for (int t = 0; t < int(report.tables.size()); ++t) {
+                quint8 write = 0;
+                for (int c = 0; c < 256 && !write; ++c)
+                    if (tableOfWrite(quint8(c)) == t)
+                        write = quint8(c);
+                UsageEntry e{};
+                e.capacity = quint16(room(t));
+                e.used = quint16(tables.value(write).size() / recordBytes(write));
+                out.append(reinterpret_cast<const char *>(&e), int(sizeof(e)));
+            }
+            // Step 3b: the running configuration's names, kind by kind.
+            UsageLabels labels{};
+            labels.kinds = quint8(runningKinds);
+            labels.kind_slots[LABEL_KIND_MESSAGE] = quint16(room(int(DeviceTable::Messages)));
+            labels.kind_slots[LABEL_KIND_SIGNAL] = quint16(room(int(DeviceTable::Signals)));
+            labels.kind_slots[LABEL_KIND_RELAY] = quint16(room(int(DeviceTable::Relays)));
+            if (runningKinds > LABEL_KIND_UNIT)
+                labels.kind_slots[LABEL_KIND_UNIT] = quint16(room(int(DeviceTable::Signals)));
+            if (runningKinds > LABEL_KIND_VALUE_NAME)
+                labels.kind_slots[LABEL_KIND_VALUE_NAME] = quint16(runningValueNames);
+            if (runningKinds > LABEL_KIND_NOTE)
+                labels.kind_slots[LABEL_KIND_NOTE] = quint16(runningNotes);
+            out.append(reinterpret_cast<const char *>(&labels), int(sizeof(labels)));
+            return Reply::ack(out);
+        } else if (tableOfWrite(cmd) >= 0 && p.size() >= 4) {
+            if (u16(0) + u16(2) > room(tableOfWrite(cmd)))
+                return Reply::nack(ERR_OUT_OF_BOUNDS);
+            written = true;
+        } else if (tableOfWrite(quint8(cmd - 1)) >= 0 && p.size() >= 4) {
+            if (u16(0) + u16(2) > room(tableOfWrite(quint8(cmd - 1))))
+                return Reply::nack(ERR_OUT_OF_BOUNDS);
+        } else if ((cmd == CMD_WRITE_LABELS || cmd == CMD_READ_LABELS) && p.size() >= 5) {
+            static const int kTable[3] = {int(DeviceTable::Messages), int(DeviceTable::Signals),
+                                          int(DeviceTable::Relays)};
+            const int kind = quint8(p[0]);
+            if (kind <= LABEL_KIND_RELAY && u16(1) + u16(3) > room(kTable[kind]))
+                return Reply::nack(ERR_OUT_OF_BOUNDS);
+            // Step 3b: a unit for each channel, and the value names the plan declared.
+            if (kind == LABEL_KIND_UNIT && u16(1) + u16(3) > room(int(DeviceTable::Signals)))
+                return Reply::nack(ERR_OUT_OF_BOUNDS);
+            if (kind == LABEL_KIND_VALUE_NAME
+                && u16(1) + u16(3) > (sendOpen ? stagedValueNames : runningValueNames))
+                return Reply::nack(ERR_OUT_OF_BOUNDS);
+            if (kind == LABEL_KIND_NOTE && u16(1) + u16(3) > (sendOpen ? stagedNotes : runningNotes))
+                return Reply::nack(ERR_OUT_OF_BOUNDS);
+        }
+        return LabelStoreUnit::answer(cmd, p);
+    }
+};
+
 static bool runLabelTransfer(ConfigTransfer *t, QString *error, DeviceTables *tables = nullptr)
 {
     bool ok = false;
@@ -3702,6 +3994,1242 @@ static bool runLabelTransfer(ConfigTransfer *t, QString *error, DeviceTables *ta
     });
     loop.exec();
     return ok;
+}
+
+// Units and value names (phase 4, step 3b). A document's channel units and
+// value names are mapped for every target; a CAN Triple 2.0 that keeps them is
+// sent them (the units a slot per channel, the value names as many as the
+// plan declares, right after its capacities) and verified, a Get reads them
+// back over what GET_USAGE says the running configuration's names have and
+// rebuilds the channels with their units, quantities and value names, the
+// fingerprint the same both ways; a .ct3 keeps the value names; a unit that
+// keeps neither is sent neither, and nothing is read that its names lack.
+static void testUnitsAndValueNames()
+{
+    // Every unit the catalogue lists belongs to one quantity, so the quantity a
+    // Get gives a channel from its unit is the one the channel was made with.
+    for (const QString &q : ChannelCatalog::quantities())
+        for (const QString &u : ChannelCatalog::unitsForQuantity(q))
+            CHECK(u.isEmpty() || ChannelCatalog::quantityOfUnit(u) == q);
+    CHECK(ChannelCatalog::quantityOfUnit(QStringLiteral("furlongs")) == QStringLiteral("Unitless")
+          && ChannelCatalog::quantityOfUnit(QString()) == QStringLiteral("Unitless"));
+    DeviceCapacity cap = planTarget();
+    cap.labelFlags = LABEL_FLAG_UNITS | LABEL_FLAG_VALUE_NAMES;
+    CHECK(cap.keepsUnits() && cap.keepsValueNames());
+    const auto build = [](Configuration &c, const DeviceCapacity &target, bool named) {
+        c.setCapacity(target);
+        c.bus[0].enabled = true;
+        CommsSection rx;
+        rx.name = QStringLiteral("Transmission");
+        rx.device = SectionDevice::ReceiveMessage;
+        rx.baseAddress = 0x120;
+        rx.messageLengthBytes = 8;
+        rx.alignment = SectionAlignment::WordSwap;
+        const char *names[3] = {"Gear", "Coolant", "Boost"};
+        for (int i = 0; i < 3; ++i) {
+            CommsChannelRow row;
+            row.channelName = QString::fromLatin1(names[i]);
+            row.startBit = 16 * i;
+            row.bitLength = 16;
+            rx.rows.append(row);
+        }
+        c.bus[0].sections.append(rx);
+        Channel gear;
+        gear.name = QStringLiteral("Gear");
+        gear.dataType = QStringLiteral("u8");
+        gear.minValue = 0;
+        gear.maxValue = 255;
+        if (named)
+            gear.enumLabels = {{0, QStringLiteral("Park")}, {1, QStringLiteral("Reverse")},
+                               {2, QStringLiteral("Neutral")}, {3, QStringLiteral("Drive")}};
+        Channel coolant;
+        coolant.name = QStringLiteral("Coolant");
+        coolant.quantity = QStringLiteral("Temperature");
+        coolant.unit = QStringLiteral("C");
+        coolant.dataType = QStringLiteral("s16");
+        Channel boost;
+        boost.name = QStringLiteral("Boost");
+        boost.quantity = QStringLiteral("Pressure and Stress");
+        boost.unit = QStringLiteral("kPa");
+        boost.dataType = QStringLiteral("u16");
+        for (Channel *ch : {&gear, &coolant, &boost}) {
+            ch->userDefined = true;
+            c.catalog().addOrUpdateUserChannel(*ch);
+        }
+    };
+    Configuration cfg;
+    build(cfg, cap, true);
+    const MappingResult mr = mapToDevice(cfg);
+    for (const QString &e : mr.errors)
+        std::printf("      map: %s\n", qPrintable(e));
+    RT_REQUIRE(mr.ok());
+    const int g = mr.channelToSignal.value(QStringLiteral("gear"), -1);
+    const int c = mr.channelToSignal.value(QStringLiteral("coolant"), -1);
+    const int b = mr.channelToSignal.value(QStringLiteral("boost"), -1);
+    RT_REQUIRE(g >= 0 && c >= 0 && b >= 0);
+    RT_REQUIRE(mr.tables.unitLabels.size() == mr.tables.signalConfigs.size());
+    CHECK(mr.tables.unitLabels[c] == QByteArray("C") && mr.tables.unitLabels[b] == QByteArray("kPa")
+          && mr.tables.unitLabels[g].isEmpty());
+    RT_REQUIRE(mr.tables.valueNameLabels.size() == 4);
+    int sig = -1;
+    qint32 val = -1;
+    QString name;
+    CHECK(readValueNameSlot(mr.tables.valueNameLabels[0], &sig, &val, &name) && sig == g && val == 0
+          && name == QStringLiteral("Park"));
+    CHECK(readValueNameSlot(mr.tables.valueNameLabels[3], &sig, &val, &name) && sig == g && val == 3
+          && name == QStringLiteral("Drive"));
+    CHECK(mr.tables.valueNameLabels[0].size() == LABEL_STORE_BYTES);
+    // A value name longer than a slot holds is clipped, whole characters kept.
+    QString clipped;
+    CHECK(readValueNameSlot(valueNameSlot(1, 7, QStringLiteral("Gear position not available yet")),
+                            nullptr, nullptr, &clipped)
+          && clipped.toUtf8().size() == VALUE_NAME_BYTES);
+    // They take the room for names, on the last kind's run.
+    const QVector<int> plan = planCapacities(tableCountsOf(mr.tables));
+    CHECK(cap.planCost(plan, 4).labelBytes == cap.planCost(plan, 0).labelBytes + 4 * LABEL_STORE_BYTES);
+    CHECK(valueNamesOf(mr.tables) == 4 && tablesExceeding(mr.tables, cap).isEmpty());
+
+    // The Send: the plan declares them, the unit keeps them, the Verify reads them.
+    PlanUnit unit;
+    unit.report = cap;
+    FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) { return unit.answer(cmd, p); });
+    QString error;
+    const DeviceTables sent = tablesForUnit(mr.tables, cap);
+    CHECK(runLabelTransfer(ConfigTransfer::send(&link, sent, /*verify=*/true, {}, /*saveToFlash=*/true),
+                           &error));
+    if (!error.isEmpty())
+        std::printf("      send: %s\n", qPrintable(error));
+    RT_REQUIRE(unit.plans.size() == 1);
+    const QByteArray declared = unit.plans.first();
+    CHECK(declared.size() == 2 + 2 * int(cap.tables.size()) + 2
+          && quint8(declared[declared.size() - 2]) == 4 && quint8(declared[declared.size() - 1]) == 0);
+    // A unit that keeps value names but not notes has the kinds before the notes.
+    CHECK(unit.runningValueNames == 4 && unit.runningKinds == LABEL_KIND_NOTE);
+    CHECK(unit.names[LABEL_KIND_UNIT].mid(c * LABEL_STORE_BYTES, 2) == QByteArray("C\0", 2)
+          && unit.names[LABEL_KIND_UNIT].mid(b * LABEL_STORE_BYTES, 3) == QByteArray("kPa"));
+    CHECK(unit.names[LABEL_KIND_VALUE_NAME] == mr.tables.valueNameLabels.join());
+
+    // The Get: the five kinds, so the units and value names are read too.
+    DeviceTables got;
+    link.sent.clear();
+    CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap), &error, &got));
+    if (!error.isEmpty())
+        std::printf("      get: %s\n", qPrintable(error));
+    CHECK(got.unitLabels.value(c) == QByteArray("C") && got.unitLabels.value(b) == QByteArray("kPa"));
+    CHECK(got.valueNameLabels == mr.tables.valueNameLabels);
+    CHECK(ConfigTransfer::configurationFingerprint(sent) == ConfigTransfer::configurationFingerprint(got));
+    Configuration back;
+    mapFromDevice(got, back);
+    const Channel bc = back.catalog().findByName(QStringLiteral("Coolant"));
+    const Channel bb = back.catalog().findByName(QStringLiteral("Boost"));
+    const Channel bg = back.catalog().findByName(QStringLiteral("Gear"));
+    CHECK(bc.unit == QStringLiteral("C") && bc.quantity == QStringLiteral("Temperature"));
+    CHECK(bb.unit == QStringLiteral("kPa") && bb.quantity == QStringLiteral("Pressure and Stress"));
+    CHECK(bg.unit.isEmpty() && bg.enumLabels.size() == 4 && bg.enumLabels.value(2) == QStringLiteral("Neutral"));
+
+    // A .ct3 keeps them; a document without any writes no key for them.
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("named.ct3"));
+    CHECK(cfg.saveToFile(path, &error));
+    Configuration loaded;
+    CHECK(loaded.loadFromFile(path, &error));
+    CHECK(loaded.catalog().findByName(QStringLiteral("Gear")).enumLabels
+          == cfg.catalog().findByName(QStringLiteral("Gear")).enumLabels);
+    Configuration plainDoc;
+    build(plainDoc, cap, false);
+    const QString plainPath = dir.filePath(QStringLiteral("plain.ct3"));
+    CHECK(plainDoc.saveToFile(plainPath, &error));
+    QFile plainFile(plainPath);
+    CHECK(plainFile.open(QIODevice::ReadOnly)
+          && !plainFile.readAll().contains(QByteArrayLiteral("valueNames")));
+
+    // A unit that keeps the names alone: sent neither, no trailer on the plan,
+    // and its Get reads nothing its names lack.
+    const DeviceCapacity names = planTarget();
+    PlanUnit older;
+    older.report = names;
+    FakeDeviceLink olderLink([&older](quint8 cmd, const QByteArray &p) { return older.answer(cmd, p); });
+    CHECK(runLabelTransfer(ConfigTransfer::send(&olderLink, tablesForUnit(mr.tables, names),
+                                                /*verify=*/true, {}, /*saveToFlash=*/true),
+                           &error));
+    RT_REQUIRE(older.plans.size() == 1);
+    CHECK(older.plans.first().size() == 2 + 2 * int(names.tables.size()));
+    CHECK(older.names[LABEL_KIND_UNIT].isEmpty() && older.names[LABEL_KIND_VALUE_NAME].isEmpty());
+    DeviceTables olderGot;
+    olderLink.sent.clear();
+    CHECK(runLabelTransfer(ConfigTransfer::get(&olderLink, nullptr, names), &error, &olderGot));
+    bool readKinds = false;
+    for (const auto &s : olderLink.sent)
+        readKinds = readKinds
+                    || (s.first == CMD_READ_LABELS && !s.second.isEmpty() && quint8(s.second[0]) >= LABEL_KIND_UNIT);
+    CHECK(!readKinds && olderGot.unitLabels.isEmpty() && olderGot.valueNameLabels.isEmpty());
+}
+
+// A User Condition's unused term slots name no channel on a CAN Triple 2.0 that
+// takes a plan, so its engine makes no dependency reference for them: four in a
+// condition of one comparison a side, each two bytes of the unit's working
+// memory, and the condition run again whenever channel 0 changed. Every other
+// target is sent the zeroed record it always has been.
+static void testUnusedConditionSlots()
+{
+    const auto build = [](Configuration &cfg, const DeviceCapacity &target, ConditionMode mode) {
+        cfg.setCapacity(target);
+        cfg.bus[0].enabled = true;
+        Channel src;
+        src.name = QStringLiteral("Coolant");
+        src.userDefined = true;
+        cfg.catalog().addOrUpdateUserChannel(src);
+        Channel out;
+        out.name = QStringLiteral("Over Temp");
+        out.userDefined = true;
+        cfg.catalog().addOrUpdateUserChannel(out);
+        ConditionRow c;
+        c.mode = mode;
+        c.setTerms[0].aChannel = QStringLiteral("Coolant");
+        c.setTerms[0].op = COND_OP_GT;
+        c.setTerms[0].bConst = 105.0;
+        giveInverseReset(c);
+        c.outputChannel = QStringLiteral("Over Temp");
+        cfg.conditionRows.append(c);
+    };
+    {
+        Configuration cfg;
+        build(cfg, planTarget(), ConditionMode::SetReset);
+        const MappingResult r = mapToDevice(cfg);
+        RT_REQUIRE(r.ok() && r.tables.conditions.size() == 1);
+        const ConditionConfig &cc = r.tables.conditions[0];
+        CHECK(cc.set_count == 1 && cc.reset_count == 1);
+        CHECK(cc.set_terms[0].input_a_signal_idx < r.tables.signalConfigs.size());
+        CHECK(cc.reset_terms[0].input_a_signal_idx < r.tables.signalConfigs.size());
+        for (int t = 1; t < COND_MAX_TERMS; ++t)
+            CHECK(cc.set_terms[t].input_a_signal_idx == kConditionTermUnused
+                  && cc.reset_terms[t].input_a_signal_idx == kConditionTermUnused);
+        // Coolant on each side, and the output.
+        CHECK(planReferences(r.tables) == 3);
+    }
+    {
+        // A Momentary: its whole Reset side is unused.
+        Configuration cfg;
+        build(cfg, planTarget(), ConditionMode::Momentary);
+        const MappingResult r = mapToDevice(cfg);
+        RT_REQUIRE(r.ok() && r.tables.conditions.size() == 1);
+        const ConditionConfig &cc = r.tables.conditions[0];
+        CHECK(cc.reset_count == 0);
+        for (int t = 0; t < COND_MAX_TERMS; ++t)
+            CHECK(cc.reset_terms[t].input_a_signal_idx == kConditionTermUnused);
+        CHECK(planReferences(r.tables) == 2);
+    }
+    {
+        // A CAN Triple (this program's built-in numbers): zeroed, as always.
+        Configuration cfg;
+        build(cfg, DeviceCapacity::builtIn(), ConditionMode::SetReset);
+        const MappingResult r = mapToDevice(cfg);
+        RT_REQUIRE(r.ok() && r.tables.conditions.size() == 1);
+        const ConditionConfig &cc = r.tables.conditions[0];
+        for (int t = 1; t < COND_MAX_TERMS; ++t)
+            CHECK(cc.set_terms[t].input_a_signal_idx == 0 && cc.reset_terms[t].input_a_signal_idx == 0);
+    }
+}
+
+// Which documents take a connected CAN Triple 2.0's sizing on their own
+// (adoptsUnitTarget): one born in this session, still on the built-in numbers,
+// whose target nobody chose, and only for a unit that sizes by its memory.
+static void testAdoptsUnitTarget()
+{
+    const DeviceCapacity unit = planTarget();
+    const DeviceCapacity fixed = labelStoreTarget(); // a 2.0 before phase 4: fixed tables
+    Configuration fresh;
+    CHECK(adoptsUnitTarget(fresh, unit, false));
+    CHECK(!adoptsUnitTarget(fresh, unit, true));    // its target was chosen
+    CHECK(!adoptsUnitTarget(fresh, fixed, false));  // that unit has fixed tables
+    CHECK(!adoptsUnitTarget(fresh, DeviceCapacity::builtIn(), false));
+    Configuration sized;
+    sized.setCapacity(unit);
+    CHECK(!adoptsUnitTarget(sized, unit, false));   // it has a target already
+    // A document from a file keeps the target it was saved with, the built-in
+    // numbers included.
+    QTemporaryDir dir;
+    RT_REQUIRE(dir.isValid());
+    Configuration saved;
+    RT_REQUIRE(saved.saveToFile(dir.filePath(QStringLiteral("fixed.ct3"))));
+    CHECK(!saved.capacity().reported && !adoptsUnitTarget(saved, unit, false));
+    // Every table the built-in numbers hold, the unit's ceilings hold too.
+    const DeviceCapacity builtIn = DeviceCapacity::builtIn();
+    bool roomier = true;
+    for (int t = 0; t < DEVICE_TABLE_COUNT; ++t)
+        if (unit.limitOf(DeviceTable(t)) < builtIn.limitOf(DeviceTable(t)))
+            roomier = false;
+    CHECK(roomier);
+}
+
+// Transmit CRC8 rules of up to 70 elements on a CAN Triple 2.0 from its store
+// v22 (long rules): the rule's record holds its fields, the whole count and the
+// first 8 elements, and a continuation record each 8 more. Mapped, sent as the
+// 2.0's 26-byte records and read back, the recipe comes home whole; a CAN
+// Triple refuses it by name; a rule moves between the two record forms whole
+// (tablesForUnit); and a sealed package says which form it writes.
+static void testCrc8LongRules()
+{
+    const DeviceCapacity cap = planTarget();
+    CHECK(cap.crc8LongRules() && cap.crc8MaxElements() == 70 && cap.crc8RecordElements() == 8);
+    CHECK(!DeviceCapacity::builtIn().crc8LongRules()
+          && DeviceCapacity::builtIn().crc8MaxElements() == 15);
+
+    // A 64-byte CAN FD frame a byte at a time, its identifier first and three
+    // literals after: 70 elements.
+    CommsSection sec;
+    sec.name = QStringLiteral("Long CRC");
+    sec.device = SectionDevice::TransmitCrc8;
+    sec.fd = true;
+    sec.baseAddress = 0x18DAF110;
+    sec.extended = true;
+    sec.messageLengthBytes = 64;
+    sec.transmitRateHz = 50;
+    sec.crcChannel = QStringLiteral("Long CRC Value");
+    sec.crcByteLocation = 63;
+    sec.crcPolynomial = 0x2F;
+    sec.crcInitValue = 0xFF;
+    sec.crcFinalXor = 0xFF;
+    for (int k = 3; k >= 0; --k)
+        sec.crcElements.append({CommsSection::CrcElement::Id, k});
+    for (int b = 0; b < 63; ++b)
+        sec.crcElements.append({CommsSection::CrcElement::Data, b});
+    for (int k = 1; k <= 3; ++k)
+        sec.crcElements.append({CommsSection::CrcElement::Raw, 0x11 * k});
+    RT_REQUIRE(sec.crcElements.size() == 70);
+    const auto build = [](Configuration &c, const DeviceCapacity &target, const CommsSection &s) {
+        c.bus[0].enabled = true;
+        c.bus[0].rateKbps = 500;
+        c.bus[0].dataRateKbps = 2000;
+        c.setCapacity(target);
+        c.bus[0].sections.append(s);
+    };
+    const auto errorsSaying = [](const Configuration &c, const QString &what) {
+        int n = 0;
+        for (const ValidationIssue &vi : validateConfiguration(c))
+            if (vi.severity == ValidationIssue::Error && vi.message.contains(what))
+                ++n;
+        return n;
+    };
+    Configuration cfg;
+    build(cfg, cap, sec);
+    CHECK(errorsSaying(cfg, QStringLiteral("CRC element")) == 0);
+
+    // The records: the rule's own, then eight continuations of 8, 8, ... 6.
+    const MappingResult mr = mapToDevice(cfg);
+    for (const QString &e : mr.errors)
+        std::printf("      map: %s\n", qPrintable(e));
+    RT_REQUIRE(mr.ok());
+    RT_REQUIRE(mr.tables.crc8.size() == 9);
+    const Crc8Config &head = mr.tables.crc8[0];
+    CHECK((head.flags & CRC8FLAG_ACTIVE) && head.element_count == 70 && head.byte_location == 63
+          && head.polynomial == 0x2F);
+    CHECK(head.elem_type[0] == CRC8_ELEM_ID && head.elem_value[0] == 3
+          && head.elem_type[4] == CRC8_ELEM_DATA && head.elem_value[4] == 0
+          && head.elem_type[8] == 0 && head.elem_value[8] == 0); // nothing past the 8th
+    bool continuations = true;
+    for (int k = 1; k < 9; ++k) {
+        const Crc8Config &more = mr.tables.crc8[k];
+        continuations = continuations && more.flags == CRC8FLAG_CONTINUATION
+                        && more.msg_idx == head.msg_idx && more.dest_signal_idx == 0
+                        && more.element_count == (k < 8 ? 8 : 6);
+    }
+    CHECK(continuations);
+    CHECK(mr.tables.crc8[1].elem_type[0] == CRC8_ELEM_DATA && mr.tables.crc8[1].elem_value[0] == 4);
+    CHECK(mr.tables.crc8[8].elem_type[5] == CRC8_ELEM_RAW && mr.tables.crc8[8].elem_value[5] == 0x33);
+    CHECK(tableCountsOf(mr.tables)[int(DeviceTable::Crc8)] == 9);
+
+    // Sent as the 2.0's 26-byte records and read back: the recipe whole.
+    PlanUnit unit;
+    FakeDeviceLink link([&unit](quint8 c, const QByteArray &p) { return unit.answer(c, p); });
+    QString error;
+    const DeviceTables sent = tablesForUnit(mr.tables, cap);
+    CHECK(runLabelTransfer(ConfigTransfer::send(&link, sent, /*verify=*/true, {},
+                                                /*saveToFlash=*/true),
+                           &error));
+    if (!error.isEmpty())
+        std::printf("      send: %s\n", qPrintable(error));
+    CHECK(unit.tables.value(CMD_WRITE_CRC8_CFG).size() == 9 * 26);
+    DeviceTables got;
+    CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap), &error, &got));
+    if (!error.isEmpty())
+        std::printf("      get: %s\n", qPrintable(error));
+    CHECK(got.crc8.size() >= 9
+          && ConfigTransfer::configurationFingerprint(got)
+                 == ConfigTransfer::configurationFingerprint(sent));
+    Configuration back;
+    mapFromDevice(got, back);
+    const CommsSection *home = nullptr;
+    for (const CommsSection &s : back.bus[0].sections)
+        if (s.isCrc8())
+            home = &s;
+    RT_REQUIRE(home);
+    bool same = home->crcElements.size() == sec.crcElements.size();
+    for (int e = 0; same && e < sec.crcElements.size(); ++e)
+        same = home->crcElements[e].type == sec.crcElements[e].type
+               && home->crcElements[e].value == sec.crcElements[e].value;
+    CHECK(same && home->crcByteLocation == 63);
+
+    // A CAN Triple runs 15: the same recipe for one is an error by name, and
+    // the mapper refuses it rather than cut it.
+    Configuration old;
+    build(old, DeviceCapacity::builtIn(), sec);
+    CHECK(errorsSaying(old, QStringLiteral("70 CRC elements")) == 1);
+    const MappingResult mrOld = mapToDevice(old);
+    bool refused = false;
+    for (const QString &e : mrOld.errors)
+        refused = refused
+                  || e.contains(QStringLiteral("a CRC recipe of 70 elements needs a CAN Triple 2.0"));
+    CHECK(!mrOld.ok() && refused);
+    // ...and a 2.0 with long rules refuses 71 the same way, without the CAN
+    // Triple 2.0 advice it already is.
+    CommsSection tooLong = sec;
+    tooLong.crcElements.append({CommsSection::CrcElement::Raw, 0x44});
+    Configuration over;
+    build(over, cap, tooLong);
+    CHECK(errorsSaying(over, QStringLiteral("71 CRC elements — a rule takes at most 70")) == 1);
+
+    // Between the two record forms, whole: twelve elements are one record on a
+    // 2.0 before long rules and two (8 + 4) on one with them.
+    DeviceCapacity shortForm = labelStoreTarget();
+    shortForm.crc8Features = CAPACITY_CRC8_WHOLE_ID | CAPACITY_CRC8_DATA_RUNS;
+    CommsSection twelve = sec;
+    twelve.crcElements = sec.crcElements.mid(0, 12);
+    Configuration c12s, c12l;
+    build(c12s, shortForm, twelve);
+    build(c12l, cap, twelve);
+    const MappingResult m12s = mapToDevice(c12s), m12l = mapToDevice(c12l);
+    RT_REQUIRE(m12s.ok() && m12l.ok());
+    RT_REQUIRE(m12s.tables.crc8.size() == 1 && m12l.tables.crc8.size() == 2);
+    const auto sameRecord = [](const Crc8Config &a, const Crc8Config &b) {
+        return std::memcmp(&a, &b, sizeof(Crc8Config)) == 0;
+    };
+    const DeviceTables up = tablesForUnit(m12s.tables, cap);
+    const DeviceTables down = tablesForUnit(m12l.tables, shortForm);
+    CHECK(up.crc8.size() == 2 && up.capacity.crc8LongRules()
+          && sameRecord(up.crc8[0], m12l.tables.crc8[0])
+          && sameRecord(up.crc8[1], m12l.tables.crc8[1]));
+    CHECK(down.crc8.size() == 1 && !down.capacity.crc8LongRules()
+          && sameRecord(down.crc8[0], m12s.tables.crc8[0]));
+
+    // A sealed package says which form its CRC8 records are, and the verdict
+    // holds it to the unit's; a package without CRC8 rules installs on either.
+    SecurePackagePolicy policy;
+    policy.key = QByteArray(kLicenseKeyBytes, '\x5A'); // a policy, for the verdict to read
+    policy.tableCounts = tableCountsOf(mr.tables);
+    policy.crc8Records8 = true;
+    const SecurePackagePolicy reread = SecurePackagePolicy::fromJson(policy.toJson());
+    CHECK(reread.crc8Records8 && !SecurePackagePolicy::fromJson(SecurePackagePolicy().toJson()).crc8Records8);
+    DeviceMatchFacts facts;
+    facts.licensed = true;
+    facts.capacityKnown = true;
+    facts.capacity = shortForm;
+    CHECK(packageInstallVerdict(policy, facts).crc8FormMismatch);
+    facts.capacity = cap;
+    CHECK(!packageInstallVerdict(policy, facts).crc8FormMismatch);
+    policy.crc8Records8 = false;
+    CHECK(packageInstallVerdict(policy, facts).crc8FormMismatch);
+    policy.tableCounts[int(DeviceTable::Crc8)] = 0;
+    CHECK(!packageInstallVerdict(policy, facts).crc8FormMismatch);
+}
+
+// CONFIG NOTES: the document's notes (Configuration::comments) go to a CAN
+// Triple 2.0 that keeps notes in its label store with the configuration, 32
+// bytes a slot, declared in its plan, and a Get gives them back — every
+// character, one split across two slots too. A unit that keeps none is sent
+// none and declares none; more than 16 KB is cut on a character and warned of;
+// and a sealed package carries none.
+static void testConfigNotes()
+{
+    DeviceCapacity cap = planTarget();
+    cap.labelFlags = LABEL_FLAG_UNITS | LABEL_FLAG_VALUE_NAMES | LABEL_FLAG_NOTES;
+    CHECK(cap.keepsNotes());
+    // Text with characters of two, three and four bytes, so slots end inside one.
+    QString notes;
+    for (int i = 0; notes.toUtf8().size() < 1000; ++i)
+        notes += QStringLiteral("Line %1: déjà vu — 温度 \U0001F527\n").arg(i);
+    const QByteArray utf8 = notes.toUtf8();
+    const auto build = [&notes](Configuration &c, const DeviceCapacity &target) {
+        c.setCapacity(target);
+        c.bus[0].enabled = true;
+        c.comments = notes;
+    };
+    Configuration cfg;
+    build(cfg, cap);
+    const MappingResult mr = mapToDevice(cfg);
+    RT_REQUIRE(mr.ok());
+    const int noteSlots = int((utf8.size() + LABEL_STORE_BYTES - 1) / LABEL_STORE_BYTES);
+    CHECK(mr.tables.noteLabels.size() == noteSlots && notesSlotsOf(mr.tables) == noteSlots);
+    bool padded = true;
+    for (const QByteArray &s : mr.tables.noteLabels)
+        padded = padded && s.size() == LABEL_STORE_BYTES;
+    CHECK(padded && mr.tables.noteLabels.join().left(utf8.size()) == utf8);
+
+    // Sent: the plan declares them after the value names, the slots go out.
+    PlanUnit unit;
+    unit.report = cap;
+    FakeDeviceLink link([&unit](quint8 c, const QByteArray &p) { return unit.answer(c, p); });
+    QString error;
+    const DeviceTables sent = tablesForUnit(mr.tables, cap);
+    CHECK(runLabelTransfer(ConfigTransfer::send(&link, sent, /*verify=*/true, {},
+                                                /*saveToFlash=*/true),
+                           &error));
+    if (!error.isEmpty())
+        std::printf("      send: %s\n", qPrintable(error));
+    RT_REQUIRE(unit.plans.size() == 1);
+    const QByteArray declared = unit.plans.first();
+    CHECK(declared.size() == 2 + 2 * int(cap.tables.size()) + 4
+          && (quint8(declared[declared.size() - 2]) | (quint8(declared[declared.size() - 1]) << 8))
+                 == noteSlots);
+    CHECK(unit.runningNotes == noteSlots && unit.runningKinds == LABEL_KIND_COUNT
+          && unit.names[LABEL_KIND_NOTE].left(utf8.size()) == utf8);
+
+    // Read back: the notes whole.
+    DeviceTables got;
+    CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap), &error, &got));
+    if (!error.isEmpty())
+        std::printf("      get: %s\n", qPrintable(error));
+    CHECK(got.noteLabels.size() == noteSlots
+          && ConfigTransfer::configurationFingerprint(got)
+                 == ConfigTransfer::configurationFingerprint(sent));
+    Configuration back;
+    mapFromDevice(got, back);
+    CHECK(back.comments == notes);
+    // The fingerprint (the stored project's match) covers the notes where the
+    // unit keeps them, and only there.
+    DeviceTables edited = sent;
+    edited.noteLabels.last()[0] = char(edited.noteLabels.last()[0] ^ 0x01);
+    CHECK(ConfigTransfer::configurationFingerprint(edited)
+          != ConfigTransfer::configurationFingerprint(sent));
+
+    // A unit that keeps no notes: none written, none declared, the file keeps them.
+    DeviceCapacity noNotes = cap;
+    noNotes.labelFlags = LABEL_FLAG_UNITS | LABEL_FLAG_VALUE_NAMES;
+    PlanUnit older;
+    older.report = noNotes;
+    FakeDeviceLink olderLink([&older](quint8 c, const QByteArray &p) { return older.answer(c, p); });
+    CHECK(runLabelTransfer(ConfigTransfer::send(&olderLink, tablesForUnit(mr.tables, noNotes), true,
+                                                {}, true),
+                           &error));
+    CHECK(older.plans.size() == 1 && older.plans.first().size() == 2 + 2 * int(cap.tables.size()) + 2
+          && older.names[LABEL_KIND_NOTE].isEmpty());
+    DeviceTables olderSent = tablesForUnit(mr.tables, noNotes), olderBare = olderSent;
+    olderBare.noteLabels.clear();
+    CHECK(!olderSent.noteLabels.isEmpty()
+          && ConfigTransfer::configurationFingerprint(olderSent)
+                 == ConfigTransfer::configurationFingerprint(olderBare));
+    // No notes, no notes declared either, on a unit that keeps them.
+    Configuration bare;
+    bare.setCapacity(cap);
+    bare.bus[0].enabled = true;
+    const MappingResult mrBare = mapToDevice(bare);
+    RT_REQUIRE(mrBare.ok() && mrBare.tables.noteLabels.isEmpty());
+    PlanUnit plain;
+    plain.report = cap;
+    FakeDeviceLink plainLink([&plain](quint8 c, const QByteArray &p) { return plain.answer(c, p); });
+    CHECK(runLabelTransfer(ConfigTransfer::send(&plainLink, tablesForUnit(mrBare.tables, cap), true,
+                                                {}, true),
+                           &error));
+    CHECK(plain.plans.size() == 1 && plain.plans.first().size() == 2 + 2 * int(cap.tables.size()) + 2);
+
+    // More than 16 KB: cut on a character's boundary, and warned of.
+    Configuration big;
+    big.setCapacity(cap);
+    big.bus[0].enabled = true;
+    big.comments = QString(16383, QLatin1Char('a')) + QStringLiteral("é and more");
+    const MappingResult mrBig = mapToDevice(big);
+    RT_REQUIRE(mrBig.ok());
+    const QByteArray kept = mrBig.tables.noteLabels.join();
+    CHECK(mrBig.tables.noteLabels.size() == LABEL_NOTE_SLOTS_MAX && kept.size() == 16384
+          && kept.left(16383) == QByteArray(16383, 'a') && kept.at(16383) == '\0');
+    const auto notesWarned = [](const Configuration &c) {
+        bool warned = false;
+        for (const ValidationIssue &vi : validateConfiguration(c))
+            warned = warned || (vi.severity == ValidationIssue::Warning
+                                && vi.location == QStringLiteral("Config Notes"));
+        return warned;
+    };
+    CHECK(notesWarned(big));
+    // On a target that keeps no notes, nothing is cut, so nothing is said.
+    big.setCapacity(noNotes);
+    CHECK(!notesWarned(big));
+}
+
+// A target that makes UDS requests: the plan target with the sixteenth table
+// (32 records of 82 bytes, the 2.0's default) and the feature stated.
+static DeviceCapacity udsTarget()
+{
+    DeviceCapacity cap = planTarget(); // which has the UDS table, store v23
+    cap.label = QStringLiteral("a CAN Triple 2.0 that makes UDS requests");
+    return cap;
+}
+
+// UDS REQUESTS (Mitch, 2026-10-08). A UDS Request section maps to a request
+// message (transmit, MSGTX_UDS_REQUEST, the section's timing), a response
+// message (receive, MSGRX_UDS_RESPONSE, the response's identifier and the
+// section's rows) and a UdsConfig (the bytes, the timeouts, padding, flow
+// control, the status channel); a Send writes and verifies the record and a Get
+// reads it and folds the three back into one section, which the file keeps as
+// well. A triggered request keeps its trigger beside the UDS flag; one with no
+// response awaited names none. A target without UDS refuses the section. The
+// buffers count against the working memory (planUdsBytes) and ride in a
+// package's policy.
+static void testUdsRequest()
+{
+    const DeviceCapacity cap = udsTarget();
+    CHECK(cap.udsRequests() && !DeviceCapacity::builtIn().udsRequests()); // a CAN Triple has none
+    const auto build = [](Configuration &c, const DeviceCapacity &target) {
+        c.setCapacity(target);
+        c.bus[0].enabled = true;
+        c.bus[0].rateKbps = 500;
+        for (const char *name : {"Vehicle Speed", "UDS Result", "Oil Pressure", "Send Now"}) {
+            Channel ch;
+            ch.name = QString::fromLatin1(name);
+            ch.dataType = QStringLiteral("u16");
+            ch.userDefined = true;
+            c.catalog().addOrUpdateUserChannel(ch);
+        }
+        ConditionRow trigger;
+        trigger.setTerms[0].aChannel = QStringLiteral("Oil Pressure");
+        trigger.setTerms[0].op = COND_OP_GT;
+        trigger.setTerms[0].bConst = 90.0;
+        giveInverseReset(trigger);
+        trigger.outputChannel = QStringLiteral("Send Now");
+        c.conditionRows.append(trigger);
+        CommsSection s;
+        s.name = QStringLiteral("Read VIN");
+        s.device = SectionDevice::UdsRequest;
+        s.baseAddress = 0x7E0;
+        s.udsResponseAddress = 0x7E8;
+        s.udsRequest = QByteArray::fromHex("22F190");
+        s.messageLengthBytes = 20;
+        s.transmitRateHz = 1;
+        s.udsTimeoutMs = 800;
+        s.udsPendingMs = 4000;
+        s.udsPadByte = 0xAA;
+        s.udsBlockSize = 4;
+        s.udsStMin = 10;
+        s.udsResultChannel = QStringLiteral("UDS Result");
+        s.receiveTimeoutMs = 3000;
+        CommsChannelRow row;
+        row.channelName = QStringLiteral("Vehicle Speed");
+        row.startBit = 24;
+        row.bitLength = 16;
+        s.rows.append(row);
+        c.bus[0].sections.append(s);
+        CommsSection present;
+        present.name = QStringLiteral("Tester Present");
+        present.device = SectionDevice::UdsRequest;
+        present.baseAddress = 0x7E1;
+        present.udsResponseAddress = 0x7E9;
+        present.udsRequest = QByteArray::fromHex("3E80");
+        present.udsAwaitResponse = false;
+        present.udsPadByte = -1;
+        present.cyclic = false;
+        present.transmitCondition = QStringLiteral("Send Now");
+        present.messageLengthBytes = 8;
+        c.bus[0].sections.append(present);
+    };
+    Configuration cfg;
+    build(cfg, cap);
+    const MappingResult mr = mapToDevice(cfg);
+    for (const QString &e : mr.errors)
+        std::printf("      mapping: %s\n", qPrintable(e));
+    RT_REQUIRE(mr.ok());
+    // Four messages: each request and its response, Tester Present's too (the
+    // ECU's flow control for a multi-frame request arrives on it).
+    RT_REQUIRE(mr.tables.messages.size() == 4 && mr.tables.uds.size() == 2);
+    const CanMessageConfig &req = mr.tables.messages[0];
+    const CanMessageConfig &resp = mr.tables.messages[1];
+    CHECK((req.flags & MSGFLAG_TRANSMIT) && req.can_id == 0x7E0
+          && req.tx_trigger_flags == MSGTX_UDS_REQUEST && req.period_ms == 1000);
+    CHECK(!(resp.flags & MSGFLAG_TRANSMIT) && resp.can_id == 0x7E8
+          && resp.tx_trigger_flags == MSGRX_UDS_RESPONSE && resp.period_ms == 3000);
+    const UdsConfig &uc = mr.tables.uds[0];
+    CHECK(uc.request_msg == 0 && uc.response_msg == 1 && uc.request_len == 3
+          && uc.request[0] == 0x22 && uc.request[1] == 0xF1 && uc.request[2] == 0x90
+          && uc.timeout_ms == 800 && uc.pending_ms == 4000 && uc.response_max == 20
+          && uc.flags == (UDSFLAG_ACTIVE | UDSFLAG_PAD) && uc.pad_byte == 0xAA
+          && uc.block_size == 4 && uc.st_min == 10
+          && uc.status_signal_idx == mr.channelToSignal.value(QStringLiteral("uds result"), -1));
+    // The row decodes the response message.
+    bool rowOnResponse = false;
+    for (const CanSignalConfig &sig : mr.tables.signalConfigs)
+        if (sigMsgIdx(sig, true) == 1)
+            rowOnResponse = sigStartBit(sig) == 24 && sigBitLength(sig) == 16;
+    CHECK(rowOnResponse);
+    // Tester Present: triggered, nothing awaited, unpadded.
+    const CanMessageConfig &req2 = mr.tables.messages[2];
+    const UdsConfig &uc2 = mr.tables.uds[1];
+    CHECK(req2.tx_trigger_flags == (MSGTX_UDS_REQUEST | TXTRIG_ENABLED) && req2.tx_trigger_cond == 0);
+    CHECK(uc2.response_msg == 3 && uc2.request_len == 2
+          && uc2.flags == (UDSFLAG_ACTIVE | UDSFLAG_NO_RESPONSE)
+          && uc2.status_signal_idx == SIG_MSG_NONE);
+    // The buffers: 20 for the VIN's bus, one bus, on 4 bytes.
+    CHECK(planUdsBytes(mr.tables) == 20);
+
+    // Sent and read back through a unit that takes a plan, then folded into
+    // the sections they came from.
+    PlanUnit unit;
+    unit.report = cap;
+    FakeDeviceLink link([&unit](quint8 c, const QByteArray &p) { return unit.answer(c, p); });
+    QString error;
+    const DeviceTables sent = tablesForUnit(mr.tables, cap);
+    CHECK(runLabelTransfer(ConfigTransfer::send(&link, sent, /*verify=*/true, {},
+                                                /*saveToFlash=*/true),
+                           &error));
+    if (!error.isEmpty())
+        std::printf("      send: %s\n", qPrintable(error));
+    CHECK(unit.tables.value(CMD_WRITE_UDS_CFG).size() == 2 * int(sizeof(UdsConfig)));
+    DeviceTables got;
+    CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap), &error, &got));
+    if (!error.isEmpty())
+        std::printf("      get: %s\n", qPrintable(error));
+    RT_REQUIRE(got.uds.size() == 2);
+    CHECK(memcmp(&got.uds[0], &sent.uds[0], sizeof(UdsConfig)) == 0);
+    Configuration back;
+    mapFromDevice(got, back);
+    if (back.bus[0].sections.size() != 2)
+        for (int b = 0; b < 3; ++b)
+            for (const CommsSection &x : back.bus[b].sections)
+                std::puts(qPrintable(QStringLiteral("      came back on bus %1: %2, %3, 0x%4")
+                                         .arg(b + 1).arg(x.name)
+                                         .arg(x.isUds() ? QStringLiteral("UDS")
+                                              : x.isTransmit() ? QStringLiteral("transmit")
+                                                               : QStringLiteral("receive"))
+                                         .arg(x.baseAddress, 0, 16)));
+    RT_REQUIRE(back.bus[0].sections.size() == 2);
+    const CommsSection &g = back.bus[0].sections[0];
+    CHECK(g.device == SectionDevice::UdsRequest && g.name == QStringLiteral("Read VIN")
+          && g.baseAddress == 0x7E0 && g.udsResponseAddress == 0x7E8
+          && g.udsRequest == QByteArray::fromHex("22F190") && g.messageLengthBytes == 20
+          && g.udsTimeoutMs == 800 && g.udsPendingMs == 4000 && g.udsPadByte == 0xAA
+          && g.udsBlockSize == 4 && g.udsStMin == 10 && g.udsAwaitResponse
+          && g.udsResultChannel == QStringLiteral("UDS Result") && g.receiveTimeoutMs == 3000
+          && g.transmitPeriodMs == 1000 && g.cyclic);
+    RT_REQUIRE(g.rows.size() == 1);
+    CHECK(g.rows[0].channelName == QStringLiteral("Vehicle Speed") && g.rows[0].startBit == 24
+          && g.rows[0].bitLength == 16);
+    const CommsSection &g2 = back.bus[0].sections[1];
+    CHECK(g2.device == SectionDevice::UdsRequest && g2.name == QStringLiteral("Tester Present")
+          && !g2.udsAwaitResponse && g2.udsPadByte == -1 && g2.udsRequest == QByteArray::fromHex("3E80")
+          && !g2.cyclic && g2.transmitCondition == QStringLiteral("Send Now") && g2.rows.isEmpty()
+          && g2.udsResponseAddress == 0x7E9); // from its response message
+    // Sent again, the same records.
+    const MappingResult again = mapToDevice(back);
+    RT_REQUIRE(again.ok() && again.tables.uds.size() == 2);
+    CHECK(memcmp(&again.tables.uds[0], &mr.tables.uds[0], sizeof(UdsConfig)) == 0);
+
+    // The file keeps the section.
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("uds.ct3"));
+    CHECK(cfg.saveToFile(path, &error));
+    Configuration loaded;
+    CHECK(loaded.loadFromFile(path, &error));
+    RT_REQUIRE(loaded.bus[0].sections.size() == 2);
+    CHECK(loaded.bus[0].sections[0].toJson() == cfg.bus[0].sections[0].toJson()
+          && loaded.bus[0].sections[1].toJson() == cfg.bus[0].sections[1].toJson());
+    // And the fields themselves, so a key the file forgot cannot agree with itself.
+    CHECK(loaded.bus[0].sections[0].udsRequest == QByteArray::fromHex("22F190")
+          && loaded.bus[0].sections[0].udsResponseAddress == 0x7E8
+          && loaded.bus[0].sections[0].udsAwaitResponse
+          && loaded.bus[0].sections[0].udsTimeoutMs == 800
+          && loaded.bus[0].sections[1].udsRequest == QByteArray::fromHex("3E80")
+          && !loaded.bus[0].sections[1].udsAwaitResponse);
+
+    // One ECU answers every request on one identifier: a second request on
+    // 0x7E0 / 0x7E8 passes Check Channels, maps to its own response message,
+    // and its channel is a generated one; a receive message on 0x7E8 is refused.
+    {
+        Configuration two;
+        build(two, cap);
+        CommsSection coolant = two.bus[0].sections[0];
+        coolant.name = QStringLiteral("Read Coolant");
+        coolant.udsRequest = QByteArray::fromHex("22F191");
+        coolant.udsResultChannel.clear();
+        coolant.rows[0].channelName = QStringLiteral("Coolant Temp");
+        coolant.rows[0].startBit = 24;
+        coolant.rows[0].bitLength = 8;
+        two.bus[0].sections.append(coolant);
+        bool idError = false;
+        for (const ValidationIssue &vi : validateConfiguration(two))
+            idError = idError || (vi.severity == ValidationIssue::Error
+                                  && vi.message.contains(QStringLiteral("only the first message would match")));
+        CHECK(!idError);
+        CHECK(two.generatedChannelNames().contains(QStringLiteral("Coolant Temp"))
+              && two.generatedChannelNames().contains(QStringLiteral("Vehicle Speed"))
+              && two.generatedChannelNames().contains(QStringLiteral("UDS Result")));
+        const MappingResult twoMap = mapToDevice(two);
+        CHECK(twoMap.ok() && twoMap.tables.uds.size() == 3 && twoMap.tables.messages.size() == 6
+              && twoMap.tables.messages[5].can_id == 0x7E8
+              && (twoMap.tables.messages[5].tx_trigger_flags & MSGRX_UDS_RESPONSE)
+              && twoMap.tables.uds[2].response_msg == 5);
+        CommsSection plain;
+        plain.name = QStringLiteral("Plain 7E8");
+        plain.device = SectionDevice::ReceiveMessage;
+        plain.baseAddress = 0x7E8;
+        plain.messageLengthBytes = 8;
+        two.bus[0].sections.append(plain);
+        idError = false;
+        for (const ValidationIssue &vi : validateConfiguration(two))
+            idError = idError || (vi.severity == ValidationIssue::Error
+                                  && vi.message.contains(QStringLiteral("only the first message would match")));
+        CHECK(idError);
+    }
+
+    // A target that makes no UDS requests (a 2.0 from before store v23: no
+    // feature bit, fifteen tables) refuses the section, by name.
+    DeviceCapacity before = planTarget();
+    before.canFeatures &= ~CAPACITY_CAN_UDS_REQUESTS;
+    before.tables.resize(int(DeviceTable::Uds));
+    before.plan.ceiling.resize(int(DeviceTable::Uds));
+    before.storeVersion = EXPECTED_STORE_VERSION_2 - 1;
+    Configuration older;
+    build(older, before);
+    bool refused = false;
+    for (const ValidationIssue &vi : validateConfiguration(older))
+        refused = refused
+                  || (vi.severity == ValidationIssue::Error
+                      && vi.message.contains(QStringLiteral("UDS requests need")));
+    const MappingResult refusedMap = mapToDevice(older);
+    CHECK(refused && !refusedMap.ok()
+          && refusedMap.errors.join(QStringLiteral(" ")).contains(QStringLiteral("makes no UDS requests")));
+
+    // The package policy carries the buffers, and the verdict counts them.
+    SecurePackagePolicy policy;
+    policy.key = QByteArray(kLicenseKeyBytes, '\x5A');
+    policy.udsBytes = 20;
+    CHECK(SecurePackagePolicy::fromJson(policy.toJson()).udsBytes == 20);
+    CHECK(SecurePackagePolicy::fromJson(SecurePackagePolicy{}.toJson()).udsBytes == 0);
+    const QVector<int> counts = tableCountsOf(mr.tables);
+    CHECK(countsExceeding(counts, cap, 0, 0, 0, 0).isEmpty());
+    // The buffers sit below the transmit queues (phase 4, step 4c), so they
+    // count on a unit that carves those; one whose whole arena they would
+    // take is short of working memory.
+    DeviceCapacity queued = cap;
+    queued.plan.flags |= CAPACITY_PLAN_TX_QUEUES;
+    queued.plan.txQueueFloor = 1024;
+    CHECK(countsExceeding(counts, queued, 0, 0, 0, 0).isEmpty());
+    bool ram = false;
+    for (const QString &s : countsExceeding(counts, queued, 0, 0, 0, queued.plan.arenaBytes))
+        ram = ram || s.contains(QStringLiteral("working memory"));
+    CHECK(ram);
+}
+
+// THE BIT RATE SWITCH, MESSAGE BY MESSAGE (Mitch, 2026-10-08). A CAN FD
+// transmit message with BRS off is sent so (MSGTX_NO_BRS) to a target that
+// honours it, a triggered one keeping its trigger beside it; it comes home off
+// from a Get and survives the file; a file from before it reads as on. A
+// classic frame never carries it. On a target that cannot send it, Check
+// Channels refuses it and the mapper never encodes it. And a package that
+// sends one installs only where it is honoured.
+static void testBrsPerMessage()
+{
+    DeviceCapacity cap = planTarget();
+    cap.canFeatures |= CAPACITY_CAN_BRS_PER_MESSAGE;
+    CHECK(cap.brsPerMessage() && !DeviceCapacity::builtIn().brsPerMessage());
+    const auto build = [](Configuration &c, const DeviceCapacity &target) {
+        c.setCapacity(target);
+        c.bus[0].enabled = true;
+        c.bus[0].rateKbps = 500;
+        c.bus[0].dataRateKbps = 2000;
+        for (const char *name : {"Oil Pressure", "Send Now"}) {
+            Channel ch;
+            ch.name = QString::fromLatin1(name);
+            ch.userDefined = true;
+            c.catalog().addOrUpdateUserChannel(ch);
+        }
+        ConditionRow trigger;
+        trigger.setTerms[0].aChannel = QStringLiteral("Oil Pressure");
+        trigger.setTerms[0].op = COND_OP_GT;
+        trigger.setTerms[0].bConst = 90.0;
+        giveInverseReset(trigger);
+        trigger.outputChannel = QStringLiteral("Send Now");
+        c.conditionRows.append(trigger);
+        const auto tx = [](quint32 id, bool fd, bool brs) {
+            CommsSection s;
+            s.name = QStringLiteral("Tx %1").arg(id, 0, 16);
+            s.device = SectionDevice::TransmitMessage;
+            s.baseAddress = id;
+            s.fd = fd;
+            s.brs = brs;
+            s.messageLengthBytes = fd ? 16 : 8;
+            return s;
+        };
+        CommsSection triggered = tx(0x103, true, false);
+        triggered.cyclic = false;
+        triggered.transmitCondition = QStringLiteral("Send Now");
+        c.bus[0].sections = {tx(0x100, true, true), tx(0x101, true, false),
+                             tx(0x102, false, false), triggered};
+    };
+    const auto flagsOf = [](const DeviceTables &t, quint32 id) {
+        for (const CanMessageConfig &m : t.messages)
+            if (m.can_id == id)
+                return int(m.tx_trigger_flags);
+        return -1;
+    };
+
+    Configuration cfg;
+    build(cfg, cap);
+    const MappingResult mr = mapToDevice(cfg);
+    for (const QString &e : mr.errors)
+        std::printf("      mapping: %s\n", qPrintable(e));
+    RT_REQUIRE(mr.ok());
+    CHECK(flagsOf(mr.tables, 0x100) == 0 && flagsOf(mr.tables, 0x101) == MSGTX_NO_BRS
+          && flagsOf(mr.tables, 0x102) == 0
+          && flagsOf(mr.tables, 0x103) == (MSGTX_NO_BRS | TXTRIG_ENABLED));
+    bool refused = false;
+    for (const ValidationIssue &vi : validateConfiguration(cfg))
+        refused = refused || vi.message.contains(QStringLiteral("BRS"));
+    CHECK(!refused);
+
+    // A Get brings it home.
+    Configuration back;
+    mapFromDevice(mr.tables, back);
+    QHash<quint32, bool> brsOf;
+    for (const CommsSection &s : back.bus[0].sections)
+        if (s.fd)
+            brsOf.insert(s.baseAddress, s.brs);
+    CHECK(brsOf.value(0x100, false) && !brsOf.value(0x101, true) && !brsOf.value(0x103, true));
+
+    // The file keeps it, and a file from before it (no "brs") reads as on.
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("brs.ct3"));
+    QString error;
+    CHECK(cfg.saveToFile(path, &error));
+    Configuration loaded;
+    CHECK(loaded.loadFromFile(path, &error));
+    CHECK(loaded.bus[0].sections.size() == 4 && loaded.bus[0].sections[0].brs
+          && !loaded.bus[0].sections[1].brs && !loaded.bus[0].sections[3].brs);
+    QJsonObject old = configBodyOf(path);
+    old[QStringLiteral("fileVersion")] = 23;
+    QJsonArray buses = old[QStringLiteral("buses")].toArray();
+    bool stripped = false;
+    for (int b = 0; b < buses.size(); ++b) {
+        QJsonObject bus = buses[b].toObject();
+        QJsonArray sections = bus[QStringLiteral("sections")].toArray();
+        for (int i = 0; i < sections.size(); ++i) {
+            QJsonObject s = sections[i].toObject();
+            stripped = stripped || s.contains(QStringLiteral("brs"));
+            s.remove(QStringLiteral("brs"));
+            sections[i] = s;
+        }
+        bus[QStringLiteral("sections")] = sections;
+        buses[b] = bus;
+    }
+    old[QStringLiteral("buses")] = buses;
+    const QString oldPath = dir.filePath(QStringLiteral("before-brs.json"));
+    QFile of(oldPath);
+    CHECK(of.open(QIODevice::WriteOnly));
+    of.write(QJsonDocument(old).toJson());
+    of.close();
+    Configuration fromOld;
+    CHECK(stripped && fromOld.loadFromFile(oldPath, &error));
+    bool allOn = fromOld.bus[0].sections.size() == 4;
+    for (const CommsSection &s : fromOld.bus[0].sections)
+        allOn = allOn && s.brs;
+    CHECK(allOn);
+
+    // A target that cannot: refused at Check Channels, and never encoded.
+    Configuration older;
+    build(older, planTarget());
+    refused = false;
+    for (const ValidationIssue &vi : validateConfiguration(older))
+        refused = refused
+                  || (vi.severity == ValidationIssue::Error
+                      && vi.message.contains(QStringLiteral("BRS is off")));
+    CHECK(refused);
+    const MappingResult mrOld = mapToDevice(older);
+    CHECK(flagsOf(mrOld.tables, 0x101) == 0 && flagsOf(mrOld.tables, 0x103) == TXTRIG_ENABLED);
+
+    // A package that sends one: the policy says so, through its JSON, and the
+    // verdict holds a unit that cannot to it.
+    SecurePackagePolicy policy;
+    policy.key = QByteArray(kLicenseKeyBytes, '\x5A');
+    policy.fdWithoutBrs = true;
+    CHECK(SecurePackagePolicy::fromJson(policy.toJson()).fdWithoutBrs);
+    CHECK(!SecurePackagePolicy::fromJson(SecurePackagePolicy{}.toJson()).fdWithoutBrs);
+    DeviceMatchFacts facts;
+    facts.licensed = true;
+    facts.capacityKnown = true;
+    facts.capacity = planTarget();
+    InstallVerdict v = packageInstallVerdict(policy, facts);
+    CHECK(!v.ok() && v.brsPerMessageMissing);
+    facts.capacity = cap;
+    v = packageInstallVerdict(policy, facts);
+    CHECK(!v.brsPerMessageMissing);
+    facts.capacityKnown = false;
+    CHECK(packageInstallVerdict(policy, facts).brsPerMessageMissing);
+}
+
+// A CAN Triple 2.0 that takes a plan (phase 4): a configuration past the
+// nine-bit index's 510 messages, mapped with every channel naming its message
+// in twelve bits, sent with the plan declared right after the CLEAR, and read
+// back over what the unit says its running configuration holds — the report's
+// entries (the default plan) say 500. A 1.x target refuses the same document; a
+// 2.0 that takes no plan is sent no plan; a unit whose rooms are too small is
+// refused by the fit check before anything goes, and refuses the plan itself
+// right after its CLEAR; and the message index travels in each unit's form.
+static void testPlannedTables()
+{
+    const DeviceCapacity cap = planTarget();
+    CHECK(cap.plansTables() && cap.wideMessageIndex() && cap.limitOf(DeviceTable::Messages) == 4094);
+    const auto build = [](Configuration &c, const DeviceCapacity &target, int messages) {
+        c.setCapacity(target);
+        c.bus[0].enabled = true;
+        for (int i = 0; i < messages; ++i) {
+            CommsSection rx;
+            rx.name = QStringLiteral("Message %1").arg(i);
+            rx.device = SectionDevice::ReceiveMessage;
+            rx.baseAddress = quint32(0x100 + i);
+            rx.messageLengthBytes = 8;
+            rx.alignment = SectionAlignment::WordSwap;
+            CommsChannelRow row;
+            row.channelName = QStringLiteral("Channel %1").arg(i);
+            row.startBit = 0;
+            row.bitLength = 16;
+            rx.rows.append(row);
+            c.bus[0].sections.append(rx);
+        }
+    };
+    Configuration cfg;
+    build(cfg, cap, 1500);
+    const MappingResult mr = mapToDevice(cfg);
+    for (const QString &e : mr.errors)
+        std::printf("      map: %s\n", qPrintable(e));
+    RT_REQUIRE(mr.ok());
+    RT_REQUIRE(mr.tables.messages.size() == 1500);
+    const int last = mr.channelToSignal.value(QStringLiteral("channel 1499"), -1);
+    RT_REQUIRE(last >= 0);
+    CHECK(sigMsgIdx(mr.tables.signalConfigs[last], true) == 1499);
+    CHECK(sigMsgIdx(mr.tables.signalConfigs[last]) != 1499); // nine bits cannot say it
+    // A channel of no message is the twelve-bit none.
+    bool sawNone = false, noneWide = true;
+    for (const CanSignalConfig &s : mr.tables.signalConfigs)
+        if (sigMsgIdx(s, true) == SIG_MSG_NONE) {
+            sawNone = true;
+            noneWide = noneWide && (s.msg_and_flags & 0xE1FF) == 0xE1FF;
+        }
+    CHECK(sawNone && noneWide);
+
+    // The same document for a 1.x: its message table is full at 500.
+    Configuration old;
+    build(old, DeviceCapacity::builtIn(), 1500);
+    const MappingResult mr1 = mapToDevice(old);
+    bool full = false;
+    for (const QString &e : mr1.errors)
+        full = full || e.contains(QStringLiteral("message table is full (500)"));
+    CHECK(!mr1.ok() && full);
+
+    // The fit check against the unit, then the Send.
+    CHECK(tablesExceeding(mr.tables, cap).isEmpty());
+    PlanUnit unit;
+    FakeDeviceLink link([&unit](quint8 c, const QByteArray &p) { return unit.answer(c, p); });
+    QString error;
+    CHECK(runLabelTransfer(ConfigTransfer::send(&link, tablesForUnit(mr.tables, cap), /*verify=*/true,
+                                                {}, /*saveToFlash=*/true),
+                           &error));
+    if (!error.isEmpty())
+        std::printf("      send: %s\n", qPrintable(error));
+    RT_REQUIRE(unit.plans.size() == 1);
+    int clearAt = -1, planAt = -1;
+    for (int i = 0; i < link.sent.size(); ++i) {
+        if (link.sent[i].first == CMD_CLEAR_CONFIG && clearAt < 0)
+            clearAt = i;
+        if (link.sent[i].first == CMD_STAGE_PLAN && planAt < 0)
+            planAt = i;
+    }
+    CHECK(clearAt >= 0 && planAt == clearAt + 1); // right after the CLEAR, before anything else
+    const QVector<int> declared = planCapacities(tableCountsOf(mr.tables));
+    CHECK(unit.running == declared.mid(0, int(cap.tables.size())));
+    CHECK(unit.running.value(int(DeviceTable::Messages)) == 1500);
+
+    // The Get reads what the running configuration holds, past the report's 500.
+    DeviceTables got;
+    link.sent.clear();
+    CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap), &error, &got));
+    if (!error.isEmpty())
+        std::printf("      get: %s\n", qPrintable(error));
+    CHECK(link.sent.size() > 1 && link.sent[1].first == CMD_GET_USAGE);
+    RT_REQUIRE(got.messages.size() == 1500);
+    RT_REQUIRE(got.signalConfigs.size() == mr.tables.signalConfigs.size());
+    CHECK(got.messageLabels.size() == 1500 && got.messageLabels[1499] == QByteArray("Message 1499"));
+    CHECK(sigMsgIdx(got.signalConfigs[last], true) == 1499);
+    Configuration back;
+    mapFromDevice(got, back);
+    CHECK(back.capacity().plansTables());
+    RT_REQUIRE(back.bus[0].sections.size() == 1500);
+    bool everyChannelHome = true;
+    for (int i = 0; i < 1500; ++i) {
+        const CommsSection &s = back.bus[0].sections[i];
+        everyChannelHome = everyChannelHome && s.name == QStringLiteral("Message %1").arg(i)
+                           && s.rows.size() == 1
+                           && s.rows[0].channelName == QStringLiteral("Channel %1").arg(i);
+    }
+    CHECK(everyChannelHome);
+
+    // A 2.0 that takes no plan is sent none; the label store as before.
+    Configuration few;
+    build(few, labelStoreTarget(), 3);
+    const MappingResult mrFew = mapToDevice(few);
+    RT_REQUIRE(mrFew.ok());
+    LabelStoreUnit plain;
+    FakeDeviceLink plainLink([&plain](quint8 c, const QByteArray &p) { return plain.answer(c, p); });
+    CHECK(runLabelTransfer(
+        ConfigTransfer::send(&plainLink, tablesForUnit(mrFew.tables, labelStoreTarget()), true),
+        &error));
+    CHECK(!plainLink.sentAny(CMD_STAGE_PLAN));
+    // ...and its channels name their messages in nine bits.
+    bool narrowNone = true;
+    for (const CanSignalConfig &s : mrFew.tables.signalConfigs)
+        narrowNone = narrowNone && (s.msg_and_flags & SIG_MSG_HI_MASK) == 0;
+    CHECK(narrowNone);
+
+    // That document sent to the unit that takes a plan: its channels in the
+    // unit's twelve-bit form, every one bound where it was.
+    const DeviceTables wide = tablesForUnit(mrFew.tables, cap);
+    bool rebound = wide.capacity.plansTables();
+    for (int i = 0; i < mrFew.tables.signalConfigs.size(); ++i)
+        rebound = rebound
+                  && sigMsgIdx(wide.signalConfigs[i], true) == sigMsgIdx(mrFew.tables.signalConfigs[i]);
+    CHECK(rebound);
+    // And the other way: twelve-bit tables to a 1.x are nine bits again.
+    const DeviceTables narrow = tablesForUnit(tablesForUnit(mrFew.tables, cap), DeviceCapacity::builtIn());
+    bool unbound = !narrow.capacity.plansTables();
+    for (int i = 0; i < mrFew.tables.signalConfigs.size(); ++i)
+        unbound = unbound
+                  && narrow.signalConfigs[i].msg_and_flags == mrFew.tables.signalConfigs[i].msg_and_flags;
+    CHECK(unbound);
+
+    // A unit with less working memory: the fit check says so before a frame
+    // goes, and the unit itself refuses the plan right after its CLEAR, its
+    // running configuration untouched.
+    PlanUnit tight;
+    tight.report.plan.arenaBytes = 20000;
+    const QStringList over = tablesExceeding(mr.tables, tight.report);
+    CHECK(over.size() == 1 && over[0].contains(QStringLiteral("working memory")));
+    FakeDeviceLink tightLink([&tight](quint8 c, const QByteArray &p) { return tight.answer(c, p); });
+    CHECK(!runLabelTransfer(ConfigTransfer::send(&tightLink, tablesForUnit(mr.tables, tight.report),
+                                                 true, {}, /*saveToFlash=*/true),
+                            &error));
+    CHECK(error.contains(QStringLiteral("Declaring the configuration's tables")));
+    // What a real link says of the refusal (the fake one answers "NACK").
+    CHECK(DeviceLink::errorCodeText(ERR_NO_ROOM)
+          == QStringLiteral("the configuration does not fit the device (0x09)"));
+    CHECK(!tightLink.sentAny(CMD_WRITE_MSG_CFG) && !tightLink.sentAny(CMD_SAVE_TO_FLASH));
+
+    // The plans' read classification, with GET_USAGE in the Get.
+    CHECK(ConfigTransfer::planClassificationFaultForTest(false, cap).isEmpty());
+    CHECK(ConfigTransfer::planClassificationFaultForTest(true, cap).isEmpty());
+    const auto getPlan = ConfigTransfer::planGetRequestsForTest(cap);
+    CHECK(getPlan.size() > 1 && getPlan[1].first == CMD_GET_USAGE);
+    bool readsBeforeUsage = false; // the table reads come from its reply
+    for (const auto &r : getPlan)
+        readsBeforeUsage = readsBeforeUsage || r.first == CMD_READ_MSG_CFG;
+    CHECK(!readsBeforeUsage);
+}
+
+// Any channel kept across power cycles (phase 4, step 3a): the document lists
+// it, the mapper flags its record for a target that keeps channels and warns
+// for one that does not, the fit check counts it as the unit does, a Get lists
+// it again, a rename carries it, and a file keeps it.
+static void testRetainedChannels()
+{
+    DeviceCapacity keeps = planTarget();
+    keeps.retainedChannels = true;
+    keeps.retainedValues = 349;
+    const auto build = [](Configuration &c, const DeviceCapacity &target) {
+        c.setCapacity(target);
+        c.bus[0].enabled = true;
+        CommsSection rx;
+        rx.name = QStringLiteral("Engine");
+        rx.device = SectionDevice::ReceiveMessage;
+        rx.baseAddress = 0x100;
+        rx.messageLengthBytes = 8;
+        rx.alignment = SectionAlignment::WordSwap;
+        CommsChannelRow a;
+        a.channelName = QStringLiteral("Odometer");
+        a.startBit = 0;
+        a.bitLength = 16;
+        CommsChannelRow b = a;
+        b.channelName = QStringLiteral("Speed");
+        b.startBit = 16;
+        rx.rows.append(a);
+        rx.rows.append(b);
+        c.bus[0].sections.append(rx);
+    };
+    Configuration cfg;
+    build(cfg, keeps);
+    CHECK(cfg.setRetainedChannel(QStringLiteral("odometer"), true));
+    CHECK(!cfg.setRetainedChannel(QStringLiteral("Odometer"), true)); // already listed
+    CHECK(cfg.isRetainedChannel(QStringLiteral(" ODOMETER ")));
+    CHECK(cfg.setRetainedChannel(QStringLiteral("Not Mapped"), true)); // nothing to keep
+    const MappingResult mr = mapToDevice(cfg);
+    RT_REQUIRE(mr.ok());
+    const int odo = mr.channelToSignal.value(QStringLiteral("odometer"), -1);
+    const int spd = mr.channelToSignal.value(QStringLiteral("speed"), -1);
+    RT_REQUIRE(odo >= 0 && spd >= 0);
+    CHECK(sigRetain(mr.tables.signalConfigs[odo]) && !sigRetain(mr.tables.signalConfigs[spd]));
+    CHECK(retainedValuesOf(mr.tables) == 1);
+    // The flag is bit 31 alone: the record is otherwise what it was.
+    Configuration unkept;
+    build(unkept, keeps);
+    const MappingResult mr0 = mapToDevice(unkept);
+    RT_REQUIRE(mr0.ok() && mr0.tables.signalConfigs.size() == mr.tables.signalConfigs.size());
+    CHECK(mr.tables.signalConfigs[odo].bits == (mr0.tables.signalConfigs[odo].bits | SIG_BITS_RETAIN));
+    CHECK(std::memcmp(&mr.tables.signalConfigs[spd], &mr0.tables.signalConfigs[spd],
+                      sizeof(CanSignalConfig))
+          == 0);
+
+    // A target that keeps none: no flag, and a warning that names the count.
+    Configuration old;
+    build(old, DeviceCapacity::builtIn());
+    old.setRetainedChannel(QStringLiteral("Odometer"), true);
+    const MappingResult mr1 = mapToDevice(old);
+    RT_REQUIRE(mr1.ok());
+    bool flagged = false;
+    for (const CanSignalConfig &s : mr1.tables.signalConfigs)
+        flagged = flagged || sigRetain(s);
+    bool warned = false;
+    for (const QString &w : mr1.warnings)
+        warned = warned || (w.startsWith(QStringLiteral("1 channel(s) are set to keep their value"))
+                            && w.contains(QStringLiteral("CAN Triple 2.0")));
+    CHECK(!flagged && warned);
+
+    // The fit check counts it with the Preserve counters and integrators.
+    // A unit that keeps one value: the one kept channel fits, two do not.
+    DeviceCapacity tiny = keeps;
+    tiny.retainedValues = 1;
+    CHECK(tablesExceeding(mr.tables, tiny).isEmpty());
+    DeviceTables two = mr.tables;
+    sigSetRetain(two.signalConfigs[spd], true);
+    const QStringList over = tablesExceeding(two, tiny);
+    CHECK(over.size() == 1
+          && over[0].startsWith(QStringLiteral("2 values kept across power cycles")));
+
+    // A Get lists it again, from the record's flag.
+    Configuration back;
+    mapFromDevice(mr.tables, back);
+    CHECK(back.isRetainedChannel(QStringLiteral("Odometer"))
+          && !back.isRetainedChannel(QStringLiteral("Speed")));
+
+    // A rename carries it; a file keeps it; a document keeping none writes no key.
+    cfg.renameChannelReferences(QStringLiteral("Odometer"), QStringLiteral("Total Distance"));
+    CHECK(cfg.isRetainedChannel(QStringLiteral("Total Distance"))
+          && !cfg.isRetainedChannel(QStringLiteral("Odometer")));
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("kept.ct3"));
+    QString error;
+    CHECK(cfg.saveToFile(path, &error));
+    Configuration loaded;
+    CHECK(loaded.loadFromFile(path, &error));
+    CHECK(loaded.isRetainedChannel(QStringLiteral("Total Distance"))
+          && loaded.isRetainedChannel(QStringLiteral("Not Mapped")));
+    const QString plainPath = dir.filePath(QStringLiteral("plain.ct3"));
+    CHECK(unkept.saveToFile(plainPath, &error));
+    QFile plainFile(plainPath);
+    CHECK(plainFile.open(QIODevice::ReadOnly)
+          && !plainFile.readAll().contains(QByteArrayLiteral("retainedChannels")));
 }
 
 // A Send to a unit that is not the document's target (unit_target.h): the
@@ -6540,7 +8068,7 @@ static void testBinaryConfigFormat()
     CHECK(raw.startsWith(ct::kConfigPreambleMagic));
     CHECK(raw.size() > ct::kConfigPreambleBytes);
     const QByteArray preamble = raw.left(ct::kConfigPreambleBytes);
-    CHECK(preamble.contains("format 2\r\n"));
+    CHECK(preamble.contains("format 3\r\n"));
     CHECK(preamble.contains("schema "));
     CHECK(preamble.contains("written-by "));
     // DOS end-of-file, so `type` at a command prompt stops here instead of
@@ -6638,7 +8166,7 @@ static void testBinaryConfigFormat()
     // ---- a preamble claiming the future is refused before anything decrypts -
     {
         QByteArray future = raw;
-        future.replace("format 2\r\n", "format 9\r\n");
+        future.replace("format 3\r\n", "format 9\r\n");
         const QString futurePath = dir.filePath(QStringLiteral("future.ct3"));
         QFile ff(futurePath);
         CHECK(ff.open(QIODevice::WriteOnly));
@@ -6719,6 +8247,103 @@ static void testBinaryConfigFormat()
         Configuration inPlace;
         CHECK(inPlace.loadFromFile(legacyPath, &error));
         CHECK(inPlace.configTitle() == QStringLiteral("Written By The Old Build"));
+    }
+
+    // ---- FORMAT 3: compressed inside the seal; format 2 still opens ----------
+    // The sealed payload's stated length (the container header's payloadLength,
+    // offset 36) against the compact JSON it holds: compressed, it is a fraction.
+    {
+        const auto payloadOf = [](const QByteArray &file) {
+            const QByteArray h = file.mid(ct::kConfigPreambleBytes, 64);
+            return h.size() == 64 ? int(qFromLittleEndian<quint32>(h.constData() + 36)) : -1;
+        };
+        const QByteArray json =
+            QJsonDocument(configBodyOf(path)).toJson(QJsonDocument::Compact);
+        CHECK(json.contains("Distinctive Channel Name")); // the body, inflated
+        CHECK(payloadOf(raw) > 0);
+        // This document is a few hundred bytes, so the difference shows on a real
+        // one: three hundred channels compressed, against the same body sealed as
+        // format 2 sealed it.
+        {
+            Configuration big;
+            big.setConfigTitle(QStringLiteral("Three Hundred Channels"));
+            for (int i = 0; i < 300; ++i) {
+                Channel c = ch;
+                c.name = QStringLiteral("Engine Channel %1").arg(i);
+                big.catalog().addOrUpdateUserChannel(c);
+            }
+            const QString big3 = dir.filePath(QStringLiteral("big3.ct3"));
+            const QString big2 = dir.filePath(QStringLiteral("big2.ct3"));
+            CHECK(big.saveToFile(big3, &error));
+            const QByteArray bigJson =
+                QJsonDocument(configBodyOf(big3)).toJson(QJsonDocument::Compact);
+            CHECK(ct::writeBinaryConfigFile(big2, bigJson, kCurrentSchemaVersion,
+                                            QStringLiteral("1.2.7"), &error, 2));
+            const auto bytesAt = [](const QString &file) {
+                QFile in(file);
+                return in.open(QIODevice::ReadOnly) ? in.readAll() : QByteArray();
+            };
+            const int p3 = payloadOf(bytesAt(big3)), p2 = payloadOf(bytesAt(big2));
+            std::printf("  300 channels sealed            : format 3 %d B, format 2 %d B "
+                        "(compact JSON %d B)\n",
+                        p3, p2, int(bigJson.size()));
+            CHECK(p3 > 0 && p2 > int(bigJson.size()) && p3 * 8 < p2);
+        }
+
+        // Format 2, as versions up to 1.2.7 wrote it: the JSON sealed as it is. It opens,
+        // and it is the bigger of the two.
+        const QString twoPath = dir.filePath(QStringLiteral("format2.ct3"));
+        CHECK(ct::writeBinaryConfigFile(twoPath, json, kCurrentSchemaVersion,
+                                        QStringLiteral("1.2.7"), &error, 2));
+        ct::ConfigFileInfo twoInfo;
+        CHECK(ct::peekBinaryConfigFile(twoPath, &twoInfo, &error) && twoInfo.formatVersion == 2);
+        QFile tf(twoPath);
+        CHECK(tf.open(QIODevice::ReadOnly));
+        const QByteArray twoRaw = tf.readAll();
+        tf.close();
+        CHECK(payloadOf(twoRaw) > json.size() && !twoRaw.contains("Distinctive Channel Name"));
+        Configuration two;
+        CHECK(two.loadFromFile(twoPath, &error));
+        CHECK(two.configTitle() == QStringLiteral("Format Two")
+              && two.catalog().findByName(QStringLiteral("Distinctive Channel Name")).isValid());
+        // ...and saved, it comes back as format 3.
+        CHECK(two.saveToFile(twoPath, &error));
+        CHECK(ct::peekBinaryConfigFile(twoPath, &twoInfo, &error) && twoInfo.formatVersion == 3);
+
+        // The preamble is a label: lying about the format changes nothing, since
+        // the marker inside the seal decides how the body is read.
+        QByteArray relabelled = raw;
+        relabelled.replace("format 3\r\n", "format 2\r\n");
+        Configuration fromRelabelled;
+        CHECK(fromRelabelled.loadFromFile(writeFile(QStringLiteral("relabelled.ct3"), relabelled),
+                                          &error));
+        CHECK(fromRelabelled.configTitle() == QStringLiteral("Format Two"));
+
+        // A compressed body that would inflate past the 64 MB cap, or not to the
+        // length it states, is refused by the reader itself (whatever the body
+        // would have parsed as), and so the file is.
+        const auto sealedWith = [&](const QByteArray &body) {
+            SecureSaveOptions o;
+            o.embeddedCommsKey = ct::kNoAccessKey;
+            QByteArray blob;
+            CHECK(ct::sealSecureBlob(body, o, &blob, &error));
+            return raw.left(ct::kConfigPreambleBytes) + blob;
+        };
+        // A true stream of a byte past the cap: only the cap refuses it.
+        QByteArray past = ct::kConfigPackedBodyMagic;
+        past += qCompress(QByteArray(64 * 1024 * 1024 + 1, ' '), 1);
+        QByteArray cut = ct::kConfigPackedBodyMagic;
+        cut += qCompress(json, 9);
+        cut.chop(8); // the stream cut short
+        for (const QByteArray &bad : {past, cut}) {
+            const QString badPath = writeFile(QStringLiteral("bad3.ct3"), sealedWith(bad));
+            QByteArray body;
+            QString why;
+            CHECK(!ct::readBinaryConfigFile(badPath, &body, nullptr, &why) && body.isEmpty()
+                  && why.contains(QLatin1String("damaged")));
+            Configuration refused;
+            CHECK(!refused.loadFromFile(badPath, &why));
+        }
     }
 
     // ---- a file something else holds open still saves -----------------------
@@ -7896,6 +9521,282 @@ static void testMonitorPayloadShapes()
     CHECK(!DeviceLink::parseMonitorPayload(mismatched, f));
 }
 
+// A CAN Triple 2.0 keeps the project a configuration was sent from
+// (stored_project.h): the document goes into the unit with the Send, header
+// last and read back, and a Get gives it back. The header carries the
+// fingerprint of what the Send wrote, and the one a Get computes from what it
+// reads must agree with it exactly when nothing has changed.
+static void testStoredProject()
+{
+    std::printf("stored project: kept with its configuration, given back by a Get\n");
+    DeviceCapacity cap = labelStoreTarget();
+    cap.projectBytes = PROJECT_BYTES;
+    RT_REQUIRE(cap.keepsProject());
+
+    // A document with what the records leave out: comments, the script's own
+    // source, and a 32-byte name.
+    Configuration doc;
+    doc.setCapacity(cap);
+    doc.bus[0].enabled = true;
+    CommsSection rx;
+    rx.name = QStringLiteral("Engine Data");
+    rx.device = SectionDevice::ReceiveMessage;
+    rx.baseAddress = 0x120;
+    rx.messageLengthBytes = 8;
+    rx.alignment = SectionAlignment::WordSwap;
+    CommsChannelRow rpm;
+    rpm.channelName = QStringLiteral("Front Left Wheel Speed Sensor 01");
+    rpm.startBit = 0;
+    rpm.bitLength = 16;
+    CommsChannelRow ect = rpm;
+    ect.channelName = QStringLiteral("Coolant Temperature");
+    ect.startBit = 16;
+    rx.rows.append(rpm);
+    rx.rows.append(ect);
+    doc.bus[0].sections.append(rx);
+    doc.comments = QString::fromUtf8("Bench rig notes: the sensor on CAN1 is a \xC3\xA9t\xC3\xA9 part.");
+    doc.setScriptSource(QStringLiteral("-- the script's own source, kept only by the project\n"
+                                       "local seen = 0\n"));
+    doc.setConfigTitle(QStringLiteral("Bench Rig"));
+
+    // ---- the body: the document, sealed and compressed, and back ----
+    QString error;
+    const QByteArray body = doc.projectBody(&error);
+    RT_REQUIRE(!body.isEmpty());
+    Configuration back;
+    CHECK(back.loadProjectBody(body, &error));
+    CHECK(back.scriptSource() == doc.scriptSource() && back.comments == doc.comments
+          && back.configTitle() == doc.configTitle());
+    CHECK(back.filePath().isEmpty() && back.isDirty()); // off a unit: untitled, not saved
+    {
+        // Byte for byte the document it was made from, as a .ct3 would hold it.
+        QTemporaryDir dir;
+        RT_REQUIRE(dir.isValid());
+        const QString a = dir.filePath(QStringLiteral("a.ct3")), b = dir.filePath(QStringLiteral("b.ct3"));
+        RT_REQUIRE(doc.saveToFile(a) && back.saveToFile(b));
+        const QJsonObject ja = configBodyOf(a), jb = configBodyOf(b);
+        CHECK(!ja.isEmpty() && ja == jb);
+    }
+    // A body cut short, or not one at all, does not load. (A byte flipped
+    // inside one may not be noticed by the seal, which leaves its padding
+    // unchecked; the stored project's CRC-32 over the body, below, is what
+    // catches that.)
+    Configuration notLoaded;
+    CHECK(!notLoaded.loadProjectBody(body.left(body.size() / 2), &error)
+          && error.contains(QStringLiteral("damaged")));
+    CHECK(!notLoaded.loadProjectBody(QByteArray(200, 'x'), &error)
+          && error.contains(QStringLiteral("damaged")));
+    // Sealed, and smaller than the JSON it carries.
+    CHECK(!body.contains("Bench rig notes") && !body.contains("script's own source"));
+
+    // ---- the header ----
+    StoredProjectHeader h;
+    h.sentMs = 1759358520000;
+    h.writer = QStringLiteral("1.2.8");
+    h.fileName = QString::fromUtf8("bench rig \xE2\x80\x94 ") + QString(60, QChar(0xE9)); // past 60 bytes
+    h.fingerprint = QByteArray(kStoredProjectFingerprintBytes, '\x5A');
+    const QByteArray stored = buildStoredProject(body, h);
+    RT_REQUIRE(stored.size() == kStoredProjectHeaderBytes + body.size());
+    StoredProjectHeader g;
+    QByteArray gotBody;
+    CHECK(openStoredProject(stored, &g, &gotBody) == StoredProjectState::Valid && gotBody == body);
+    CHECK(g.sentMs == h.sentMs && g.writer == h.writer && g.fingerprint == h.fingerprint
+          && g.bodyBytes == quint32(body.size()));
+    // The name cut on a character inside its 60 bytes: whole characters only.
+    CHECK(h.fileName.startsWith(g.fileName) && g.fileName.toUtf8().size() <= 60
+          && g.fileName.toUtf8().size() >= 58);
+    CHECK(openStoredProject(QByteArray(kStoredProjectHeaderBytes, '\xFF'), nullptr, nullptr)
+          == StoredProjectState::None);
+    for (const int at : {0, 4, 8, 20, 70, 124}) {
+        QByteArray bad = stored;
+        bad[at] = char(bad[at] ^ 0x01);
+        CHECK(openStoredProject(bad, nullptr, nullptr) == StoredProjectState::Damaged);
+    }
+    // Every byte of the body, one at a time: the CRC-32 catches each.
+    bool everyFlipCaught = true;
+    for (int at = kStoredProjectHeaderBytes; at < stored.size(); ++at) {
+        QByteArray badBody = stored;
+        badBody[at] = char(badBody[at] ^ 0x40);
+        everyFlipCaught = everyFlipCaught
+                          && openStoredProject(badBody, nullptr, nullptr) == StoredProjectState::Damaged;
+    }
+    CHECK(everyFlipCaught);
+    CHECK(openStoredProject(stored.left(stored.size() - 1), nullptr, nullptr)
+          == StoredProjectState::Damaged);
+    CHECK(buildStoredProject(QByteArray(kStoredProjectMaxBody + 1, 'x'), h).isEmpty());
+    CHECK(!buildStoredProject(QByteArray(kStoredProjectMaxBody, 'x'), h).isEmpty());
+    CHECK(storedProjectCrc32(QByteArray("123456789")) == 0xCBF43926u); // IEEE, as zlib
+
+    // ---- a Send that stores it, and a Get that gives it back ----
+    const MappingResult mr = mapToDevice(doc);
+    if (!mr.ok())
+        std::printf("      mapping: %s\n", qPrintable(mr.errors.join(QStringLiteral("; "))));
+    RT_REQUIRE(mr.ok());
+    DeviceTables tables = tablesForUnit(mr.tables, cap);
+    CHECK(tables.capacity.keepsProject()); // the unit's fact travels with its form
+    StoredProjectHeader meta;
+    meta.sentMs = 1759358520000;
+    meta.writer = QStringLiteral("1.2.8");
+    meta.fileName = QStringLiteral("bench.ct3");
+    tables.storedProject = buildStoredProject(body, meta);
+
+    ProjectUnit unit;
+    FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) { return unit.answer(cmd, p); });
+    CHECK(runLabelTransfer(ConfigTransfer::send(&link, tables, /*verify=*/true, {},
+                                                /*saveToFlash=*/true),
+                           &error));
+    if (!error.isEmpty())
+        std::printf("      send: %s\n", qPrintable(error));
+    CHECK(link.timeoutOf.value(CMD_CLEAR_CONFIG) > DeviceLink::kFlashTimeoutMs);
+    // Header last of the project's writes, every write inside a request, and
+    // the whole of it read back before the SAVE.
+    int lastWrite = -1, firstVerify = -1, save = -1, writes = 0;
+    bool fits = true;
+    for (int i = 0; i < link.sent.size(); ++i) {
+        const auto &s = link.sent[i];
+        if (s.first == CMD_WRITE_PROJECT) {
+            lastWrite = i;
+            ++writes;
+            fits = fits && s.second.size() <= int(MAX_TX_PAYLOAD);
+        } else if (s.first == CMD_READ_PROJECT && firstVerify < 0) {
+            firstVerify = i;
+        } else if (s.first == CMD_SAVE_TO_FLASH) {
+            save = i;
+        }
+    }
+    RT_REQUIRE(lastWrite >= 0);
+    CHECK(fits && writes == (body.size() + int(MAX_TX_PAYLOAD) - 4 - 1) / (int(MAX_TX_PAYLOAD) - 4) + 1);
+    CHECK(qFromLittleEndian<quint32>(link.sent[lastWrite].second.constData()) == 0);
+    CHECK(lastWrite < firstVerify && firstVerify < save);
+    RT_REQUIRE(unit.live.size() == kStoredProjectHeaderBytes + body.size());
+    StoredProjectHeader onUnit;
+    QByteArray onUnitBody;
+    CHECK(openStoredProject(unit.live, &onUnit, &onUnitBody) == StoredProjectState::Valid
+          && onUnitBody == body && onUnit.fileName == meta.fileName);
+    // Stamped with what the Send wrote, whatever the caller put there.
+    CHECK(onUnit.fingerprint == ConfigTransfer::configurationFingerprint(tables)
+          && onUnit.fingerprint.size() == kStoredProjectFingerprintBytes);
+
+    DeviceTables got;
+    CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap), &error, &got));
+    if (!error.isEmpty())
+        std::printf("      get: %s\n", qPrintable(error));
+    CHECK(got.storedProject == unit.live);
+    StoredProjectHeader readBack;
+    QByteArray readBody;
+    RT_REQUIRE(openStoredProject(got.storedProject, &readBack, &readBody) == StoredProjectState::Valid);
+    // THE ONE THAT MATTERS: what a Get reads gives the fingerprint the Send
+    // stamped, though a Get reads every slot of every table and a Send writes
+    // only the ones it fills.
+    CHECK(readBack.fingerprint == ConfigTransfer::configurationFingerprint(got));
+    Configuration reopened;
+    CHECK(reopened.loadProjectBody(readBody, &error) && reopened.scriptSource() == doc.scriptSource());
+
+    // ---- what changes the fingerprint, and what does not ----
+    {
+        DeviceTables changed = got;
+        changed.signalConfigs[0].factor += 1.0f;
+        CHECK(ConfigTransfer::configurationFingerprint(changed) != readBack.fingerprint);
+        changed = got;
+        changed.signalLabels[1] = QByteArrayLiteral("Coolant Temp");
+        CHECK(ConfigTransfer::configurationFingerprint(changed) != readBack.fingerprint);
+        changed = got;
+        changed.messages.append(CanMessageConfig{}); // one more all-zero slot: nothing
+        changed.signalLabels.append(QByteArray());
+        CHECK(ConfigTransfer::configurationFingerprint(changed) == readBack.fingerprint);
+        changed = got;
+        changed.messagePasswords.key[0] ^= 1u; // not read back by a Send's verify
+        changed.deviceChannels.signal_idx[0] ^= 1u;
+        CHECK(ConfigTransfer::configurationFingerprint(changed) == readBack.fingerprint);
+    }
+    // A record changed on the unit after the Send: the Get's fingerprint differs.
+    {
+        QByteArray &signalsOnUnit = unit.tables[CMD_WRITE_SIG_CFG];
+        RT_REQUIRE(!signalsOnUnit.isEmpty());
+        signalsOnUnit[0] = char(signalsOnUnit[0] ^ 0x10);
+        DeviceTables after;
+        CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap), &error, &after));
+        StoredProjectHeader still;
+        CHECK(openStoredProject(after.storedProject, &still, nullptr) == StoredProjectState::Valid
+              && still.fingerprint != ConfigTransfer::configurationFingerprint(after));
+        signalsOnUnit[0] = char(signalsOnUnit[0] ^ 0x10);
+    }
+
+    // ---- refusals ----
+    // A project byte read back wrong: the verify fails and nothing is saved.
+    {
+        ProjectUnit liar;
+        liar.lieAt = kStoredProjectHeaderBytes + 700;
+        FakeDeviceLink l([&liar](quint8 cmd, const QByteArray &p) { return liar.answer(cmd, p); });
+        CHECK(!runLabelTransfer(ConfigTransfer::send(&l, tables, true, {}, true), &error)
+              && error.contains(QStringLiteral("Verifying the project")) && !l.sentAny(CMD_SAVE_TO_FLASH));
+    }
+    // A write the unit refuses fails the Send before its SAVE, and the unit
+    // keeps the project it had.
+    {
+        ProjectUnit busy;
+        busy.live = unit.live;
+        busy.refuseProjectWriteAt = kStoredProjectHeaderBytes + int(MAX_TX_PAYLOAD - 4);
+        FakeDeviceLink l([&busy](quint8 cmd, const QByteArray &p) { return busy.answer(cmd, p); });
+        CHECK(!runLabelTransfer(ConfigTransfer::send(&l, tables, true, {}, true), &error)
+              && error.contains(QStringLiteral("Storing the project"))
+              && !l.sentAny(CMD_SAVE_TO_FLASH) && busy.live == unit.live);
+    }
+    // A project this Manager did not make is refused before anything is sent.
+    {
+        DeviceTables odd = tables;
+        odd.storedProject = QByteArray(300, 'x');
+        ProjectUnit u;
+        FakeDeviceLink l([&u](quint8 cmd, const QByteArray &p) { return u.answer(cmd, p); });
+        CHECK(!runLabelTransfer(ConfigTransfer::send(&l, odd, true, {}, true), &error)
+              && l.sent.isEmpty());
+    }
+
+    // ---- a Send without one leaves the unit with none ----
+    DeviceTables bare = tables;
+    bare.storedProject.clear();
+    CHECK(runLabelTransfer(ConfigTransfer::send(&link, bare, true, {}, true), &error));
+    CHECK(unit.live.isEmpty());
+    DeviceTables none;
+    CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap), &error, &none));
+    CHECK(none.storedProject == QByteArray(kStoredProjectHeaderBytes, '\xFF')
+          && openStoredProject(none.storedProject, nullptr, nullptr) == StoredProjectState::None);
+    // One read of the project per 128 bytes of header: nothing more asked.
+    CHECK(link.countOf(CMD_READ_PROJECT) > 0);
+
+    // ---- a Get whose project read is refused part way: the configuration
+    //      stands, the project is not read, and the stage is named ----
+    CHECK(runLabelTransfer(ConfigTransfer::send(&link, tables, true, {}, true), &error));
+    unit.refuseProjectReadAt = kStoredProjectHeaderBytes;
+    {
+        auto *t = ConfigTransfer::get(&link, nullptr, cap);
+        QStringList skipped;
+        QObject::connect(t, &ConfigTransfer::finished, [t, &skipped](bool, const QString &) {
+            skipped = t->skippedStages();
+        });
+        DeviceTables part;
+        CHECK(runLabelTransfer(t, &error, &part));
+        CHECK(part.storedProject.isEmpty() && !part.messages.isEmpty());
+        CHECK(skipped.size() == 1 && skipped.value(0).contains(QStringLiteral("stored project")));
+    }
+    unit.refuseProjectReadAt = -1;
+
+    // ---- a unit that keeps none is not asked, and a package never stores one ----
+    bool askedForProject = false;
+    for (const auto &r : ConfigTransfer::planGetRequestsForTest(labelStoreTarget()))
+        askedForProject = askedForProject || r.first == CMD_READ_PROJECT;
+    CHECK(!askedForProject);
+    bool packageStores = false;
+    const QList<PlannedFrame> frames =
+        ConfigTransfer::planInstallFrames(tables, {}, 1, QStringLiteral("x"), int(MAX_TX_PAYLOAD));
+    for (const PlannedFrame &f : frames)
+        packageStores = packageStores || f.cmd == CMD_WRITE_PROJECT;
+    CHECK(!packageStores && !frames.isEmpty() && frames[0].cmd == CMD_CLEAR_CONFIG
+          && frames[0].flashTimeout);
+    CHECK(ConfigTransfer::planClassificationFaultForTest(false, cap).isEmpty());
+    CHECK(ConfigTransfer::planClassificationFaultForTest(true, cap).isEmpty());
+}
+
 static void testDeviceLinkReadCommands()
 {
     // Every table's READ command must be classified as a data-bearing read by
@@ -7929,6 +9830,9 @@ static void testDeviceLinkReadCommands()
         // field ("Reading CRC8 rules (no response)"), because this list is as
         // hand-maintained as the one it guards. Sixth occurrence.
         CMD_READ_CRC8_CFG,
+        // The 2.0's UDS requests (store v23), listed in the edit that added the
+        // command. The first test run still caught it absent from device_link.cpp.
+        CMD_READ_UDS_CFG,
         // The OTP manufacturing record. Listed here in the same edit that added
         // the command — the entries above it were each added after a bench
         // session that started with "the device answers instantly and the GUI
@@ -7944,6 +9848,10 @@ static void testDeviceLinkReadCommands()
         // The CAN Triple 2.0's names and its own settings.
         CMD_READ_LABELS,
         CMD_READ_DEVICE_SETTINGS,
+        // The CAN Triple 2.0's stored project, in the edit that added it.
+        CMD_READ_PROJECT,
+        // The CAN Triple 2.0's usage report (phase 4), in the edit that added it.
+        CMD_GET_USAGE,
     };
     for (quint8 cmd : reads)
         CHECK(DeviceLink::isReadResponse(cmd));
@@ -7957,7 +9865,10 @@ static void testDeviceLinkReadCommands()
         // leave requestSync waiting for a payload that never comes.
         CMD_WRITE_ACCESS_KEYS, CMD_ACCESS_RESPONSE,
         CMD_WRITE_DEVICE_CHANNELS, CMD_WRITE_DEVICE_CHANNELS_EXT,
-        CMD_WRITE_LABELS, CMD_WRITE_DEVICE_SETTINGS,
+        CMD_WRITE_LABELS, CMD_WRITE_DEVICE_SETTINGS, CMD_WRITE_PROJECT,
+        // A Send's plan is answered with an ACK (the ask, whose reply is data,
+        // is never sent by the Manager).
+        CMD_STAGE_PLAN,
     };
     for (quint8 cmd : nonReads)
         CHECK(!DeviceLink::isReadResponse(cmd));
@@ -7996,7 +9907,7 @@ static void testDeviceLinkReadCommands()
                        CMD_READ_ACCESS_KEYS, CMD_ACCESS_CHALLENGE,
                        CMD_READ_CONFIG_VERSION, CMD_READ_CAN_SETUP, CMD_READ_DEVICE_CHANNELS,
                        CMD_GET_DEVICE_INFO, CMD_GET_CAPACITY, CMD_GET_HARDWARE,
-                       CMD_READ_DEVICE_CHANNELS_EXT, CMD_READ_DEVICE_SETTINGS}) {
+                       CMD_READ_DEVICE_CHANNELS_EXT, CMD_READ_DEVICE_SETTINGS, CMD_GET_USAGE}) {
         CHECK(DeviceLink::isReadResponse(cmd));
         CHECK(!DeviceLink::echoesRequestRange(cmd));
     }
@@ -8005,7 +9916,8 @@ static void testDeviceLinkReadCommands()
                        CMD_READ_COND_CFG, CMD_READ_COUNTER_CFG, CMD_READ_TIMER_CFG,
                        CMD_READ_CONST_CFG, CMD_READ_RELAY_CFG, CMD_READ_TABLE2X16_DEF,
                        CMD_READ_TABLE2X16_OUT, CMD_READ_TABLE8X8_DEF, CMD_READ_TABLE8X8_ROW,
-                       CMD_READ_INTEG_CFG, CMD_READ_CRC8_CFG, CMD_READ_LABELS}) {
+                       CMD_READ_INTEG_CFG, CMD_READ_CRC8_CFG, CMD_READ_UDS_CFG, CMD_READ_LABELS,
+                       CMD_READ_PROJECT}) {
         CHECK(DeviceLink::isReadResponse(cmd));
         CHECK(DeviceLink::echoesRequestRange(cmd));
     }
@@ -8866,6 +10778,62 @@ static void testCapacityPlumbing()
         CHECK(packageInstallVerdict(policy, unit).ok());
         unit.capacityKnown = true;
         CHECK(packageInstallVerdict(older, unit).ok());
+
+        // A package that declares a plan (a CAN Triple 2.0 from phase 4) says
+        // so, with its references, and installs only on a unit that takes one,
+        // judged against that unit's rooms.
+        SecurePackagePolicy planned = policy;
+        planned.needsLabelStore = true;
+        planned.needsPlan = true;
+        planned.references = 3;
+        const SecurePackagePolicy planBack = SecurePackagePolicy::fromJson(planned.toJson());
+        CHECK(planBack.needsPlan && planBack.references == 3);
+        const SecurePackagePolicy plainBack = SecurePackagePolicy::fromJson(policy.toJson());
+        CHECK(!plainBack.needsPlan && plainBack.references == -1);
+        unit.capacity = labelStoreTarget(); // a 2.0 whose firmware predates the plan
+        const InstallVerdict noPlan = packageInstallVerdict(planned, unit);
+        CHECK(!noPlan.ok() && noPlan.planMissing && !noPlan.labelStoreMissing);
+        unit.capacity = planTarget();
+        CHECK(packageInstallVerdict(planned, unit).ok());
+        unit.capacity.plan.arenaBytes = 8;
+        const InstallVerdict tight = packageInstallVerdict(planned, unit);
+        CHECK(!tight.ok() && !tight.planMissing && tight.shortfalls.size() == 1
+              && tight.shortfalls[0].contains(QStringLiteral("working memory")));
+        // A package that declares none installs on a unit that takes a plan.
+        SecurePackagePolicy unplanned = planned;
+        unplanned.needsPlan = false;
+        unplanned.references = -1;
+        unit.capacity = planTarget();
+        CHECK(packageInstallVerdict(unplanned, unit).ok());
+        // A unit whose capacity could not be read is not refused for it.
+        unit.capacityKnown = false;
+        CHECK(!packageInstallVerdict(planned, unit).planMissing);
+
+        // Phase 4, step 3b: a package that writes units and value names says
+        // so, with how many value names its plan declares, and installs only
+        // on a unit that keeps them; the value names take that unit's room for
+        // names, judged with the rest.
+        unit.capacityKnown = true;
+        SecurePackagePolicy kinds = planned;
+        kinds.labelFlags = LABEL_FLAG_UNITS | LABEL_FLAG_VALUE_NAMES;
+        kinds.valueNames = 6;
+        const SecurePackagePolicy kindsBack = SecurePackagePolicy::fromJson(kinds.toJson());
+        CHECK(kindsBack.labelFlags == kinds.labelFlags && kindsBack.valueNames == 6);
+        CHECK(SecurePackagePolicy::fromJson(planned.toJson()).labelFlags == 0
+              && SecurePackagePolicy::fromJson(planned.toJson()).valueNames == 0);
+        unit.capacity = planTarget(); // a 2.0 that keeps the names alone
+        const InstallVerdict noKinds = packageInstallVerdict(kinds, unit);
+        CHECK(!noKinds.ok() && noKinds.labelKindsMissing && !noKinds.planMissing);
+        CHECK(packageInstallVerdict(planned, unit).ok()); // a package of the names alone
+        unit.capacity.labelFlags = LABEL_FLAG_UNITS | LABEL_FLAG_VALUE_NAMES;
+        CHECK(packageInstallVerdict(kinds, unit).ok());
+        kinds.valueNames = 2000;
+        unit.capacity.plan.labelRegionBytes = 32 * 1024;
+        const InstallVerdict cramped = packageInstallVerdict(kinds, unit);
+        CHECK(!cramped.ok() && !cramped.labelKindsMissing && cramped.shortfalls.size() == 1
+              && cramped.shortfalls[0].contains(QStringLiteral("names need")));
+        unit.capacityKnown = false;
+        CHECK(!packageInstallVerdict(kinds, unit).labelKindsMissing);
     }
 }
 
@@ -8906,10 +10874,20 @@ int main(int argc, char *argv[])
     testTransmitCrc8Fd();
     testFastDataRates();
     testLabelStore();
+    testStoredProject();
+    testPlannedTables();
+    testCrc8LongRules();
+    testConfigNotes();
+    testBrsPerMessage();
+    testUdsRequest();
+    testRetainedChannels();
+    testUnitsAndValueNames();
     testUnitTarget();
     testMigratedResetIsTheExactInverse();
     testTriggeredTransmit();
     testConditionOutputsAreBoolean();
+    testUnusedConditionSlots();
+    testAdoptsUnitTarget();
     testBusRates();
     testLookupTables();
     testChannelReferenceVsWrite();

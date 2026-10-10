@@ -23,9 +23,9 @@
 // The preamble reads, in this order and with exactly these keys:
 //
 //     CAN Triple Device Manager configuration<CR><LF>
-//     format 2<CR><LF>
-//     schema 19<CR><LF>
-//     written-by 1.3.0<CR><LF>
+//     format 3<CR><LF>
+//     schema 23<CR><LF>
+//     written-by 1.2.8<CR><LF>
 //     <0x1A>
 //     ...NUL padding out to 128 bytes...
 //
@@ -37,6 +37,20 @@
 // prints the four lines and stops, instead of spraying the terminal with
 // ciphertext. That is a courtesy, not a guarantee: PowerShell's Get-Content
 // ignores it, and nothing depends on the behaviour either way.
+//
+// ---------------------------------------------------------------------------
+// FORMAT 3: COMPRESSED, THEN SEALED (1.2.8)
+//
+// The body is deflated before it is sealed. Sealed bytes do not compress, and a
+// configuration's compact JSON shrinks ten to thirty times, so a format-3 .ct3
+// is about a twentieth of the format-2 file of the same document. What is
+// sealed is kConfigPackedBodyMagic followed by qCompress's output (its
+// four-byte big-endian length, then the zlib stream), and the marker is INSIDE
+// the seal, authenticated with the rest. So it, not the preamble, decides how a
+// body is read: the preamble's "format 3" is for people, and for builds before
+// 1.2.8, which refuse a format newer than their own by name (below) rather than
+// misread it. A format-2 body is the JSON itself, which begins with '{' and so
+// never with the marker; both open.
 //
 // ---------------------------------------------------------------------------
 // THE PREAMBLE IS A LABEL. THE BODY IS THE TRUTH.
@@ -85,11 +99,13 @@
 // ---------------------------------------------------------------------------
 // READING FORMAT 1
 //
-// Every .ct3 written before this release is JSON, and every one of them still
-// opens: Configuration::loadFromFile routes on what the file actually starts
-// with, never on the extension. A format-1 .ct3 loaded and saved comes back as
-// format 2, which is the only automatic migration there is and it needs no user
-// action.
+// Every .ct3 written before the sealed formats (August 2026) is JSON, and every
+// one of them still opens: Configuration::loadFromFile routes on what the file
+// actually starts with, never on the extension. A format-1 or format-2 .ct3 loaded and saved comes
+// back in the current format, with no user action; a legible file keeps saving
+// as JSON only where its name is .json, the name Save As gives a JSON file.
+// (Until 1.2.8 a legible .ct3 kept saving as JSON too, which the help never
+// said and nobody had chosen.)
 //
 // LEGIBLE JSON CAN BE WRITTEN AGAIN, and this paragraph used to say the
 // opposite. It read: "There is deliberately no way to write format 1 again — an
@@ -123,11 +139,14 @@ namespace ct {
 // after it.
 constexpr int kConfigPreambleBytes = 128;
 
-// 1 was indented JSON. Bump only for a change to the LAYOUT above — the shape
-// of the configuration inside the body is what the schema version tracks, and
-// conflating the two is how a file ends up claiming a version of the wrong
-// thing.
-constexpr int kConfigFileFormatVersion = 2;
+// 1 was indented JSON, 2 sealed the body as it was, 3 compresses it first. Bump
+// only for a change to the LAYOUT above — the shape of the configuration inside
+// the body is what the schema version tracks, and conflating the two is how a
+// file ends up claiming a version of the wrong thing.
+constexpr int kConfigFileFormatVersion = 3;
+
+// FORMAT 3: what a compressed body begins with, inside the seal.
+extern const QByteArray kConfigPackedBodyMagic;
 
 // The first line, and the whole of the detection test. Long and legible on
 // purpose: the first thing anyone does with an unknown file is look at the
@@ -151,12 +170,17 @@ bool isBinaryConfigFile(const QString &path);
 bool peekBinaryConfigFile(const QString &path, ConfigFileInfo *out, QString *error = nullptr);
 
 // Seal `plainBody` — the compact JSON body, carrying its own fileType and
-// fileVersion — behind a preamble stamped with `schemaVersion` and `writtenBy`.
+// fileVersion — behind a preamble stamped with `schemaVersion` and `writtenBy`,
+// compressed first (format 3). `formatVersion` 2 seals it as it is, as builds
+// before 1.2.8 did; only a test asks for that.
 bool writeBinaryConfigFile(const QString &path, const QByteArray &plainBody, int schemaVersion,
-                           const QString &writtenBy, QString *error = nullptr);
+                           const QString &writtenBy, QString *error = nullptr,
+                           int formatVersion = kConfigFileFormatVersion);
 
-// Recover the body. Fails whole on a damaged or tampered file: the payload's
-// tag is checked before a byte is handed back, so there is no half-read.
+// Recover the body, the JSON whichever format holds it. Fails whole on a damaged
+// or tampered file: the payload's tag is checked before a byte is handed back,
+// so there is no half-read, and a compressed body must inflate to exactly the
+// length it states.
 bool readBinaryConfigFile(const QString &path, QByteArray *plainBody, ConfigFileInfo *info,
                           QString *error = nullptr);
 

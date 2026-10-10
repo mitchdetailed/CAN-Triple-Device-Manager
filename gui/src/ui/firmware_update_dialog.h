@@ -22,6 +22,7 @@
 
 #include "../protocol/capacity.h"
 #include "../protocol/device_link.h"
+#include "../protocol/device_session.h"
 #include "../protocol/firmware_image.h"
 #include "../protocol/firmware_update.h"
 #include "../protocol/hardware.h"
@@ -118,6 +119,8 @@ private:
     // and the versions agree. The one predicate behind the warning, the
     // confirmation and the post-update wording, so they cannot disagree.
     QStringList layoutChanges() const;
+    // The board a product record names; nullopt for one this build does not know.
+    static std::optional<BoardFamily> productRecordFamily(const QString &product);
 
     DeviceLink *m_link;
     FirmwareUpdater m_updater;
@@ -141,9 +144,28 @@ private:
     // when the status read then worked: the link is fine and the report is in
     // a form this Manager cannot read, so it cannot tell which board this is.
     QString m_hardwareError;
+    // The OTP manufacturing record (CMD_GET_DEVICE_INFO), read with the board:
+    // its Product is what the unit IS, burned at manufacture, and decides which
+    // firmware line it takes — see productRecordFamily. nullopt when the read
+    // failed (m_productRecordError says why); present with supported == false on
+    // firmware without the command, a CAN Triple from before it.
+    std::optional<device_session::DeviceInfo> m_productRecord;
+    QString m_productRecordError;
     bool m_statusValid = false;
+    // The unit's readout-protection level (CMD_GET_PROTECTION), read with the
+    // status; -1 when the firmware cannot say or the read failed.
+    int m_readoutLevel = -1;
+    // The chosen image is a production build and the unit is not yet protected:
+    // installing it turns the unit's readout protection on (CAPACITY_BUILD_*).
+    bool imageLocksThisUnit() const;
     bool m_busy = false;            // an update is running; dismissal is blocked
     bool m_firstShow = true;        // defer the initial device read to showEvent
+    // The last backup was the project the unit kept with its configuration
+    // (stored_project.h), taken because the unit still ran exactly what was
+    // sent with it: the restore sends that document and stores it again.
+    // m_backupProjectFile is the name it was sent under.
+    bool m_backupIsProject = false;
+    QString m_backupProjectFile;
 
     QLabel *m_deviceInfo = nullptr;
     QLineEdit *m_pathEdit = nullptr;

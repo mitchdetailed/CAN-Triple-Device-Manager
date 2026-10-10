@@ -52,9 +52,23 @@ extern const unsigned v2_capacity_format;
 extern const unsigned v2_num_tables;
 extern const unsigned v2_capacity_ext_size;
 extern const unsigned v2_capacity_ext_offsets[9];
+extern const unsigned v2_capacity_plan_offsets[13];
+extern const unsigned v2_capacity_plan_sizes[5];
 extern const unsigned v2_can_fast_data;
+extern const unsigned v2_can_brs_per_message;
+extern const unsigned v2_msgtx_no_brs;
+extern const unsigned v2_uds[9];
 extern const unsigned v2_label_cmds[2];
 extern const unsigned v2_label_kinds[3];
+extern const unsigned v2_label_kinds_3b[5];
+extern const unsigned v2_label_flags[3];
+extern const unsigned v2_label_notes[3];
+extern const unsigned v2_value_name_layout[4];
+extern const unsigned v2_usage_labels[3];
+extern const unsigned v2_capacity_queue_at[2];
+extern const unsigned v2_tx_queue[4];
+extern const unsigned v2_usage_queues[3];
+extern const unsigned v2_capacity_label_flags_at;
 extern const unsigned v2_label_bytes;
 extern const unsigned v2_capacity_label_at;
 extern const unsigned v2_record_sizes[3];
@@ -73,7 +87,10 @@ extern const unsigned v2_crc8_elem[4];
 extern const unsigned v2_crc8_run[3];
 extern const unsigned v2_crc8_idall[2];
 extern const unsigned v2_crc8_first_of_0x7f;
-extern const unsigned v2_crc8_max_elements;
+extern const unsigned v2_crc8_long_rules;
+extern const unsigned v2_crc8_record_elements;
+extern const unsigned v2_crc8_max_rule_elements;
+extern const unsigned v2_crc8_continuation;
 extern const unsigned v2_max_crc8;
 extern const unsigned v2_crc8_record_size;
 extern const unsigned v2_script_budget;
@@ -84,6 +101,30 @@ extern const unsigned v2_retained_max;
 extern const unsigned v2_retained_interval_ms;
 extern const unsigned v2_max_counters;
 extern const unsigned v2_max_integrators;
+extern const unsigned v2_project_cmds[2];
+extern const unsigned v2_project_bytes;
+extern const unsigned v2_project_read_max;
+extern const unsigned v2_capacity_project_at;
+extern const unsigned v2_capacity_build_production;
+extern const unsigned v2_capacity_build_at;
+extern const unsigned v2_store_version;
+extern const unsigned v2_plan_cmds[5];
+extern const unsigned v2_plan_codes[2];
+extern const unsigned v2_plan_short[3];
+extern const unsigned v2_usage_flags[3];
+extern const unsigned v2_plan_cost_size;
+extern const unsigned v2_plan_cost_offsets[7];
+extern const unsigned v2_usage_header_size;
+extern const unsigned v2_usage_header_offsets[11];
+extern const unsigned v2_usage_entry_size;
+extern const unsigned v2_usage_entry_offsets[2];
+extern const unsigned v2_measures[12];
+extern const unsigned v2_sig_msg[4];
+unsigned v2_sig_set_header(unsigned msg_and_flags, unsigned msg_idx, unsigned byte_order,
+                           unsigned is_active);
+unsigned v2_sig_msg_idx(unsigned msg_and_flags);
+extern const unsigned v2_retain_bits[2];
+unsigned v2_sig_set_bits_on(unsigned bits);
 }
 
 namespace {
@@ -358,12 +399,35 @@ void testCapacityReport()
     };
     CHECK(std::memcmp(offsets, v2_capacity_ext_offsets, sizeof(offsets)) == 0,
           "every CapacityExtension field at the firmware's offset");
+    const unsigned plan[13] = {
+        unsigned(offsetof(ct::CapacityExtension, plan_flags)),
+        unsigned(offsetof(ct::CapacityExtension, plan_header_bytes)),
+        unsigned(offsetof(ct::CapacityExtension, plan_flash_bytes)),
+        unsigned(offsetof(ct::CapacityExtension, arena_bytes)),
+        unsigned(offsetof(ct::CapacityExtension, label_region_bytes)),
+        unsigned(offsetof(ct::CapacityExtension, label_align)),
+        unsigned(offsetof(ct::CapacityExtension, ref_bytes)),
+        unsigned(offsetof(ct::CapacityExtension, ceiling)),
+        unsigned(offsetof(ct::CapacityExtension, slice_count)),
+        unsigned(offsetof(ct::CapacityExtension, measure_count)),
+        unsigned(offsetof(ct::CapacityExtension, stage_count)),
+        unsigned(offsetof(ct::CapacityExtension, stage_table)),
+        unsigned(offsetof(ct::CapacityExtension, slice)),
+    };
+    CHECK(std::memcmp(plan, v2_capacity_plan_offsets, sizeof(plan)) == 0,
+          "every field of the plan block at the firmware's offset");
+    CHECK(ct::CAPACITY_PLAN_STAGE == v2_capacity_plan_sizes[0]
+              && unsigned(ct::CAPACITY_MAX_TABLES) == v2_capacity_plan_sizes[1]
+              && unsigned(ct::CAPACITY_MAX_STAGES) == v2_capacity_plan_sizes[2]
+              && unsigned(ct::CAPACITY_MAX_SLICES) == v2_capacity_plan_sizes[3]
+              && sizeof(ct::CapacitySlice) == v2_capacity_plan_sizes[4],
+          "the plan block's flag and array sizes");
     CHECK(ct::CAPACITY_RETAINED_NO_WEAR == v2_retained_no_wear, "CAPACITY_RETAINED_NO_WEAR");
     CHECK(unsigned(ct::MAX_COUNTERS) == v2_max_counters
               && unsigned(ct::MAX_INTEGRATORS) == v2_max_integrators,
           "the counter and integrator tables");
-    CHECK(v2_retained_max == v2_max_counters + v2_max_integrators,
-          "every counter and integrator is kept");
+    CHECK(v2_retained_max >= v2_max_counters + v2_max_integrators && v2_retained_max == 349,
+          "every counter and integrator of the default plan is kept, and channels beside them: 349");
 
     const QByteArray bytes(reinterpret_cast<const char *>(v2_capacity_report),
                            int(v2_capacity_report_size));
@@ -411,7 +475,8 @@ void testCrc8Features()
 {
     std::printf("a 2.0 unit states its CRC8 elements and 100 rules, and a 1.x states none\n");
     CHECK(ct::CAPACITY_CRC8_WHOLE_ID == v2_crc8_whole_id
-              && ct::CAPACITY_CRC8_DATA_RUNS == v2_crc8_data_runs,
+              && ct::CAPACITY_CRC8_DATA_RUNS == v2_crc8_data_runs
+              && ct::CAPACITY_CRC8_LONG_RULES == v2_crc8_long_rules,
           "CAPACITY_CRC8_*");
     CHECK(ct::CRC8_ELEM_ID == v2_crc8_elem[0] && ct::CRC8_ELEM_DATA == v2_crc8_elem[1]
               && ct::CRC8_ELEM_RAW == v2_crc8_elem[2] && ct::CRC8_ELEM_ID_ALL == v2_crc8_elem[3],
@@ -423,15 +488,20 @@ void testCrc8Features()
     CHECK(ct::CRC8_IDALL_BYTES_MASK == v2_crc8_idall[0]
               && ct::CRC8_IDALL_LSB_FIRST == v2_crc8_idall[1],
           "the whole identifier's spelling");
-    CHECK(unsigned(ct::CRC8_MAX_ELEMENTS) == v2_crc8_max_elements
-              && sizeof(ct::Crc8Config) == v2_crc8_record_size,
-          "the rule record is the same on both sides");
+    CHECK(unsigned(ct::CRC8_V2_RECORD_ELEMENTS) == v2_crc8_record_elements
+              && unsigned(ct::V2_CRC8_BYTES + ct::V2_CRC8_VALUES_BYTES) == v2_crc8_record_size
+              && unsigned(ct::CRC8_MAX_RULE_ELEMENTS) == v2_crc8_max_rule_elements
+              && unsigned(ct::CRC8FLAG_CONTINUATION) == v2_crc8_continuation,
+          "the 2.0's CRC8 record: 8 elements in 26 bytes, two runs of the 1.x one, and rules "
+          "of up to 70 in continuation records");
 
     const QByteArray bytes(reinterpret_cast<const char *>(v2_capacity_report),
                            int(v2_capacity_report_size));
     ct::DeviceCapacity cap;
     CHECK(ct::parseCapacityReport(bytes, &cap), "the unit's report parses");
-    CHECK(cap.crc8Features == int(v2_crc8_features) && cap.crc8WholeId() && cap.crc8DataRuns(),
+    CHECK(cap.crc8Features == int(v2_crc8_features) && cap.crc8WholeId() && cap.crc8DataRuns()
+              && cap.crc8LongRules() && cap.crc8MaxElements() == 70
+              && cap.itemSizeOf(ct::DeviceTable::Crc8) == int(v2_crc8_record_size),
           "with the CRC8 elements the firmware states");
     CHECK(cap.crc8MaxByte() == 63, "and byte positions to 63");
     CHECK(cap.capacityOf(ct::DeviceTable::Crc8) == int(v2_max_crc8) && v2_max_crc8 == 100,
@@ -557,6 +627,68 @@ void testLabelStore()
           "a 64-byte extension states fast data phases and names in the records");
 }
 
+void testStoredProject()
+{
+    std::printf("a 2.0 unit keeps the project a configuration was sent from\n");
+    CHECK(ct::CMD_WRITE_PROJECT == v2_project_cmds[0] && ct::CMD_READ_PROJECT == v2_project_cmds[1],
+          "CMD_WRITE_PROJECT / CMD_READ_PROJECT");
+    CHECK(unsigned(ct::PROJECT_BYTES) == v2_project_bytes && v2_project_bytes == 1024u * 1024u,
+          "a project of up to 1 MB");
+    CHECK(unsigned(ct::PROJECT_READ_MAX) == v2_project_read_max,
+          "the most one read answers");
+    CHECK(unsigned(offsetof(ct::CapacityExtension, project_bytes)) == v2_capacity_project_at,
+          "where the capacity report says so");
+    // A read's reply (the six bytes echoed, then the bytes) fits what the
+    // Manager takes in one reply, and a write's chunk fits one request.
+    CHECK(6 + ct::PROJECT_READ_MAX <= 2030, "a read's reply fits the response cap");
+    CHECK(ct::MAX_TX_PAYLOAD - 4 > 0, "a write carries bytes");
+
+    const QByteArray bytes(reinterpret_cast<const char *>(v2_capacity_report),
+                           int(v2_capacity_report_size));
+    ct::DeviceCapacity cap;
+    CHECK(ct::parseCapacityReport(bytes, &cap) && cap.keepsProject()
+              && cap.projectBytes == ct::PROJECT_BYTES,
+          "the unit's report: a project of 1 MB kept");
+    // Not part of the target: two units that differ only in it run the same
+    // configurations, and a document does not record it.
+    ct::DeviceCapacity none = cap;
+    none.projectBytes = 0;
+    CHECK(cap.sameTarget(none), "keeping a project is no part of the target");
+    ct::DeviceCapacity back;
+    CHECK(ct::DeviceCapacity::fromJson(cap.toJson(), &back) && !back.keepsProject(),
+          "a document's target does not record it");
+    CHECK(!ct::DeviceCapacity::builtIn().keepsProject(), "a 1.x unit keeps none");
+    // The label-store build's report ended at 68 bytes: no project.
+    const int extAt = 4 + 4 * int(v2_num_tables);
+    QByteArray sixtyEight = bytes.left(extAt + 68);
+    qToLittleEndian<quint16>(quint16(68), sixtyEight.data() + extAt);
+    ct::DeviceCapacity labels;
+    CHECK(ct::parseCapacityReport(sixtyEight, &labels) && labels.labelsApart()
+              && !labels.keepsProject(),
+          "a 68-byte extension keeps names apart and no project");
+}
+
+void testBuildFlags()
+{
+    std::printf("a 2.0 image says whether it is a production build\n");
+    CHECK(unsigned(ct::CAPACITY_BUILD_PRODUCTION) == v2_capacity_build_production,
+          "CAPACITY_BUILD_PRODUCTION");
+    CHECK(unsigned(offsetof(ct::CapacityExtension, build_flags)) == v2_capacity_build_at,
+          "where the capacity report says so");
+    const QByteArray bytes(reinterpret_cast<const char *>(v2_capacity_report),
+                           int(v2_capacity_report_size));
+    ct::DeviceCapacity dev;
+    CHECK(ct::parseCapacityReport(bytes, &dev) && !dev.productionBuild() && dev.buildFlags == 0,
+          "a development build's report states none");
+    QByteArray production = bytes;
+    const int at = 4 + 4 * int(v2_num_tables) + int(v2_capacity_build_at);
+    qToLittleEndian<quint16>(quint16(v2_capacity_build_production), production.data() + at);
+    ct::DeviceCapacity prod;
+    CHECK(ct::parseCapacityReport(production, &prod) && prod.productionBuild(),
+          "a production build's report states it");
+    CHECK(prod.sameTarget(dev), "and runs the same configurations: no part of the target");
+}
+
 void testCanFeatures()
 {
     std::printf("a 2.0 unit states fast CAN FD data phases, and a 1.x or an earlier 2.0 none\n");
@@ -566,6 +698,23 @@ void testCanFeatures()
     ct::DeviceCapacity cap;
     CHECK(ct::parseCapacityReport(bytes, &cap) && cap.fastData(),
           "the unit's report states 4, 5 and 8 Mbit/s data phases");
+    CHECK(ct::CAPACITY_CAN_BRS_PER_MESSAGE == v2_can_brs_per_message
+              && ct::MSGTX_NO_BRS == v2_msgtx_no_brs,
+          "the bit rate switch, per message: the flag and the bit");
+    CHECK(cap.brsPerMessage() && !ct::DeviceCapacity::builtIn().brsPerMessage(),
+          "the unit's report states it, a 1.x target does not");
+    CHECK(ct::CMD_WRITE_UDS_CFG == v2_uds[0] && ct::CMD_READ_UDS_CFG == v2_uds[1]
+              && sizeof(ct::UdsConfig) == v2_uds[2] && ct::MSGTX_UDS_REQUEST == v2_uds[3]
+              && ct::MSGRX_UDS_RESPONSE == v2_uds[4] && ct::CAPACITY_CAN_UDS_REQUESTS == v2_uds[5]
+              && unsigned(ct::UDS_REQUEST_MAX) == v2_uds[6]
+              && unsigned(ct::DeviceTable::Uds) == v2_uds[8]
+              && ct::DEVICE_TABLE_COUNT == int(v2_uds[8]) + 1,
+          "UDS requests: the commands, the record, the flags and the table");
+    CHECK(cap.udsRequests() && cap.tables.size() > int(ct::DeviceTable::Uds)
+              && cap.tables[int(ct::DeviceTable::Uds)].capacity == int(v2_uds[7])
+              && cap.tables[int(ct::DeviceTable::Uds)].itemSize == int(sizeof(ct::UdsConfig))
+              && !ct::DeviceCapacity::builtIn().udsRequests(),
+          "the unit's report states them with the sixteenth table, a 1.x target has none");
     ct::DeviceCapacity back;
     CHECK(ct::DeviceCapacity::fromJson(cap.toJson(), &back) && back.sameCan(cap) && back.fastData(),
           "a document records them");
@@ -577,7 +726,7 @@ void testCanFeatures()
     qToLittleEndian<quint16>(quint16(0), reserved.data() + extAt + 62);
     ct::DeviceCapacity crc8Build;
     CHECK(ct::parseCapacityReport(reserved, &crc8Build) && !crc8Build.fastData()
-              && crc8Build.crc8Features == cap.crc8Features,
+              && !crc8Build.brsPerMessage() && crc8Build.crc8Features == cap.crc8Features,
           "an earlier 2.0 build, whose word was reserved, states no fast data phases");
 }
 
@@ -624,6 +773,229 @@ void testScriptCostModel()
           "out of scope, the 1.x model again");
 }
 
+// The plan (phase 4): what the Manager mirrors of it, against the 2.0 line's
+// own headers, and the twelve-bit message index against the unit's own packing
+// and reading of it, every index and every word.
+void testPlanMirror()
+{
+    std::printf("the plan and the twelve-bit message index (phase 4)\n");
+    CHECK(ct::EXPECTED_STORE_VERSION_2 == v2_store_version,
+          "the 2.0 store version the Manager expects is the 2.0 line's");
+    CHECK(ct::CMD_STAGE_PLAN == v2_plan_cmds[0] && ct::STAGE_PLAN_FORMAT == v2_plan_cmds[1]
+              && ct::STAGE_PLAN_FORMAT_ASK == v2_plan_cmds[2] && ct::CMD_GET_USAGE == v2_plan_cmds[3]
+              && ct::USAGE_REPORT_FORMAT == v2_plan_cmds[4],
+          "STAGE_PLAN, its formats, GET_USAGE and its format");
+    CHECK(ct::ERR_NO_ROOM == v2_plan_codes[0] && ct::CONFIG_STATUS_NO_ROOM == v2_plan_codes[1],
+          "ERR_NO_ROOM and CONFIG_STATUS_NO_ROOM");
+    CHECK(ct::PLAN_SHORT_FLASH == v2_plan_short[0] && ct::PLAN_SHORT_ARENA == v2_plan_short[1]
+              && ct::PLAN_SHORT_NAMES == v2_plan_short[2]
+              && ct::USAGE_REFS_OVERFLOW == v2_usage_flags[0]
+              && ct::USAGE_SEND_OPEN == v2_usage_flags[1]
+              && ct::USAGE_NAMES_KEPT == v2_usage_flags[2],
+          "the rooms a plan overruns, and the usage report's flags");
+    const unsigned cost[7] = {
+        offsetof(ct::PlanCost, format),      offsetof(ct::PlanCost, verdict),
+        offsetof(ct::PlanCost, short_of),    offsetof(ct::PlanCost, reserved),
+        offsetof(ct::PlanCost, flash_bytes), offsetof(ct::PlanCost, arena_bytes),
+        offsetof(ct::PlanCost, label_bytes),
+    };
+    CHECK(sizeof(ct::PlanCost) == v2_plan_cost_size
+              && std::memcmp(cost, v2_plan_cost_offsets, sizeof(cost)) == 0,
+          "PlanCost, field by field");
+    const unsigned usage[11] = {
+        offsetof(ct::UsageReportHeader, format),        offsetof(ct::UsageReportHeader, table_count),
+        offsetof(ct::UsageReportHeader, config_status), offsetof(ct::UsageReportHeader, flags),
+        offsetof(ct::UsageReportHeader, flash_bytes),   offsetof(ct::UsageReportHeader, arena_bytes),
+        offsetof(ct::UsageReportHeader, ref_bytes),     offsetof(ct::UsageReportHeader, label_bytes),
+        offsetof(ct::UsageReportHeader, retained_used), offsetof(ct::UsageReportHeader, retained_room),
+        offsetof(ct::UsageReportHeader, project_bytes),
+    };
+    const unsigned entry[2] = {offsetof(ct::UsageEntry, capacity), offsetof(ct::UsageEntry, used)};
+    CHECK(sizeof(ct::UsageReportHeader) == v2_usage_header_size
+              && std::memcmp(usage, v2_usage_header_offsets, sizeof(usage)) == 0
+              && sizeof(ct::UsageEntry) == v2_usage_entry_size
+              && std::memcmp(entry, v2_usage_entry_offsets, sizeof(entry)) == 0,
+          "the usage report's header and entries, field by field");
+    const unsigned measures[12] = {
+        ct::ARENA_MEASURE_CHANNEL,    ct::ARENA_MEASURE_CHANNEL_END, ct::ARENA_MEASURE_CHANNEL_BIT,
+        ct::ARENA_MEASURE_MESSAGE,    ct::ARENA_MEASURE_MESSAGE_BIT, ct::ARENA_MEASURE_MESSAGE_WORD,
+        ct::ARENA_MEASURE_CONDITION,  ct::ARENA_MEASURE_COUNTER,     ct::ARENA_MEASURE_TIMER,
+        ct::ARENA_MEASURE_INTEGRATOR, ct::ARENA_MEASURE_STAGE_ROW_BIT, ct::ARENA_MEASURE_COUNT,
+    };
+    CHECK(std::memcmp(measures, v2_measures, sizeof(measures)) == 0, "the arena's measures");
+    CHECK(ct::SIG_MSG_HI_SHIFT == v2_sig_msg[0] && ct::SIG_MSG_HI_MASK == v2_sig_msg[1]
+              && ct::SIG_MSG_IDX12_NONE == v2_sig_msg[2] && ct::SIG_MSG_MAX == v2_sig_msg[3],
+          "where the index's top bits sit, its none, and the most messages");
+    // Packing: every index (and none, and past the most), over words already
+    // carrying each of the other flags, both byte orders, active or not.
+    static const quint16 words[] = {0x0000, 0x0800, 0x1000, 0x1800, 0xFFFF, 0xE1FF, 0x05A5};
+    int packed = 0, packWrong = 0;
+    for (const quint16 word : words)
+        for (unsigned idx = 0; idx <= 4100; ++idx)
+            for (unsigned bits = 0; bits < 4; ++bits) {
+                const unsigned msg = idx == 4100 ? unsigned(ct::SIG_MSG_NONE) : idx;
+                ct::CanSignalConfig s{};
+                s.msg_and_flags = word;
+                ct::sigSetHeader(s, quint16(msg), quint8(bits & 1), quint8(bits >> 1), true);
+                ++packed;
+                if (s.msg_and_flags != v2_sig_set_header(word, msg, bits & 1, bits >> 1))
+                    ++packWrong;
+            }
+    std::printf("  %d packings, %d differ\n", packed, packWrong);
+    CHECK(packWrong == 0, "the Manager packs every index as the unit does");
+    // sigSetMsgIdx leaves the byte order and active bits where they are.
+    int setWrong = 0;
+    for (const quint16 word : words)
+        for (unsigned idx = 0; idx <= 4100; ++idx) {
+            const unsigned msg = idx == 4100 ? unsigned(ct::SIG_MSG_NONE) : idx;
+            ct::CanSignalConfig s{};
+            s.msg_and_flags = word;
+            ct::sigSetMsgIdx(s, quint16(msg), true);
+            if (s.msg_and_flags
+                != v2_sig_set_header(word, msg, (word >> 9) & 1u, (word >> 10) & 1u))
+                ++setWrong;
+        }
+    CHECK(setWrong == 0, "and sets an index alone, keeping the rest of the word");
+    // Reading: every word there is.
+    int readWrong = 0;
+    for (unsigned word = 0; word <= 0xFFFF; ++word) {
+        ct::CanSignalConfig s{};
+        s.msg_and_flags = quint16(word);
+        if (ct::sigMsgIdx(s, true) != v2_sig_msg_idx(word))
+            ++readWrong;
+    }
+    CHECK(readWrong == 0, "and reads every one of the 65,536 words as the unit does");
+    // The nine-bit form: a 1.x's, with the top three bits clear.
+    ct::CanSignalConfig s{};
+    s.msg_and_flags = 0xFFFF;
+    ct::sigSetMsgIdx(s, ct::SIG_MSG_NONE, false);
+    CHECK(s.msg_and_flags == 0x1FFF && ct::sigMsgIdx(s) == ct::SIG_MSG_NONE
+              && v2_sig_msg_idx(s.msg_and_flags) == 511,
+          "the nine-bit none clears the top bits, and a twelve-bit unit reads it as message 511");
+    ct::sigSetMsgIdx(s, 1500, true);
+    CHECK(ct::sigMsgIdx(s, true) == 1500 && v2_sig_msg_idx(s.msg_and_flags) == 1500,
+          "message 1,500 travels in twelve bits");
+}
+
+// Any channel kept across power cycles (phase 4, step 3a): the flag a record
+// carries and the one the report states, against the 2.0 line's own headers,
+// and the field setter keeping the flag as the unit's does.
+void testRetainedChannels()
+{
+    std::printf("any channel kept across power cycles (phase 4, step 3a)\n");
+    CHECK(ct::SIG_BITS_RETAIN == v2_retain_bits[0], "SIG_BITS_RETAIN, bit 31 of the bits word");
+    CHECK(ct::CAPACITY_RETAINED_CHANNELS == v2_retain_bits[1], "CAPACITY_RETAINED_CHANNELS");
+    bool same = true;
+    for (const unsigned word : {0x00000000u, 0x80000000u, 0xFFFFFFFFu, 0x7FFFFFFFu, 0x8123ABCDu}) {
+        ct::CanSignalConfig s{};
+        s.bits = word;
+        ct::sigSetBits(s, 5, 16, ct::SIGNAL_TYPE_UINT16, 2, 3);
+        same = same && s.bits == v2_sig_set_bits_on(word);
+    }
+    CHECK(same, "setting the fields keeps the flag, as the unit's sig_set_bits does");
+    ct::CanSignalConfig s{};
+    ct::sigSetRetain(s, true);
+    CHECK(ct::sigRetain(s) && s.bits == ct::SIG_BITS_RETAIN, "the flag alone");
+    ct::sigSetRetain(s, false);
+    CHECK(!ct::sigRetain(s) && s.bits == 0, "and cleared");
+    const QByteArray bytes(reinterpret_cast<const char *>(v2_capacity_report),
+                           int(v2_capacity_report_size));
+    ct::DeviceCapacity cap;
+    CHECK(ct::parseCapacityReport(bytes, &cap) && cap.retainsChannels() && cap.retainedLimit() == 349,
+          "the unit's report says it keeps channels, 349 values in all");
+    ct::DeviceCapacity back;
+    CHECK(ct::DeviceCapacity::fromJson(cap.toJson(), &back) && back.retainsChannels()
+              && back.sameTarget(cap),
+          "and a document's target keeps that");
+    CHECK(!ct::DeviceCapacity::builtIn().retainsChannels(), "a 1.x target keeps none");
+}
+
+void testUnitsAndValueNames()
+{
+    std::printf("units and value names in the label store (phase 4, step 3b)\n");
+    CHECK(ct::LABEL_KIND_UNIT == v2_label_kinds_3b[0] && ct::LABEL_KIND_VALUE_NAME == v2_label_kinds_3b[1]
+              && ct::LABEL_KIND_COUNT == v2_label_kinds_3b[2]
+              && ct::LABEL_KINDS_NAMES == v2_label_kinds_3b[3]
+              && unsigned(ct::VALUE_NAME_BYTES) == v2_label_kinds_3b[4],
+          "the kinds past the names, and a value name's bytes");
+    CHECK(ct::LABEL_FLAG_UNITS == v2_label_flags[0] && ct::LABEL_FLAG_VALUE_NAMES == v2_label_flags[1],
+          "the label flags");
+    CHECK(ct::LABEL_KIND_NOTE == v2_label_notes[0] && ct::LABEL_FLAG_NOTES == v2_label_notes[1]
+              && unsigned(ct::LABEL_NOTE_SLOTS_MAX) == v2_label_notes[2]
+              && v2_label_notes[2] * v2_label_bytes == 16384u,
+          "Config Notes: the kind, its flag and 16 KB of slots");
+    CHECK(sizeof(ct::ValueNameLabel) == v2_value_name_layout[0]
+              && offsetof(ct::ValueNameLabel, signal) == v2_value_name_layout[1]
+              && offsetof(ct::ValueNameLabel, value) == v2_value_name_layout[2]
+              && offsetof(ct::ValueNameLabel, name) == v2_value_name_layout[3],
+          "a value name's slot, field by field");
+    CHECK(sizeof(ct::UsageLabels) == v2_usage_labels[0]
+              && offsetof(ct::UsageLabels, kinds) == v2_usage_labels[1]
+              && offsetof(ct::UsageLabels, kind_slots) == v2_usage_labels[2],
+          "GET_USAGE's label trailer");
+    CHECK(offsetof(ct::CapacityExtension, label_flags) == v2_capacity_label_flags_at,
+          "label_flags where the report has it");
+    const QByteArray bytes(reinterpret_cast<const char *>(v2_capacity_report),
+                           int(v2_capacity_report_size));
+    ct::DeviceCapacity cap;
+    CHECK(ct::parseCapacityReport(bytes, &cap) && cap.labelFlags == int(v2_label_flags[2])
+              && cap.keepsUnits() && cap.keepsValueNames() && cap.keepsNotes(),
+          "the unit's report says it keeps units and value names");
+    ct::DeviceCapacity back;
+    CHECK(ct::DeviceCapacity::fromJson(cap.toJson(), &back) && back.keepsValueNames()
+              && back.sameTarget(cap),
+          "and a document's target keeps that");
+    ct::DeviceCapacity names = cap;
+    names.labelFlags = 0;
+    CHECK(!names.keepsUnits() && !names.sameTarget(cap), "a target that keeps the names alone is another");
+    CHECK(!ct::DeviceCapacity::builtIn().keepsUnits(), "a 1.x target keeps neither");
+}
+
+// Phase 4, step 4c: the transmit queues in the unit's working memory.
+void testTxQueues()
+{
+    std::printf("the transmit queues: in the 2.0's working memory, by the report's numbers\n");
+    CHECK(offsetof(ct::CapacityExtension, tx_queue_floor) == v2_capacity_queue_at[0]
+              && offsetof(ct::CapacityExtension, tx_queue_entry_overhead) == v2_capacity_queue_at[1],
+          "the queue fields where the report has them");
+    CHECK(ct::CAPACITY_PLAN_TX_QUEUES == v2_tx_queue[0]
+              && unsigned(ct::TX_QUEUE_MAX_BYTES) == v2_tx_queue[3],
+          "the flag and a queue's most");
+    CHECK(sizeof(ct::UsageQueues) == v2_usage_queues[0]
+              && offsetof(ct::UsageQueues, bytes) == v2_usage_queues[1]
+              && offsetof(ct::UsageQueues, need) == v2_usage_queues[2],
+          "GET_USAGE's queue trailer");
+    const QByteArray bytes(reinterpret_cast<const char *>(v2_capacity_report),
+                           int(v2_capacity_report_size));
+    ct::DeviceCapacity cap;
+    CHECK(ct::parseCapacityReport(bytes, &cap) && cap.holdsTxQueues()
+              && cap.plan.txQueueFloor == int(v2_tx_queue[1])
+              && cap.plan.txQueueEntryOverhead == int(v2_tx_queue[2]),
+          "the unit's report says its queues are in its working memory, and what they take");
+    ct::DeviceCapacity back;
+    CHECK(ct::DeviceCapacity::fromJson(cap.toJson(), &back) && back.holdsTxQueues()
+              && back.sameTarget(cap),
+          "and a document's target keeps that");
+    // A report from before the queues (296 bytes: step 4a/4b firmware) is read
+    // for its plan, and keeps its queues out of the working memory.
+    const int ext = int(sizeof(ct::CapacityReportHeader))
+                    + int(v2_num_tables) * int(sizeof(ct::CapacityEntry));
+    QByteArray old = bytes.left(ext + 296);
+    old[ext] = char(296 & 0xFF);
+    old[ext + 1] = char(296 >> 8);
+    const int flagsAt = ext + int(offsetof(ct::CapacityExtension, plan_flags));
+    old[flagsAt] = char(quint8(old[flagsAt]) & ~quint8(ct::CAPACITY_PLAN_TX_QUEUES));
+    ct::DeviceCapacity before;
+    CHECK(ct::parseCapacityReport(old, &before) && before.plansTables() && !before.holdsTxQueues()
+              && !before.sameTarget(cap),
+          "a report from before them is read for its plan, without them");
+    // 1001 up to 1002 and ten references to 1022; then, where the queues are in
+    // the working memory, on 4 bytes their three floors.
+    CHECK(before.arenaWithReferences(1001, 10) == 1022
+              && cap.arenaWithReferences(1001, 10) == 1024 + 3 * qint64(v2_tx_queue[1]),
+          "the working memory with references, then the queues' floors on 4 bytes");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -639,6 +1011,12 @@ int main(int argc, char **argv)
     testCanFeatures();
     testLabelStore();
     testDeviceSettings();
+    testStoredProject();
+    testBuildFlags();
+    testPlanMirror();
+    testRetainedChannels();
+    testUnitsAndValueNames();
+    testTxQueues();
     if (fails == 0)
         std::printf("test_firmware_v2: all checks passed\n");
     else

@@ -6,6 +6,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QTableWidget>
@@ -13,6 +14,7 @@
 
 #include "../model/configuration.h"
 #include "../model/device_mapper.h"
+#include "../model/plan_budget.h"
 #include "../model/user_paths.h"
 #include "../protocol/device_link.h"
 #include "../protocol/device_session.h"
@@ -189,13 +191,26 @@ void TargetFirmwareDialog::refresh()
                   .arg(cap.storeVersion));
     m_deviceButton->setEnabled(m_link->isOpen());
 
-    const QVector<int> used = tableCountsOf(mapToDevice(*m_config).tables);
-    for (int r = 0; r < int(sizeof(kRows) / sizeof(kRows[0])); ++r) {
+    const MappingResult mapped = mapToDevice(*m_config);
+    const QVector<int> used = tableCountsOf(mapped.tables);
+    // A target that takes a plan (a CAN Triple 2.0 from phase 4) holds each
+    // table up to its ceiling, as far as its rooms go: the rooms get three
+    // rows of their own, after the retained values.
+    const bool plan = cap.plansTables();
+    const int tableRows = int(sizeof(kRows) / sizeof(kRows[0]));
+    m_table->setRowCount(tableRows + 1 + (plan ? 3 : 0));
+    for (int r = 0; r < tableRows; ++r) {
         const DeviceTable table = kRows[r];
-        const int holds = cap.capacityOf(table);
+        const int holds = cap.limitOf(table);
         const int uses = int(table) < used.size() ? used[int(table)] : 0;
         auto *name = new QTableWidgetItem(deviceTableName(table));
-        auto *holdsItem = new QTableWidgetItem(holds > 0 ? QString::number(holds) : tr("none"));
+        auto *holdsItem = new QTableWidgetItem(holds <= 0 ? tr("none")
+                                               : plan  ? tr("up to %1").arg(holds)
+                                                       : QString::number(holds));
+        if (plan && holds > 0)
+            holdsItem->setToolTip(tr("The most this firmware takes of these. How many fit "
+                                     "depends on the rest of the configuration: see the "
+                                     "storage, memory and names rows at the end."));
         auto *usesItem = new QTableWidgetItem(QString::number(uses));
         holdsItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         usesItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -209,23 +224,23 @@ void TargetFirmwareDialog::refresh()
         m_table->setItem(r, 2, usesItem);
     }
 
-    // Counters and integrators with Preserve value, together: how many the
-    // target keeps across power cycles, and how often it writes them.
+    // Counters and integrators with Preserve value, and on a target that keeps
+    // channels the channels set to keep theirs, together: how many the target
+    // keeps across power cycles, and how often it writes them. Counted as the
+    // unit counts them (retainedValuesOf).
     {
-        int preserved = 0;
-        for (const CounterRow &c : m_config->counterRows)
-            if (c.active && c.preserveValue)
-                ++preserved;
-        for (const IntegratorRow &g : m_config->integratorRows)
-            if (g.active && g.preserveValue)
-                ++preserved;
+        const int preserved = retainedValuesOf(mapped.tables);
         const int r = int(sizeof(kRows) / sizeof(kRows[0]));
         const int holds = cap.retainedLimit();
         auto *name = new QTableWidgetItem(tr("values kept across power cycles"));
         auto *holdsItem = new QTableWidgetItem(QString::number(holds));
         auto *usesItem = new QTableWidgetItem(QString::number(preserved));
-        const QString how = tr("Counters and integrators with Preserve value, together. "
-                               "Written every %1%2.")
+        const QString how = (cap.retainsChannels()
+                                 ? tr("Channels set to keep their value (Tools > Channel Editor, "
+                                      "Kept), and counters and integrators with Preserve value, "
+                                      "together. ")
+                                 : tr("Counters and integrators with Preserve value, together. "))
+                            + tr("Written every %1%2.")
                                 .arg(retainedIntervalText(cap.retainedEveryMs()),
                                      cap.retainedWearLimited()
                                          ? tr(" to a flash store")
@@ -241,6 +256,70 @@ void TargetFirmwareDialog::refresh()
         m_table->setItem(r, 0, name);
         m_table->setItem(r, 1, holdsItem);
         m_table->setItem(r, 2, usesItem);
+    }
+
+    // The rooms, on a target that takes a plan: what this document's tables
+    // take of each, worked out as the unit works it out (DeviceCapacity::
+    // planCost; the working memory with the links between channels and
+    // calculations, as the unit's SAVE counts them). The script is attached at
+    // the Send, so its storage is not in these figures.
+    if (plan) {
+        const PlanCostResult cost = cap.planCost(planCapacities(used), valueNamesOf(mapped.tables),
+                                                 notesSlotsOf(mapped.tables));
+        const qint64 references = planReferences(mapped.tables);
+        const QLocale locale;
+        struct Room {
+            QString name;
+            QString tip;
+            qint64 holds;
+            qint64 uses;
+            bool known;
+        };
+        const Room rooms[3] = {
+            {tr("configuration storage (bytes)"),
+             tr("The flash every table of the configuration is kept in, at the size this "
+                "configuration declares. The script's chunks come on top."),
+             cap.plan.flashBytes, cost.flashBytes, true},
+            {tr("working memory (bytes)"),
+             cap.holdsTxQueues()
+                 ? tr("The memory the unit runs the configuration in: each table's working "
+                      "state, a link for every channel a calculation reads or writes, and at "
+                      "least 2 KB for each bus's queue of frames waiting to go out. What is "
+                      "left over goes to those queues too, first to a frame of each message "
+                      "they send.")
+                 : tr("The memory the unit runs the configuration in: each table's working "
+                      "state, and a link for every channel a calculation reads or writes."),
+             cap.plan.arenaBytes,
+             cap.arenaWithReferences(cost.arenaBytes, references, planUdsBytes(mapped.tables)),
+             cost.costed},
+            {tr("names (bytes)"),
+             tr("The room for the names of messages, channels and relays, and on a unit that "
+                "keeps them, each channel's unit and the value names."),
+             cap.plan.labelRegionBytes, cost.labelBytes, true},
+        };
+        for (int i = 0; i < 3; ++i) {
+            const Room &room = rooms[i];
+            const int r = tableRows + 1 + i;
+            auto *name = new QTableWidgetItem(room.name);
+            auto *holdsItem = new QTableWidgetItem(locale.toString(room.holds));
+            auto *usesItem =
+                new QTableWidgetItem(room.known ? locale.toString(room.uses) : tr("unknown"));
+            name->setToolTip(room.tip);
+            holdsItem->setToolTip(room.tip);
+            holdsItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            usesItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            if (!room.known)
+                usesItem->setToolTip(tr("This firmware states its memory in a way this version "
+                                        "of the Device Manager cannot work out. The unit itself "
+                                        "checks a Send before anything changes."));
+            else if (room.uses > room.holds) {
+                usesItem->setForeground(errorColor(palette()));
+                usesItem->setToolTip(tr("More than the target has — see File > Check Channels."));
+            }
+            m_table->setItem(r, 0, name);
+            m_table->setItem(r, 1, holdsItem);
+            m_table->setItem(r, 2, usesItem);
+        }
     }
 }
 

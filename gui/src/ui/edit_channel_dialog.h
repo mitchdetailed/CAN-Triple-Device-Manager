@@ -1,6 +1,7 @@
 // "Edit Custom Channel" — name, channel type (quantity), data type
-// (boolean/u8..s32/float), decimal places, display units. Base resolution and
-// the physical range are derived from the data type + decimal places.
+// (boolean/u8..s32/float), decimal places, display units, and value names (a
+// name for each of some values: "Park" for 0). Base resolution and the
+// physical range are derived from the data type + decimal places.
 //
 // A channel carried by a PROTECTED message opens here READ-ONLY: every value is
 // still on show, and none of them can be changed. At every tier, Read Only
@@ -20,7 +21,9 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
+class QPushButton;
 class QSpinBox;
+class QTableWidget;
 
 namespace ct {
 
@@ -45,6 +48,11 @@ private:
     void onDataTypeChanged();
     void updateDerived(); // resolution + range from data type and decimals
     bool validate();
+    // The Value Names table (phase 4, step 3b): a row of value and name.
+    void addValueNameRow(int value, const QString &name);
+    // The rows that name something, by value; a later row's name for a value
+    // wins (validate() refuses two).
+    QMap<int, QString> valueNames() const;
 
     Configuration *m_config;
     bool m_isNew;
@@ -65,6 +73,9 @@ private:
     QComboBox *m_unitsCombo;
     QDoubleSpinBox *m_minSpin;
     QDoubleSpinBox *m_maxSpin;
+    QTableWidget *m_valueNames;
+    QPushButton *m_addValueName;
+    QPushButton *m_removeValueName;
 };
 
 } // namespace ct

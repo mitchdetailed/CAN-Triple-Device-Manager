@@ -29,6 +29,10 @@ A `.dbc` writes its unit as free text, and every tool spells it differently: `de
 
 > **Note:** **Nothing converts the numbers.** The unit is a label on the value the scaling already produces. If a signal arrives in psi and you pick kPa, the readings are still psi — change the **Bit Resolution** instead, which is what actually scales them. This matters most where the translation is not exact: `hPa` imports as **mbar** (identical), but `atm` arrives as **bar** and `kV` as **V**, and those are relabels rather than conversions.
 
+### Value names
+
+A signal's value descriptions (its `VAL_` line: 0 "Park" 1 "Reverse" …) become its channel's value names (see [Edit Custom Channel](channels.md)), each at the value the channel reads for that raw value. With a factor and an offset that is the scaled value: raw 2 at (0.5,0) is 1. A description whose raw value does not scale to a whole number is left out. `VAL_TABLE_` lines name no signal and are ignored, and a `VAL_` line for a signal the file does not have is listed in the import notes.
+
 ### Channel names
 
 **Underscores become spaces.** A DBC signal name has to be a C identifier, so an author who means "Engine Speed" is obliged to write `Engine_Speed` — the underscore is the file format's limitation, not part of the name, and channels in this application are spelled with spaces. Runs of underscores collapse to one space and the ends are trimmed, so `Engine__Speed` imports as "Engine Speed" and `_Rpm` as "Rpm". It is a starting point, not a rule: the name column is editable, so type the underscore back if you want it.

@@ -472,6 +472,26 @@ QJsonObject SecurePackagePolicy::toJson() const
     // package before the label store is.
     if (needsLabelStore)
         o[QStringLiteral("needsLabelStore")] = true;
+    // And: absent means no plan is declared and no references were counted,
+    // which is what every package before the plan is.
+    if (needsPlan)
+        o[QStringLiteral("needsPlan")] = true;
+    // Absent means 40-byte CRC8 records, which is every package before them.
+    if (crc8Records8)
+        o[QStringLiteral("crc8Records8")] = true;
+    // Absent means every FD frame switches, which is every package before it.
+    if (fdWithoutBrs)
+        o[QStringLiteral("fdWithoutBrs")] = true;
+    if (references >= 0)
+        o[QStringLiteral("references")] = double(references);
+    if (udsBytes > 0)
+        o[QStringLiteral("udsBytes")] = double(udsBytes);
+    // Absent means the names alone, which is what every package before step
+    // 3b writes.
+    if (labelFlags != 0)
+        o[QStringLiteral("labelFlags")] = labelFlags;
+    if (valueNames > 0)
+        o[QStringLiteral("valueNames")] = valueNames;
     // Written only when selected, so "leave this password alone" and "clear it"
     // are different documents rather than the same one read two ways. The value
     // is the DERIVED key in hex — see the struct — and kNoAccessKey means clear.
@@ -522,6 +542,15 @@ SecurePackagePolicy SecurePackagePolicy::fromJson(const QJsonObject &o)
         p.tableCounts.append(v.toInt());
     p.needsExtendedDeviceChannels = o[QStringLiteral("needsExtendedDeviceChannels")].toBool();
     p.needsLabelStore = o[QStringLiteral("needsLabelStore")].toBool();
+    p.needsPlan = o[QStringLiteral("needsPlan")].toBool();
+    p.crc8Records8 = o[QStringLiteral("crc8Records8")].toBool();
+    p.fdWithoutBrs = o[QStringLiteral("fdWithoutBrs")].toBool();
+    p.udsBytes = qMax<qint64>(0, qint64(o[QStringLiteral("udsBytes")].toDouble()));
+    p.references = o.contains(QStringLiteral("references"))
+                       ? qMax<qint64>(0, qint64(o[QStringLiteral("references")].toDouble()))
+                       : -1;
+    p.labelFlags = qBound(0, o[QStringLiteral("labelFlags")].toInt(), 255);
+    p.valueNames = qMax(0, o[QStringLiteral("valueNames")].toInt());
     // contains(), not "is the key non-zero": a zero key means CLEAR it, which is
     // a real instruction and must survive the round trip.
     const auto keyAt = [&o](const QString &name) {
@@ -601,8 +630,23 @@ InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,
     // can say: a package built before the capacity report recorded nothing,
     // and a unit whose capacity could not be read is not guessed at. Neither
     // is a mismatch — nothing was asked for that the unit failed to be.
+    // On a unit that takes a plan the counts are the plan the stream declares,
+    // judged against the unit's rooms, with the references the package
+    // recorded (countsExceeding).
     if (!policy.tableCounts.isEmpty() && device.capacityKnown)
-        v.shortfalls = countsExceeding(policy.tableCounts, device.capacity);
+        v.shortfalls = countsExceeding(policy.tableCounts, device.capacity, policy.references,
+                                       policy.valueNames, 0, policy.udsBytes);
+    // A stream that writes units or value names needs a unit that keeps them.
+    // One whose capacity could not be read refuses the stream's leading probe.
+    if (policy.labelFlags != 0 && device.capacityKnown
+        && (policy.labelFlags & ~device.capacity.labelFlags) != 0)
+        v.labelKindsMissing = true;
+    // A stream that declares a plan needs a unit that takes one. A unit whose
+    // capacity could not be read is not guessed at: it refuses the declaration
+    // itself, after a CLEAR that a 2.0 stages and a 1.x never reaches (the
+    // label store's probe stops it first).
+    if (policy.needsPlan && device.capacityKnown && !device.capacity.plansTables())
+        v.planMissing = true;
 
     // A CAN Viewer password needs firmware that can hold one (1.0.14). Judged
     // here, before anything is sent, rather than left to the device, which
@@ -629,6 +673,14 @@ InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,
     } else {
         v.labelStoreMissing = policy.needsLabelStore;
     }
+    // The CRC8 records' form: 8 elements a record on a CAN Triple 2.0 from its
+    // store v22, 15 everywhere else. Only where the stream writes CRC8 rules,
+    // and only for a unit that could say.
+    if (policy.tableCounts.value(int(DeviceTable::Crc8)) > 0 && device.capacityKnown)
+        v.crc8FormMismatch = policy.crc8Records8 != device.capacity.crc8LongRules();
+    // CAN FD without the bit rate switch: only where the unit says it can.
+    v.brsPerMessageMissing =
+        policy.fdWithoutBrs && !(device.capacityKnown && device.capacity.brsPerMessage());
     return v;
 }
 

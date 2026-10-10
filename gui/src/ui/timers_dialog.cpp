@@ -646,7 +646,7 @@ void TimersDialog::rebuild()
 
 void TimersDialog::onAdd()
 {
-    const int limit = m_config->capacity().capacityOf(DeviceTable::Timers);
+    const int limit = m_config->capacity().limitOf(DeviceTable::Timers);
     if (m_rows.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
                              tr("The device supports at most %1 timers.").arg(limit));

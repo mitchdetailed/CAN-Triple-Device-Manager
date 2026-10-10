@@ -298,6 +298,46 @@ struct SecurePackagePolicy
     // that keeps names accepts.
     bool needsLabelStore = false;
 
+    // The package was built for a CAN Triple 2.0 that takes a plan (phase 4,
+    // DeviceCapacity::plansTables): its stream declares how many records each
+    // table holds right after its CLEAR, and its channels name their messages
+    // in twelve bits. It installs only on a unit that takes a plan; a unit
+    // whose firmware predates it refuses the declaration after its CLEAR (a
+    // 2.0 stages the Send, so its running configuration is untouched, and a
+    // 1.x is stopped before by the label store's probe), and the install
+    // verdict says so before anything is sent. A package without it installs
+    // on such a unit too, laid out with its default plan.
+    bool needsPlan = false;
+
+    // The package was built for a CAN Triple 2.0 whose CRC8 records hold 8
+    // elements (store v22, DeviceCapacity::crc8LongRules): its stream writes
+    // the CRC8 rules as 26-byte records, a rule of more than 8 with continuation
+    // records after it. Where the stream writes CRC8 rules at all, it installs
+    // only on such a unit, and a package without this only on a unit that takes
+    // the 40-byte record; the install verdict holds the two to each other.
+    bool crc8Records8 = false;
+    // The stream sends a CAN FD transmit message without the bit rate switch
+    // (MSGTX_NO_BRS), which only a unit whose firmware honours it
+    // (DeviceCapacity::brsPerMessage) does: any other switches the bit rate
+    // regardless. Absent, false: every package before it.
+    bool fdWithoutBrs = false;
+    // The configuration's dependency references (plan_budget.h), which take
+    // the unit's working memory beside its tables: recorded with tableCounts so
+    // the verdict judges that memory as the unit's SAVE will. -1: not recorded
+    // (every package before the plan), and then the unit judges it.
+    qint64 references = -1;
+    // The UDS requests' buffers the stream's records take of the unit's working
+    // memory (planUdsBytes), counted with the references. 0: none, which is
+    // every package before them.
+    qint64 udsBytes = 0;
+    // What the stream writes beside the names (phase 4, step 3b): the label
+    // kinds past them (LABEL_FLAG_*: each channel's unit, the value names) and
+    // how many value names its plan declares, which take the unit's room for
+    // names. It installs only on a unit that keeps those kinds; a unit from
+    // before them refuses the stream's leading probe, ahead of its CLEAR.
+    int labelFlags = 0;
+    int valueNames = 0;
+
     bool isValid() const { return key.size() == kLicenseKeyBytes || hasKeyProof(); }
     // Whether installing needs the two hardware round trips at all.
     bool wantsHardwareMatch() const { return !matchMcuId.isEmpty() || matchSerialSet; }
@@ -361,12 +401,29 @@ struct InstallVerdict
     // The other way round: this unit keeps names apart, and the package was
     // built for one that keeps them in its records.
     bool labelStoreUnexpected = false;
+    // The package declares a plan (needsPlan) and the unit takes none, or
+    // could not say: a CAN Triple 2.0 on firmware from before phase 4. Fixed by
+    // a firmware update.
+    bool planMissing = false;
+    // The package writes units or value names (labelFlags) and the unit does
+    // not keep them: a CAN Triple 2.0 on firmware from before phase 4's step
+    // 3b. Fixed by a firmware update.
+    bool labelKindsMissing = false;
+    // The package writes CRC8 rules in one record form and the unit takes the
+    // other (crc8Records8): 8 elements a record on a CAN Triple 2.0 from its
+    // store v22, 15 everywhere else. The records are the wrong size for it
+    // either way.
+    bool crc8FormMismatch = false;
+    // The package sends CAN FD without the bit rate switch (fdWithoutBrs) and the
+    // unit's firmware cannot, or could not say. Fixed by a firmware update.
+    bool brsPerMessageMissing = false;
 
     bool ok() const
     {
         return !noPolicy && !deviceUnlicensed && mismatches.isEmpty() && shortfalls.isEmpty()
                && !viewerPasswordUnsupported && !extendedDeviceChannelsUnsupported
-               && !labelStoreMissing && !labelStoreUnexpected;
+               && !labelStoreMissing && !labelStoreUnexpected && !planMissing
+               && !labelKindsMissing && !crc8FormMismatch && !brsPerMessageMissing;
     }
 };
 

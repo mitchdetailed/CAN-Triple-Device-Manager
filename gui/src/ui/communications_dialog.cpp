@@ -64,6 +64,7 @@ QString sectionKind(const CommsSection &s, bool revealed)
     case SectionDevice::ReceiveMessage: kind = QObject::tr("CAN Rx"); break;
     case SectionDevice::TransmitMessage: kind = QObject::tr("CAN Tx"); break;
     case SectionDevice::TransmitCrc8: kind = QObject::tr("CAN Tx CRC8"); break;
+    case SectionDevice::UdsRequest: kind = QObject::tr("UDS"); break;
     case SectionDevice::MessageRelay: kind = QObject::tr("Relay"); break;
     case SectionDevice::Off: kind = QObject::tr("Off"); break;
     }
@@ -683,7 +684,7 @@ void CommunicationsDialog::rebuildSections(int busIndex)
                 ++totalMessages;
     tab.availableLabel->setText(tr("%1 of %2 device messages used")
                                     .arg(totalMessages)
-                                    .arg(m_config->capacity().capacityOf(DeviceTable::Messages)));
+                                    .arg(m_config->capacity().limitOf(DeviceTable::Messages)));
     updateChannelPane(busIndex);
 }
 
@@ -1374,7 +1375,7 @@ void CommunicationsDialog::onLoadTemplate(int busIndex)
     // CHECKED BEFORE ANYTHING IS CREATED. The alternative is a document over the
     // device's limit and a Send that refuses it, with the repair being to work
     // out which of the thirty messages just added are the surplus.
-    const int limit = m_config->capacity().capacityOf(DeviceTable::Messages);
+    const int limit = m_config->capacity().limitOf(DeviceTable::Messages);
     if (used + adding > limit) {
         QMessageBox::warning(this, tr("Load Communications Template"),
                              tr("This template adds %1 message(s), and this configuration "

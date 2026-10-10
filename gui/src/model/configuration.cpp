@@ -238,6 +238,7 @@ QString CommsSection::displayDetail(bool revealed) const
         const QString what = device == SectionDevice::TransmitMessage ? QStringLiteral("transmit")
                              : device == SectionDevice::TransmitCrc8  ? QStringLiteral("transmit CRC8")
                              : device == SectionDevice::MessageRelay  ? QStringLiteral("relay")
+                             : device == SectionDevice::UdsRequest    ? QStringLiteral("UDS request")
                                                                       : QStringLiteral("receive");
         return what
                + (protection == CommsProtection::Protected ? QStringLiteral(" (protected)")
@@ -247,6 +248,7 @@ QString CommsSection::displayDetail(bool revealed) const
     parts << (device == SectionDevice::TransmitMessage ? QStringLiteral("transmit")
               : device == SectionDevice::TransmitCrc8  ? QStringLiteral("transmit CRC8")
               : device == SectionDevice::MessageRelay  ? QStringLiteral("relay")
+              : device == SectionDevice::UdsRequest    ? QStringLiteral("UDS request")
                                                        : QStringLiteral("receive"));
     QString id = QStringLiteral("ID 0x") + QString::number(baseAddress, 16).toUpper();
     if (extended)
@@ -267,6 +269,7 @@ QJsonObject CommsSection::toJson() const
                   : device == SectionDevice::TransmitMessage ? "transmit"
                   : device == SectionDevice::MessageRelay    ? "relay"
                   : device == SectionDevice::TransmitCrc8    ? "transmitCrc8"
+                  : device == SectionDevice::UdsRequest      ? "udsRequest"
                                                              : "off";
     o["alignment"] = alignment == SectionAlignment::Normal ? "normal" : "wordSwap";
     o["receiveTimeoutMs"] = receiveTimeoutMs;
@@ -274,6 +277,7 @@ QJsonObject CommsSection::toJson() const
     o["diagnosticChannel"] = diagnosticChannel;
     o["extended"] = extended;
     o["fd"] = fd;
+    o["brs"] = brs;
     o["baseAddress"] = QString::number(baseAddress, 16).toUpper();
     o["routeEnable"] = routeEnable;
     o["routeBusMask"] = routeBusMask;
@@ -289,6 +293,19 @@ QJsonObject CommsSection::toJson() const
     o["compoundTxMode"] = compoundTxMode == CompoundTxMode::Sequential ? "sequential" : "batch";
     o["relayBitmask"] = QString::number(relayBitmask, 16).toUpper();
     o["relayInvert"] = relayInvert;
+    // Schema 25: the UDS request, written only when the section is one, the
+    // request's bytes as hex (how a diagnostic reference prints them).
+    if (device == SectionDevice::UdsRequest) {
+        o["udsResponseAddress"] = QString::number(udsResponseAddress, 16).toUpper();
+        o["udsRequest"] = QString::fromLatin1(udsRequest.toHex());
+        o["udsAwaitResponse"] = udsAwaitResponse;
+        o["udsTimeoutMs"] = udsTimeoutMs;
+        o["udsPendingMs"] = udsPendingMs;
+        o["udsPadByte"] = udsPadByte;
+        o["udsBlockSize"] = udsBlockSize;
+        o["udsStMin"] = udsStMin;
+        o["udsResultChannel"] = udsResultChannel;
+    }
     // Schema 16: the Transmit CRC8 recipe, written only when the section IS
     // one — an ordinary message carries no trace of the feature, the same
     // idiom "protection" below uses. The hex fields are written as "0x"
@@ -353,6 +370,7 @@ CommsSection CommsSection::fromJson(const QJsonObject &o, int fileVersion)
     s.device = dev == "transmit"     ? SectionDevice::TransmitMessage
                : dev == "relay"      ? SectionDevice::MessageRelay
                : dev == "transmitCrc8" ? SectionDevice::TransmitCrc8
+               : dev == "udsRequest" ? SectionDevice::UdsRequest
                : dev == "off"        ? SectionDevice::Off
                                      : SectionDevice::ReceiveMessage;
     s.alignment = o["alignment"].toString(QStringLiteral("normal")) == "wordSwap"
@@ -363,6 +381,8 @@ CommsSection CommsSection::fromJson(const QJsonObject &o, int fileVersion)
     s.diagnosticChannel = o["diagnosticChannel"].toString();
     s.extended = o["extended"].toBool(false);
     s.fd = o["fd"].toBool(false);
+    // v24. A file without it predates the box, and every FD frame switched.
+    s.brs = o["brs"].toBool(true);
     s.baseAddress = o["baseAddress"].toString(QStringLiteral("0")).toUInt(nullptr, 16);
     s.routeEnable = o["routeEnable"].toBool(false);
     s.routeBusMask = o["routeBusMask"].toInt(0);
@@ -377,6 +397,19 @@ CommsSection CommsSection::fromJson(const QJsonObject &o, int fileVersion)
                            : CompoundTxMode::Batch;
     s.relayBitmask = o["relayBitmask"].toString(QStringLiteral("0")).toUInt(nullptr, 16);
     s.relayInvert = o["relayInvert"].toBool(false);
+    // ---- UDS request, schema 25 ----
+    if (s.device == SectionDevice::UdsRequest) {
+        s.udsResponseAddress =
+            o["udsResponseAddress"].toString(QStringLiteral("7E8")).toUInt(nullptr, 16);
+        s.udsRequest = QByteArray::fromHex(o["udsRequest"].toString().toLatin1()).left(UDS_REQUEST_MAX);
+        s.udsAwaitResponse = o["udsAwaitResponse"].toBool(true);
+        s.udsTimeoutMs = qBound(1, o["udsTimeoutMs"].toInt(1000), 65535);
+        s.udsPendingMs = qBound(1, o["udsPendingMs"].toInt(5000), 65535);
+        s.udsPadByte = qBound(-1, o["udsPadByte"].toInt(0), 255);
+        s.udsBlockSize = qBound(0, o["udsBlockSize"].toInt(0), 255);
+        s.udsStMin = qBound(0, o["udsStMin"].toInt(0), 127);
+        s.udsResultChannel = o["udsResultChannel"].toString();
+    }
     // ---- Transmit CRC8 recipe, schema 16 ----
     // Absent keys land on the struct defaults, which is also what an older
     // file (that cannot hold a transmitCrc8 section anyway) reads as. The hex
@@ -414,8 +447,10 @@ CommsSection CommsSection::fromJson(const QJsonObject &o, int fileVersion)
             e.last = qBound(0, eo["last"].toInt(0), 63);
             e.lsbFirst = eo["lsbFirst"].toBool(false);
             s.crcElements.append(e);
-            if (s.crcElements.size() >= 15)
-                break; /* CRC8_MAX_ELEMENTS — extra hand-added rows are dropped */
+            /* The most a rule holds anywhere (a CAN Triple 2.0's long rules):
+             * hand-added rows past it are dropped. */
+            if (s.crcElements.size() >= CRC8_MAX_RULE_ELEMENTS)
+                break;
         }
     }
     // ---- protection tier, schema 14, read in strict order ----
@@ -1137,10 +1172,12 @@ Configuration::Configuration(QObject *parent)
 
 void Configuration::setDirty(bool dirty)
 {
-    if (m_dirty == dirty)
-        return;
-    m_dirty = dirty;
-    emit dirtyChanged(dirty);
+    if (m_dirty != dirty) {
+        m_dirty = dirty;
+        emit dirtyChanged(dirty);
+    }
+    if (dirty)
+        emit edited();
 }
 
 QString Configuration::displayName() const
@@ -1226,6 +1263,7 @@ void Configuration::clearContent()
     table2x16Rows.clear();
     table8x8Rows.clear();
     comments.clear();
+    retainedChannels.clear();
     // BOTH halves of the script, through the one door. A Get calls this before
     // it maps, so the image it is about to retain starts from an empty pair
     // rather than landing beside the outgoing document's source — which the
@@ -1751,6 +1789,19 @@ bool Configuration::setCommsPassword(const QString &password)
 // release gives a CAN Triple 2.0 FD data rates of 4, 5 and 8 Mbit/s; a build
 // before them opens a bus at one of those as 2M and would Send it so, which is
 // the same class of silent change and the same bump covers it.
+// 22 -> 23: a Transmit CRC8 recipe of up to 70 elements, which a CAN Triple 2.0
+// from its store v22 runs (long rules). The bump is for the same guard: a build
+// before it keeps the first 15 elements of a longer recipe and would Send a
+// rule that stamps a different checksum, silently.
+// 23 -> 24: CommsSection::brs, the bit rate switch of a CAN FD transmit message
+// ("brs"; absent, on, which is what every FD frame did). The bump is for the
+// same guard: a build before it drops "brs": false and Sends the message with
+// the bit rate switched, so a node that needs its frames at the base rate stops
+// receiving them, silently.
+// 24 -> 25: the UDS Request section (device "udsRequest" and its uds* keys),
+// which a CAN Triple 2.0 from firmware 2.0.4 makes. The bump is for the same
+// guard: a build before it reads the section as a receive message of the
+// request's identifier and Sends a configuration that makes no request.
 //
 // "targetCapacity" (the firmware capacity a document is sized against, written
 // only once a target has been chosen) deliberately did NOT bump this, and the
@@ -1764,7 +1815,7 @@ bool Configuration::setCommsPassword(const QString &password)
 // changed in meaning; only a sizing assumption is, and the older build
 // recomputes it. A bump would refuse every file this version saves to a 1.2.x
 // build for the sake of information that build cannot use.
-static constexpr int kConfigSchemaVersion = 22;
+static constexpr int kConfigSchemaVersion = 25;
 
 // The one accessor, so nothing outside this file has to hold a second copy of
 // the number. Communications templates stamp it into the file they write and
@@ -2085,11 +2136,20 @@ bool Configuration::loadFromFile(const QString &path, QString *error, const QStr
 
     // The format the file ACTUALLY had, so Save rewrites it as it was found.
     // `secure` alone could not say this once there were three shapes: a
-    // format-1 .ct3 and a format-2 .ct3 are both "not secure" and must not be
+    // format-1 .ct3 and a sealed .ct3 are both "not secure" and must not be
     // saved the same way as each other, because one of them is legible and the
     // other is not.
+    //
+    // With one exception, made on purpose (Mitch, 2026-10-08: "Make Save convert
+    // an old JSON .ct3 to the encrypted format"): a legible file stays legible
+    // only where its name says JSON was chosen, .json being what Save As gives a
+    // JSON file. A legible .ct3 is one from before the sealed formats, or a script's; nobody
+    // chose JSON for it, and its next Save seals it, as the help has always said.
+    const bool chosenJson =
+        QFileInfo(path).suffix().compare(QLatin1String("json"), Qt::CaseInsensitive) == 0;
     m_format = secure ? FileFormat::Secure
-                      : (isBinaryConfigFile(path) ? FileFormat::Sealed : FileFormat::Json);
+               : (isBinaryConfigFile(path) || !chosenJson) ? FileFormat::Sealed
+                                                           : FileFormat::Json;
     m_secureOptions = secureOptions;
 
     // The key and the grant are two different things, and this is the one place
@@ -2210,6 +2270,11 @@ void Configuration::loadBody(const QJsonObject &root, int fileVersion)
     for (const auto &v : root["tables4x4"].toArray())
         table8x8Rows.append(Table8x8Row::fromTable4x4Json(v.toObject()));
     comments = root["comments"].toString();
+    // Phase 4: absent in every older file, where no channel was kept.
+    retainedChannels.clear();
+    for (const QJsonValue &v : root["retainedChannels"].toArray())
+        if (!v.toString().trimmed().isEmpty())
+            retainedChannels.append(v.toString());
     // v15. Both halves of the script in one call, so a file that somehow carries
     // both keys — hand-edited, or merged — resolves through the SAME precedence
     // rule as everything else instead of loading a pair this document could not
@@ -2344,6 +2409,12 @@ QJsonObject Configuration::buildBody() const
     root["tables8x8"] = tables8x8;
     root["configTitle"] = m_configTitle;
     root["comments"] = comments;
+    // Written only when some channel is kept, so every existing .ct3 stays
+    // byte-identical. No schema bump: a Manager that drops the list on save is
+    // one that cannot send to a unit that keeps channels anyway (the 2.0's
+    // store version is 21 from phase 4).
+    if (!retainedChannels.isEmpty())
+        root["retainedChannels"] = QJsonArray::fromStringList(retainedChannels);
     // The target firmware, only when one was chosen: a document sized against
     // this build's assumptions records nothing, so every existing .ct3 stays
     // byte-identical on save and loads as it always did. See the note beside
@@ -2426,23 +2497,7 @@ bool Configuration::saveToFile(const QString &path, QString *error)
     // anyKeyedSectionConcealed() remains as the question, and no longer as a
     // veto.
 
-    QJsonObject root;
-    root["fileType"] = QStringLiteral("CANTripleConfig");
-    root["fileVersion"] = kConfigSchemaVersion;
-    // Which BUILD wrote this, for people rather than for the parser. fileVersion
-    // says how to read the file and is the only thing load ever compares;
-    // writtenBy says who produced it, which is the question actually asked when
-    // a configuration turns up behaving oddly and nobody remembers which machine
-    // it came off.
-    //
-    // Deliberately never read back. A parser that branched on an application
-    // version would be deciding structure from a number that does not describe
-    // structure — that is fileVersion's job, and two numbers answering one
-    // question is how they drift apart.
-    root["writtenBy"] = QStringLiteral(CT_APP_VERSION);
-    const QJsonObject body = buildBody();
-    for (auto it = body.constBegin(); it != body.constEnd(); ++it)
-        root.insert(it.key(), it.value());
+    const QJsonObject root = buildRoot();
 
     // COMPACT, not indented. These bytes are the plaintext of a sealed
     // container now, so indentation would pad the ciphertext without making
@@ -2473,6 +2528,95 @@ bool Configuration::saveToFile(const QString &path, QString *error)
     // by accident. fileFormat() is the question it asks to do it.
     m_format = FileFormat::Sealed;
     setDirty(false);
+    return true;
+}
+
+QJsonObject Configuration::buildRoot() const
+{
+    QJsonObject root;
+    root["fileType"] = QStringLiteral("CANTripleConfig");
+    root["fileVersion"] = kConfigSchemaVersion;
+    // Which BUILD wrote this, for people rather than for the parser. fileVersion
+    // says how to read the file and is the only thing load ever compares;
+    // writtenBy says who produced it, which is the question actually asked when
+    // a configuration turns up behaving oddly and nobody remembers which machine
+    // it came off.
+    //
+    // Deliberately never read back. A parser that branched on an application
+    // version would be deciding structure from a number that does not describe
+    // structure — that is fileVersion's job, and two numbers answering one
+    // question is how they drift apart.
+    root["writtenBy"] = QStringLiteral(CT_APP_VERSION);
+    const QJsonObject body = buildBody();
+    for (auto it = body.constBegin(); it != body.constEnd(); ++it)
+        root.insert(it.key(), it.value());
+    return root;
+}
+
+QByteArray Configuration::projectBody(QString *error) const
+{
+    // Compressed BEFORE it is sealed: sealed bytes do not compress, and a
+    // configuration's JSON shrinks four to ten times. Sealed as a .ct3 is (no
+    // key inside), so the unit holds nothing more legible than the file. With
+    // none of the noise a file is padded with to hide its size: the header the
+    // unit keeps it under states the size anyway, and the noise would cost a
+    // third again of the space and the transfer. (So a byte flipped in what
+    // noise there is goes unnoticed by the seal; the header's CRC-32 over the
+    // whole body is what catches damage on the unit.)
+    QByteArray plain = QJsonDocument(buildRoot()).toJson(QJsonDocument::Compact);
+    QByteArray packed = qCompress(plain, 9);
+    plain.fill('\0');
+    SecureSaveOptions options;
+    options.embeddedCommsKey = kNoAccessKey;
+    options.noiseRatio = 0.0;
+    QByteArray blob;
+    const bool sealed = sealSecureBlob(packed, options, &blob, error);
+    packed.fill('\0');
+    return sealed ? blob : QByteArray();
+}
+
+bool Configuration::loadProjectBody(const QByteArray &bodyBytes, QString *error)
+{
+    const auto damaged = [&] {
+        if (error)
+            *error = QStringLiteral("The project stored on the unit is damaged and cannot be "
+                                    "opened.");
+        return false;
+    };
+    QByteArray packed;
+    if (!openSecureBlob(bodyBytes, &packed, nullptr, nullptr))
+        return damaged();
+    QByteArray plain = qUncompress(packed);
+    packed.fill('\0');
+    const QJsonDocument doc = QJsonDocument::fromJson(plain);
+    plain.fill('\0');
+    if (!doc.isObject())
+        return damaged();
+    const QJsonObject root = doc.object();
+    // The same two checks a sealed .ct3 gets (loadFromFile): a configuration's
+    // marker, and a schema this build reads.
+    if (root.value(QStringLiteral("fileType")).toString() != QLatin1String("CANTripleConfig"))
+        return damaged();
+    const int fileVersion = root.value(QStringLiteral("fileVersion")).toInt(1);
+    if (fileVersion > kConfigSchemaVersion) {
+        if (error)
+            *error = QStringLiteral("The project stored on the unit was sent by a newer version "
+                                    "of CAN Triple Device Manager and can't be opened.");
+        return false;
+    }
+
+    loadBody(root, fileVersion);
+    // As loadFromFile leaves a plain .ct3, less the file: a sealed document
+    // with no key inside, nothing revealed and no section granted, and no path,
+    // so a Save asks where it goes.
+    m_format = FileFormat::Sealed;
+    m_secureOptions = SecureSaveOptions{};
+    m_commsKey = kNoAccessKey;
+    m_commsRevealed = false;
+    m_sectionGrants.clear();
+    m_filePath.clear();
+    setDirty(true);
+    emit documentReset();
     return true;
 }
 
@@ -2734,6 +2878,28 @@ bool Configuration::hasProtectedComms() const
     return false;
 }
 
+bool Configuration::isRetainedChannel(const QString &name) const
+{
+    for (const QString &kept : retainedChannels)
+        if (kept.trimmed().compare(name.trimmed(), Qt::CaseInsensitive) == 0)
+            return true;
+    return false;
+}
+
+bool Configuration::setRetainedChannel(const QString &name, bool retained)
+{
+    if (name.trimmed().isEmpty() || isRetainedChannel(name) == retained)
+        return false;
+    if (retained) {
+        retainedChannels.append(name.trimmed());
+    } else {
+        for (int i = int(retainedChannels.size()) - 1; i >= 0; --i)
+            if (retainedChannels[i].trimmed().compare(name.trimmed(), Qt::CaseInsensitive) == 0)
+                retainedChannels.removeAt(i);
+    }
+    return true;
+}
+
 int Configuration::renameChannelReferences(const QString &oldName, const QString &newName)
 {
     int updated = 0;
@@ -2747,6 +2913,12 @@ int Configuration::renameChannelReferences(const QString &oldName, const QString
     updated += renameChannelRefs(constantRows, oldName, newName);
     updated += renameChannelRefs(table2x16Rows, oldName, newName);
     updated += renameChannelRefs(table8x8Rows, oldName, newName);
+    // A kept channel stays kept under its new name.
+    for (QString &kept : retainedChannels)
+        if (kept.trimmed().compare(oldName.trimmed(), Qt::CaseInsensitive) == 0) {
+            kept = newName;
+            ++updated;
+        }
     if (updated > 0)
         setDirty();
     // Deliberately NOT behind `updated > 0`: the listeners are open grid
@@ -2849,6 +3021,7 @@ void Configuration::copyContentTo(Configuration &target) const
     target.table2x16Rows = table2x16Rows;
     target.table8x8Rows = table8x8Rows;
     target.comments = comments;
+    target.retainedChannels = retainedChannels;
     // BOTH halves, in one call. Copying only the source is the mistake this
     // shape of change has already made once — see the m_accessVerifiers note
     // below — and here it would be silent and expensive: the copy would map as
@@ -3414,10 +3587,15 @@ QStringList Configuration::generatedChannelNames() const
         names.append(c.name);
     for (const auto &b : bus)
         for (const CommsSection &s : b.sections) {
-            if (s.isReceive())
+            if (s.isReceive() || s.isUds()) // a UDS request's rows decode its response
                 for (const QString &n : s.channelNames())
                     if (!names.contains(n, Qt::CaseInsensitive))
                         names.append(n);
+            // A UDS request's result channel is written by the unit at the end
+            // of every request: generated, the way the CRC8 stamp's channel is.
+            if (s.isUds() && !s.udsResultChannel.isEmpty()
+                && !names.contains(s.udsResultChannel, Qt::CaseInsensitive))
+                names.append(s.udsResultChannel);
             // A Transmit CRC8 section PUBLISHES its computed checksum to a
             // channel — the device writes that slot every time the message
             // composes, so the channel is generated exactly like a receive

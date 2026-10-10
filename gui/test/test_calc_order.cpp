@@ -322,6 +322,41 @@ void testDialogSizeSurvivesExec()
 
 } // namespace
 
+// Phase 4, step 3b: OK in the Constants and Tables dialogs rebuilds their
+// output channels from the rows, and a channel's value names (given in Edit
+// Custom Channel) are in no row: they stay with the channel.
+void testOutputsKeepTheirValueNames()
+{
+    Configuration config;
+    ConstantRow k;
+    k.name = QStringLiteral("Mode");
+    k.dataType = QStringLiteral("u8");
+    config.constantRows << k;
+    Table2x16Row t;
+    t.outputChannel = QStringLiteral("Gear");
+    t.xChannel = QStringLiteral("X");
+    config.table2x16Rows << t;
+    const QMap<int, QString> names{{0, QStringLiteral("Off")}, {1, QStringLiteral("On")}};
+    for (const QString &n : {QStringLiteral("Mode"), QStringLiteral("Gear")}) {
+        Channel ch;
+        ch.name = n;
+        ch.dataType = QStringLiteral("u8");
+        ch.userDefined = true;
+        ch.enumLabels = names;
+        config.catalog().addOrUpdateUserChannel(ch);
+    }
+    {
+        ConstantsDialog d(&config);
+        pressOk(d);
+    }
+    {
+        TablesDialog d(&config);
+        pressOk(d);
+    }
+    CHECK(config.catalog().findByName(QStringLiteral("Mode")).enumLabels == names);
+    CHECK(config.catalog().findByName(QStringLiteral("Gear")).enumLabels == names);
+}
+
 int main(int argc, char **argv)
 {
     // Offscreen unless the caller chose a platform: the same test run with
@@ -337,6 +372,7 @@ int main(int argc, char **argv)
     testCounters();
     testIntegrators();
     testConstants();
+    testOutputsKeepTheirValueNames();
     testTables();
     testDialogSizeSurvivesExec();
 

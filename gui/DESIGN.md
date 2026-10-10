@@ -246,7 +246,7 @@ mismatch between the two numbers is the point rather than an oversight.
   its whole geometry (`windows/main/geometry`, QWidget save/restoreGeometry,
   the first-run centring kept as the fallback); switched on by main() only, so
   the tests and the --screenshots helper never write it.
-- **Themes** — Tools → Theme (`src/ui/theme.h`/`.cpp`): Windows Default, the
+- **Themes** — Tools → Options… (`src/ui/theme.h`/`.cpp`): Windows Default, the
   program as it always looked (the native style and the platform's palette,
   light or dark as Windows is set), and four of its own: Light, Dark, Midnight
   Blue and Carbon Red, each Qt's Fusion style under a full palette (every role,
@@ -618,6 +618,57 @@ would print the withheld CAN ID in the sections list.
 - **Removal is permitted at every tier**, in the dialog, from Lua and on the
   device. Nothing anywhere refuses it.
 
+## UDS requests
+
+A **UDS Request** section (`SectionDevice::UdsRequest`, schema 25; Mitch,
+2026-10-08) makes a CAN Triple 2.0 from firmware 2.0.4 a diagnostic tester:
+one request of one ECU over ISO 15765-2, cyclic or triggered, and its response
+decoded into channels. On the unit it is three records (`device_mapper.cpp`,
+the section loop; the response message stays when no response is awaited —
+the ECU's flow control for a multi-frame request arrives on it — and
+`UDSFLAG_NO_RESPONSE` marks the record): the request, a transmit message
+flagged `MSGTX_UDS_REQUEST`
+whose identifier, bus, frame format and timing are the section's transmit
+fields; the response, a receive message flagged `MSGRX_UDS_RESPONSE` with the
+section's `udsResponseAddress`, whose channels are the section's rows laid out
+over the reassembled response (byte 0 the service byte) and whose receive
+timeout is the section's; and a `UdsConfig` (the sixteenth table,
+`DeviceTable::Uds`, store v23) naming both and carrying the request's bytes
+(`udsRequest`, up to 64), the timeouts, padding, the flow control the unit
+sends and a status channel. The section's name is the request message's and
+stands for the response in a condition's message terms. A Get folds the three
+back into one section after the CRC8 restore pass, dropping the response's
+section and keeping `msgSection` in step. Response identifiers may be shared
+among the UDS requests on a bus (one ECU answers every request on 0x7E8; the
+unit's transport tells the responses apart by the request in flight), never
+with a receive message, which only the first message with an identifier
+matches (validation.cpp, idUsers). A UDS request's rows are receive rows
+everywhere the Manager asks (generated channels, timeouts, conditions'
+message terms), its timing a transmit message's. The target must say
+`CAPACITY_CAN_UDS_REQUESTS` with a table to hold them
+(`DeviceCapacity::udsRequests`): validation refuses the section elsewhere, and
+the mapper never writes the table to a unit without it.
+
+Each bus's ISO-TP buffer is the largest request or kept response of the bus's
+records, counted after the references and before the queues' floors
+(`planUdsBytes`, `arenaWithReferences`), as the unit counts it at the SAVE; a
+package's policy records it (`udsBytes`) for the verdict. The firmware's
+`v2/README.md`, "UDS requests", has the transport.
+
+## Options
+
+Tools → Options… (`src/ui/options_dialog.*`; Mitch, 2026-10-09) holds what
+belongs to the program rather than to a document: the theme, which was a
+submenu of its own, and **Remember last connection** (`connection/rememberLast`
+in QSettings, off by default). Off, Online → Connect opens Connection Settings
+every time; on, `MainWindow::updateConnectionStatus` keeps each successful
+port and baud (`saveConnection`) and `onConnect` tries them first, falling
+through to the dialog when the port is gone. Turning the option off forgets the
+kept connection. The theme applies as the combo changes (so it can be seen) and
+Cancel puts the opening theme back; `themeApplied` lets the main window redraw
+its memory figures. `test_options_dialog` covers all of it against an INI file
+in a scratch directory.
+
 ## The .ct3s container
 
 **File → Secure Configuration Builder…** (`src/model/secure_file.*`,
@@ -631,6 +682,20 @@ handed to somebody else needs. **The Protected Comms key travels with it**: a
 satisfies a device's protected-comms gate without them ever typing the password.
 And it carries **the rules for its own installation**. Open… routes on the
 file's magic rather than its extension.
+
+**The `.ct3`'s own format number is a different count** from the container's:
+it is the `format` line of the preamble (`kConfigFileFormatVersion`), 1 for the
+indented JSON of the first releases, 2 for the sealed body, and 3 from Manager
+1.2.8 (Mitch, 2026-10-08), where the body is compressed before it is sealed.
+What a format-3 `.ct3` seals is `kConfigPackedBodyMagic` ("CT3Z") and then
+`qCompress`'s output, and the marker inside the seal, not the preamble, says how
+the body is read, so a relabelled preamble changes nothing; a stated length over
+64 MB, or a stream that does not inflate to exactly the length it states, is
+refused as damaged. Real configurations come out ten to forty times smaller.
+Builds before 1.2.8 refuse a format-3 `.ct3` by name ("saved by a newer
+version"). Save writes format 3 for any `.ct3`, including a legible one from
+the first releases: a document stays JSON only when its file is named `.json`
+(`Configuration::loadFromFile`), which is what Save As gives a JSON file.
 
 **Format 3 (Manager 1.2.0) is where the file stopped carrying its own key.**
 Formats 1 and 2 had one honest story each: format 1 wrapped the file key under a
@@ -1011,8 +1076,10 @@ target the dialog still opens an old file's 4M or 5M as 2M, the fastest that
 target runs. Schema 22 covers these rates too: an older build would open them
 as 2M and Send them so.
 
-What the report does not make flexible: record shapes (CRC8 elements per rule,
-table sites, condition terms, name lengths) are fixed by the wire format; the
+What the report does not make flexible: record shapes (CRC8 elements per record,
+table sites, condition terms, name lengths) are fixed by the wire format (a CAN
+Triple 2.0 from store v22 runs a CRC8 rule on into more records, 8 elements a
+record and up to 70 a rule, which its crc8_features state); the
 channel pool is the signal table's capacity and every calculation still takes
 a slot from it; and messages stop at 510 whatever the flash budget says.
 
@@ -1384,6 +1451,94 @@ record sizes, refusing a 1.x-sized record), with a 32-byte name, a name cut on
 a two-byte character, a name the unit holds wrongly (the verify fails before
 the SAVE), and names crossing between the two formats both ways.
 
+### The project kept on a CAN Triple 2.0
+
+A CAN Triple 2.0 keeps the document a configuration was sent from beside the
+configuration (`CMD_WRITE_PROJECT` 0x5D, `CMD_READ_PROJECT` 0x5E;
+`CapacityExtension::project_bytes`, 1 MB, read as
+`DeviceCapacity::keepsProject()`). The unit keeps the bytes and reads none of
+them; their format is the Manager's (`stored_project.h`).
+
+**The bytes.** A 128-byte header, then the body. The body is
+`Configuration::projectBody()`: the object a `.ct3` seals (`buildRoot()`),
+compressed with `qCompress` and then sealed with `sealSecureBlob` exactly as a
+`.ct3` is, so it is no more legible than the file and several times smaller.
+The header carries a magic, the body's size and CRC-32, the configuration's
+fingerprint, when it was sent, the Manager's version and the document's file
+name, under a CRC-32 of its own (IEEE, so a bench script checks it with
+`zlib.crc32`).
+
+**Encrypted on the unit.** The unit keeps the bytes encrypted under a key of
+its own, drawn from its random number generator the first time a project is
+written and never sent anywhere: HMAC-SHA256 in counter mode (as sealed
+packages are keyed), with a fresh nonce each time a copy is written, so nothing
+it keeps is legible read straight off its memory. None of it shows on the wire:
+the Manager writes and reads the bytes it means, and a read past the end of
+what was written still answers 0xFF, so a unit without a project reads as one.
+The `.ct3` seal inside stays, so a project is no more legible than its file
+even to whoever proves the Get password.
+
+**Staged with the Send.** The unit takes a write only inside a Send, every byte
+blank or already that byte (a retransmit is taken), and a Send's project takes
+effect with its SAVE: an abandoned Send leaves the running project, and a Send
+that writes none leaves the unit with none. The project a unit holds is always
+the one its configuration came with, or nothing; a write to the configuration
+outside a Send is the one way they can part, and the fingerprint is how a Get
+notices.
+
+**The Send.** `DeviceTables::storedProject` carries the bytes
+(`buildStoredProject`); the mapper never fills it, and only the Send command
+and the update window's restore do. `ConfigTransfer` writes the body and then
+the header, after every other write: header last, so a Send that stops part way
+leaves a copy with no header, which reads as no project rather than a damaged
+one. The whole of it is read back at the end of the verify phase. The steps are
+required: a project that does not go in fails the Send before its SAVE, and the
+unit keeps running what it had. A unit that keeps a project may have to erase
+one at a CLEAR when its own background erase has not run yet, about 2.8 s for a
+whole megabyte, so the CLEAR gets 15 s instead of the 4 s flash timeout.
+`planInstallFrames` drops the project: a sealed package never stores one, being
+for someone who may install a configuration but not read it.
+
+**The fingerprint.** `ConfigTransfer::configurationFingerprint()`: SHA-256, cut
+to 16 bytes, over every table's records in the unit's form and the names apart
+from them, each list cut after its last entry holding anything, which is where
+a Send stops writing and where the zero-filled tail a unit answers past it
+begins. The Send stamps it into the header from exactly the tables it writes,
+whatever the caller put there; a Get computes it from what it read. The two
+agree exactly when nothing has changed the configuration's records or names.
+Left out: the bus setup, the configuration's name, the message passwords and
+the device channels, which a Send does not read back, and the bus setup a unit
+reports is the one it runs, which a script may change while the configuration
+stays the same.
+
+**The Get.** On a unit that keeps one, the Get reads the project's header last,
+and its reply plans the body's reads (`addProjectReads`), so a small project
+costs a few reads, not a megabyte. They are optional like the other late reads:
+a refused or lost one drops the project, never the Get. The main window opens
+the project when the fingerprints agree (`loadProjectBody`: untitled and
+modified, titled with the file it was sent from, which Save As offers) and says
+so in the status bar; when they differ it asks, defaulting to the configuration
+as read; a project that does not open is named in the Get's result.
+
+**The Send dialog.** "Store this project on the unit", shown when the unit
+keeps one: ticked unless the document's file is among the exceptions kept in
+`send/projectStoreOff`, greyed with the reason when the body cannot be made or
+will not fit. The body is encoded again after OK, with the title just typed.
+
+**The update window.** When the unit's project matches its configuration, the
+backup is that project (`device-project-<stamp>.ct3`), and the restore stores it
+again; otherwise the backup is rebuilt from the records as before.
+
+`test_roundtrip`'s `testStoredProject` holds it to a model of the unit
+(`ProjectUnit`: the label-store model with the project staged as the 2.0 stages
+it): the body both ways, the header and every way it can be damaged, a Send
+with the header last and the project verified, the fingerprint a Get computes
+equal to the one the Send stamped, what changes it and what does not, a
+verify that fails and a write the unit refuses (no SAVE either way), a Send
+without a project, a Get whose project read is refused, and a package that
+stores none. `test_firmware_v2` holds the commands, the sizes and the report's
+field to the 2.0's `protocol.h`.
+
 ### A CAN Triple 2.0's own settings (LED brightness)
 
 Some things belong to the unit rather than to any configuration. The first is
@@ -1422,6 +1577,46 @@ and the record to the 2.0's `protocol.h`.
 On the unit the PWM gained resolution so the setting could reach 5 % without
 bending colours: 40 steps per per mille at the same 1 kHz, and at 100 % every
 compare value is exactly the old per-mille value times 40.
+
+### Production and development builds of the CAN Triple 2.0
+
+The 2.0 firmware is built twice from one source. The development build is
+what the bench uses; the production build is the one the installer carries,
+and so the one a unit ships and is updated with, and the public repository
+publishes. The only difference is readout protection: the production build
+turns the chip's readout protection on the first time it starts, licensed or
+not, where the development build leaves it alone unless the unit holds a
+Firmware Key. A unit at level 1 still updates itself (the chip writes its own
+flash), and its bootloader still falls back on the previous or the factory
+image, so a protected unit is updated and recovered exactly as an open one.
+
+An image says which it is: "production" in its build description, and
+`CAPACITY_BUILD_PRODUCTION` in its capacity block's `build_flags` (a reserved
+0 until it had a meaning, so every earlier 2.0 build reads as a development
+one), parsed as `DeviceCapacity::buildFlags` / `productionBuild()`. Not part of
+`sameTarget()`: both builds run the same configurations. The update window
+reads the unit's level (`CMD_GET_PROTECTION`), shows it, and when the chosen
+image is a production build and the unit's protection is off, which in practice
+means a bench unit, it says before the Update button that the image will turn
+it on, and repeats it in the confirmation. It does not refuse. A unit that is
+already protected, every unit a customer has, gets no such line.
+`test_firmware_update_dialog` covers both levels, both builds and a unit that
+cannot report its level; `test_firmware_v2` holds the flag and its offset to
+the 2.0's `protocol.h`.
+
+**The product record decides** (Mitch, 2026-10-09). The OTP manufacturing
+record's Product (`CMD_GET_DEVICE_INFO`, `DeviceInfo::product`) is what a unit
+IS: burned at manufacture, beyond any firmware's reach, where the board report
+(`CMD_GET_HARDWARE`) is whatever the running firmware says. The update window
+reads both, ungated, and `productRecordFamily` maps the record: blank or "CAN
+Triple" is the CAN Triple, "CAN Triple V2" (what the burn tool writes) the CAN
+Triple 2.0, anything else a product this build does not know, refused by name.
+An image for the other family than the record's is refused before a byte is
+sent; a record and a board report that disagree block the update until they
+agree; a CAN Triple 2.0 that cannot show its record is not updated at all,
+while a CAN Triple on firmware without the command is taken for what its board
+report says. `test_firmware_update_dialog` holds every case against a unit
+whose record is faked, blank and failing.
 
 ### Updating a CAN Triple 2.0
 

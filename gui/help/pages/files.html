@@ -16,7 +16,7 @@ two binary, and one you can read.</p>
 <tr><th>Format</th><th>Written by</th><th>What it is</th></tr>
 <tr><td><b>.ct3</b></td><td>File → Save / Save As…</td>
 <td>A short readable header — the format, the schema and the version that wrote
-it — followed by the document as an encrypted binary body.</td></tr>
+it — followed by the document compressed and encrypted.</td></tr>
 <tr><td><b>.ct3s</b></td><td>File → Secure Configuration Builder…</td>
 <td>The same container with no readable header, plus the two things a .ct3 does
 not have: concealment that survives the file, and an install policy naming the
@@ -26,9 +26,12 @@ devices it may be sent to.</td></tr>
 have to pick it — see <a href="#json">Saving as JSON</a>.</td></tr>
 </table>
 
-<p><b>Configurations saved before this version were indented JSON</b>, and they
-still open normally — there is nothing to convert and nothing to do. The first
-time you save one it is written in the new format. Going back is not offered.</p>
+<p><b>Older .ct3 files still open normally</b>: the indented JSON written by
+early versions, and the encrypted but uncompressed files written by versions up
+to 1.2.7. There is nothing to convert and nothing to do. The first time you save
+one it is written in the current format, compressed and then encrypted, which
+makes it about a twentieth of the size. Going back is not offered; to keep a
+readable copy, use Save As… and pick JSON.</p>
 
 <h2 id="whatbinary">What "binary" does and does not mean</h2>
 
@@ -174,10 +177,14 @@ offers both. See
 <h2>Version compatibility</h2>
 
 <p>Every .ct3 records the schema version it was written at (currently
-<b>21</b>). Older files keep loading — fields a newer schema added simply
+<b>25</b>). Older files keep loading — fields a newer schema added simply
 take their defaults. A file whose version is <i>ahead</i> of the program is
 refused rather than half-read, with a message saying it was saved by a newer
 version of CAN Triple Device Manager; update the program to open it.</p>
+
+<p>The same goes for the file format itself. A .ct3 saved by version 1.2.8 or
+later is compressed, and versions before 1.2.8 refuse it with that same
+message; update them to open it. Version 1.2.8 and later open every older .ct3.</p>
 
 <p>Refusing is deliberate, and the reason is worth knowing: a setting an older
 program does not recognise is not always a setting it can safely ignore. A
@@ -233,6 +240,13 @@ refuses every row. <b>Get Configuration</b> sets the target to the unit it
 read from, so a document read back from a larger variant can carry everything
 that unit held.</p>
 
+<p>A <b>CAN Triple 2.0</b> sizes each configuration's tables to what it uses
+(see <a href="can-triple-2.html#room">How much it holds</a>). For one, the
+dialog shows each table as <i>up to</i> the most it can take, then three more
+rows for the rooms everything shares: configuration storage, working memory
+and names, each in bytes beside what the document takes of it, in red when it
+does not fit. The figures leave out the device script, which the Send adds.</p>
+
 <p class="note">A target smaller than the document is allowed — it is how a
 configuration is brought down to a smaller firmware — but it is never silent:
 the dialog says how many rows no longer fit, and Check Channels names them.
@@ -249,6 +263,16 @@ differently on it (a CAN Triple keeps 31 bytes of a channel's name and 17 of a
 message's where a CAN Triple 2.0 keeps 32, for instance) is listed in the
 confirmation, where you can still cancel. The configuration goes to the unit in
 the form that unit takes it.</p>
+
+<h2 id="notes">Config notes</h2>
+
+<p><b>File&nbsp;→&nbsp;Config Notes…</b> holds notes about the configuration,
+up to 16 KB of text: what it is for, who asked for it, what changed. They are
+saved in the file and printed by Config Summary. A CAN Triple 2.0 with firmware
+2.0.3 or later keeps them with its configuration: <b>Send Configuration</b>
+writes them and <b>Get Configuration</b> reads them back, so a unit carries its
+own notes. Other units keep no notes; they stay in the file. A secure package
+carries none.</p>
 
 <h2>What the file carries besides the configuration</h2>
 

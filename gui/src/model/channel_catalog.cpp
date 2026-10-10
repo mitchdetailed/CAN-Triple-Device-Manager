@@ -1,5 +1,6 @@
 #include "channel_catalog.h"
 
+#include <QJsonArray>
 #include <QMap>
 #include <QRegularExpression>
 
@@ -19,6 +20,15 @@ QJsonObject Channel::toJson() const
     o["minValue"] = minValue;
     o["maxValue"] = maxValue;
     o["category"] = category;
+    // Value names, only for a channel that has them: a file without any is the
+    // file it always was.
+    if (!enumLabels.isEmpty()) {
+        QJsonArray names;
+        for (auto it = enumLabels.constBegin(); it != enumLabels.constEnd(); ++it)
+            names.append(QJsonObject{{QStringLiteral("value"), it.key()},
+                                     {QStringLiteral("name"), it.value()}});
+        o["valueNames"] = names;
+    }
     return o;
 }
 
@@ -34,6 +44,12 @@ Channel Channel::fromJson(const QJsonObject &o)
     c.minValue = o["minValue"].toDouble(-1e9);
     c.maxValue = o["maxValue"].toDouble(1e9);
     c.category = o["category"].toString(QStringLiteral("User Channels"));
+    for (const QJsonValue &v : o["valueNames"].toArray()) {
+        const QJsonObject n = v.toObject();
+        const QString name = n[QStringLiteral("name")].toString();
+        if (!name.isEmpty())
+            c.enumLabels.insert(n[QStringLiteral("value")].toInt(), name);
+    }
     c.userDefined = true;
     return c;
 }
@@ -493,6 +509,15 @@ static const QMap<QString, QStringList> &unitMap()
 QStringList ChannelCatalog::unitsForQuantity(const QString &quantity)
 {
     return unitMap().value(quantity, {""});
+}
+
+QString ChannelCatalog::quantityOfUnit(const QString &unit)
+{
+    if (!unit.isEmpty())
+        for (auto it = unitMap().constBegin(); it != unitMap().constEnd(); ++it)
+            if (it.value().contains(unit))
+                return it.key();
+    return QStringLiteral("Unitless");
 }
 
 QString ChannelCatalog::defaultUnitForQuantity(const QString &quantity)

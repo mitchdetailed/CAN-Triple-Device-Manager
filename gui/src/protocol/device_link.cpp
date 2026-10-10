@@ -59,6 +59,8 @@ bool DeviceLink::isReadResponse(quint8 cmd)
     // warning nobody heeds: a new READ command is not done until it is in
     // BOTH lists in this file and both lists in the classification test.
     case CMD_READ_CRC8_CFG:
+    case CMD_READ_UDS_CFG:         // the 2.0's UDS requests (store v23), listed
+                                   // in the edit that added the command
     // v2 bootloader. Added in the same edit as the command itself rather than
     // after the symptom appeared — the four entries above learned it the other
     // way round, and each cost a debugging session in which a device answering
@@ -103,6 +105,16 @@ bool DeviceLink::isReadResponse(quint8 cmd)
     // The CAN Triple 2.0's own settings: a fixed-shape reply, no echo. Listed
     // with the command, here and in test_roundtrip's lists.
     case CMD_READ_DEVICE_SETTINGS:
+    // The CAN Triple 2.0's stored project: a range read whose reply echoes
+    // offset and count, so it is in echoesRequestRange too. Listed with the
+    // command, in both lists here and both in the tests.
+    case CMD_READ_PROJECT:
+    // The CAN Triple 2.0's usage report (phase 4): what the running
+    // configuration holds. Fixed shape, no echo — listed with the command, here
+    // and in test_roundtrip's fixed-shape list. CMD_STAGE_PLAN is NOT here: a
+    // Send's declaration is answered with an ACK, and the Manager never sends
+    // the ask, whose reply is data.
+    case CMD_GET_USAGE:
         return true;
     default:
         return false;
@@ -143,11 +155,15 @@ bool DeviceLink::echoesRequestRange(quint8 cmd)
     case CMD_READ_TABLE8X8_ROW:
     case CMD_READ_INTEG_CFG:
     case CMD_READ_SCRIPT:   // bytecode chunks, a range read like any other table
+    case CMD_READ_UDS_CFG:  // the 2.0's UDS requests, a range read like the CRC8 rules
     case CMD_READ_CRC8_CFG: // a range read like any other table — see the
                             // sixth-time note in isReadResponse above
     // Echoes u8 kind, u16 start, u16 count: the four bytes compared are kind,
     // start and count's low byte, which tell one label read from another.
     case CMD_READ_LABELS:
+    // Echoes u32 offset, u16 count: the four bytes compared are the offset,
+    // which tells one read of the stored project from another.
+    case CMD_READ_PROJECT:
         return true;
     default:
         return false;
@@ -551,6 +567,11 @@ QString DeviceLink::errorCodeText(quint8 code)
     case ERR_BUS_BUSY: return QStringLiteral("bus busy (0x06)");
     case ERR_LOCKED:
         return QStringLiteral("the device configuration is password protected (0x07)");
+    // A CAN Triple 2.0 that takes a plan (phase 4): its plan, or at its SAVE
+    // the references beside it, need more than the unit has. Its running
+    // configuration is untouched.
+    case ERR_NO_ROOM:
+        return QStringLiteral("the configuration does not fit the device (0x09)");
     default: return QStringLiteral("unknown error (0x%1)").arg(code, 2, 16, QLatin1Char('0'));
     }
 }

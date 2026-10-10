@@ -90,6 +90,17 @@ exact: <code>hPa</code> imports as <b>mbar</b> (identical), but <code>atm</code>
 arrives as <b>bar</b> and <code>kV</code> as <b>V</b>, and those are relabels
 rather than conversions.</p>
 
+<h3>Value names</h3>
+
+<p>A signal's value descriptions (its <code>VAL_</code> line: 0 "Park" 1
+"Reverse" …) become its channel's value names (see
+<a href="channels.html">Edit Custom Channel</a>), each at the value the
+channel reads for that raw value. With a factor and an offset that is the
+scaled value: raw 2 at (0.5,0) is 1. A description whose raw value does not
+scale to a whole number is left out. <code>VAL_TABLE_</code> lines name no
+signal and are ignored, and a <code>VAL_</code> line for a signal the file does
+not have is listed in the import notes.</p>
+
 <h3>Channel names</h3>
 
 <p><b>Underscores become spaces.</b> A DBC signal name has to be a C identifier,

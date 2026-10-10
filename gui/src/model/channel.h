@@ -27,16 +27,14 @@ struct Channel {
     // named field and a new special case. Never serialised — device channels do
     // not live in the .ct3, and a document only ever stores the NAME.
     int deviceChannelId = -1;
-    // Display labels for an ENUMERATED channel's values — "Power On" for 1 on
-    // Device Last Reset Reason. Empty for every other channel. Read-only
-    // display metadata: the places that show a live value render
-    // "label (value)" when the value has a label, the bare number when it does
-    // not, and nothing edits the map. Deliberately NOT in toJson/fromJson: the
-    // only channels that carry labels are device channels, which never pass
-    // through serialisation (they are compiled in, not stored in the .ct3), so
-    // serialising this today would be dead code whose format became a
-    // compatibility promise anyway. Revisit if a USER channel ever grows an
-    // enumeration.
+    // VALUE NAMES: display labels for an enumerated channel's values — "Power
+    // On" for 1 on Device Last Reset Reason, "Park" for 0 on a gear selector.
+    // The places that show a live value render "label (value)" when the value
+    // has a label, the bare number when it does not. A device channel's are
+    // compiled in; a USER channel's (phase 4, step 3b) are edited in Edit
+    // Custom Channel, imported from a DBC's VAL_ lines, saved in the .ct3 as
+    // "valueNames" (only when there are any) and kept on a CAN Triple 2.0 that
+    // keeps value names (LABEL_KIND_VALUE_NAME), so a Get brings them back.
     QMap<int, QString> enumLabels;
 
     bool isValid() const { return !name.isEmpty(); }

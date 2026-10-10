@@ -23,12 +23,16 @@ into the frames it sends — a <a href="relays.html">message relay</a>, or Off.<
 use that table — they have their own table of 32 rules — and an Off section uses
 nothing at all. A Transmit CRC8 message sits in the message table like any
 transmit message and additionally takes one rule from the device's table of
-<b>20 CRC8 rules</b> (<b>100</b> on a CAN Triple 2.0), shared across all three
-buses.
+<b>20 CRC8 rules</b>, shared across all three buses.
 The "<i>N of M device messages used</i>" label under the sections
 list counts every section on every bus, so it reads high when a bus carries
 relays or Off entries. Signals (channel rows) share a separate budget of 1000
 across the whole configuration.</p>
+
+<p>A CAN Triple 2.0 sizes these tables to the configuration instead: up to
+4,094 messages, 65,534 channels and 254 CRC8 rules, as far as its memory goes
+(see <a href="can-triple-2.html#room">How much it holds</a>). The label then
+counts up to 4,094.</p>
 
 <h2>Bus options</h2>
 
@@ -516,7 +520,9 @@ it: up to 17 bytes on a CAN Triple, 32 on a
 <a href="can-triple-2.html#names">CAN Triple 2.0</a>.</td></tr>
 <tr><td><b>Message Type :</b></td><td><b>Off</b>, <b>Receive Message</b>,
 <b>Transmit Message</b>, <b>Transmit CRC8</b> (a transmit message that stamps a
-checksum into its frames — see <a href="#crc8">below</a>) or
+checksum into its frames — see <a href="#crc8">below</a>), <b>UDS Request</b>
+(a diagnostic request the unit makes and the response it decodes, on a CAN
+Triple 2.0 — see <a href="#uds">UDS requests</a>) or
 <b>Message Relay</b>. The type decides which of the remaining controls
 apply. <b>Off</b> keeps the message and everything defined in it but sends and
 decodes nothing, so its channels tab is grayed — the rows are still there and
@@ -550,6 +556,13 @@ fresh frame resets the window. A timeout of 0 disables the feature.</td></tr>
 and 64 bytes. Enabled only when the bus has an FD Data rate set — or when the
 section is already FD, so it can still be opened and, if you choose, converted
 back to classic.</td></tr>
+<tr><td><b>BRS</b></td><td>Transmit Message and Transmit CRC8 only, beside
+<b>CAN FD frame</b> and live while it is ticked: the Bit Rate Switch. Ticked (the
+default), the frame's data goes at the bus's FD Data rate; unticked, the whole
+frame goes at the base rate, for a node that cannot take the faster rate. A CAN
+Triple 2.0 with firmware 2.0.3 or later honours it. Other firmware switches the
+bit rate on every CAN FD frame, so for them the box stays ticked and greyed, and
+Check Channels refuses a message with it off.</td></tr>
 <tr><td><b>Base Address :</b></td><td>The CAN ID, in hex (e.g. 0x640). The label
 beside it shows the decimal value and flags an ID that exceeds the 11-bit or
 29-bit range.</td></tr>
@@ -842,9 +855,11 @@ element, a hex byte. Defaults to 0x00.</td></tr>
 bit-reverses each input byte before it enters the register, Ref Out reflects
 the register before the Final XOR.</td></tr>
 <tr><td><b>Element Count :</b></td><td>0–15, typed directly: how many element
-rows feed the checksum. On a CAN Triple 2.0 one row can feed many bytes (see
-<b>ID (Whole)</b> and <b>Data Run</b> below), so two rows can cover a whole
-64-byte frame. The tab shows exactly that many rows; rows removed by
+rows feed the checksum; up to 70 on a CAN Triple 2.0 with firmware 2.0.3 or
+later, enough to feed a 64-byte CAN FD frame a byte at a time in any order,
+with its identifier and a few literals. On a CAN Triple 2.0 one row can also
+feed many bytes (see <b>ID (Whole)</b> and <b>Data Run</b> below), so two rows
+can cover a whole 64-byte frame. The tab shows exactly that many rows; rows removed by
 lowering the count keep their settings, so raising it again hands your
 elements back. A count of 0 is legal — nothing feeds the register, so the
 stamp is the constant Init Value/Final XOR transform — but the validator
@@ -949,6 +964,76 @@ nothing). Warnings rather than errors because some protocols genuinely do these
 channel counts as a writer in the two-writers check: pointing a calculation's
 output at the same channel earns the shared-slot warning, and the calculation's
 value would never be seen — the composer re-stamps on every transmit.</p>
+
+<h2 id="uds">UDS requests</h2>
+
+<p>A <b>UDS Request</b> section makes the unit a diagnostic tester: it sends one
+UDS request (ISO 14229 over ISO 15765-2) to an ECU, cyclically or when a User
+Condition holds, and decodes the response into channels. It needs a
+<a href="can-triple-2.html#uds">CAN Triple 2.0 with firmware 2.0.4</a> or
+later as the document's target; Check Channels says so otherwise.</p>
+
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><b>Request ID :</b></td><td>The identifier the request is sent on (the
+Base Address field, relabelled): 0x7E0 for the engine ECU on most cars, or an
+extended 0x18DA10F1. <b>Address Format</b>, <b>CAN FD frame</b> and <b>BRS</b>
+apply to the request's frames.</td></tr>
+<tr><td><b>Response ID :</b></td><td>The identifier the ECU answers on (0x7E8 for
+a request on 0x7E0; 0x18DAF110 for 0x18DA10F1). Its frames are reassembled into
+the response. Untick <b>Await a response</b> for a request that is not answered,
+such as Tester Present with its positive response suppressed (3E 80). Requests
+to one ECU share its response ID (every request on 0x7E0 is answered on
+0x7E8): that is expected, and each request's channels decode its own
+response.</td></tr>
+<tr><td><b>Request :</b></td><td>The request's bytes in hex, the service first:
+<code>22 F1 90</code> reads data identifier F190 (the VIN), <code>2E F1 90 …</code>
+writes it, <code>19 02 FF</code> reads DTCs, <code>10 03</code> opens the
+extended session, <code>3E 00</code> is Tester Present. Up to 64 bytes; a
+request of more than 7 bytes goes as a multi-frame request under the ECU's flow
+control.</td></tr>
+<tr><td><b>Transmit Rate / Cyclic / Triggered</b></td><td>When the request is
+made, exactly as for a transmit message. One request at a time on a bus: a
+request due while another is still waiting for its response loses that period
+and goes first next time.</td></tr>
+<tr><td><b>Response Timeout :</b></td><td>How long the unit waits for the
+response (P2; 1,000 ms by default). <b>After Response Pending :</b> how long it
+waits after the ECU answers <i>response pending</i> (7F xx 78; 5,000 ms by
+default).</td></tr>
+<tr><td><b>Padding :</b></td><td>Every frame the unit sends is padded to 8 bytes
+with this byte, as most ECUs expect; <b>None</b> sends them as long as their
+data.</td></tr>
+<tr><td><b>Flow Control :</b></td><td>For a response of more than 7 bytes, what
+the unit tells the ECU: how many consecutive frames it may send before the
+unit's next flow control (<b>block size</b>; 0 = all of them) and the gap to
+keep between them (<b>STmin</b>). The request's own multi-frame frames obey the
+ECU's flow control.</td></tr>
+<tr><td><b>Response Length :</b></td><td>The Message Length field, relabelled:
+the bytes of the response kept for the channels, 1 to 4,095. A longer response
+is received whole and its first bytes kept.</td></tr>
+<tr><td><b>Receive Timeout / Default value on timeout</b></td><td>The response's,
+as for a receive message: with no response for this long the channels go back
+to their default values.</td></tr>
+<tr><td><b>Result Channel :</b></td><td>Optional. A channel told how each request
+ended: <b>0</b> a positive response, <b>1 to 255</b> the code of a negative
+response (0x31 request out of range, 0x33 security access denied, 0x7F service
+not supported in the active session…), <b>256</b> no response in time,
+<b>257</b> a transport fault (frames out of sequence, the ECU's flow control
+overdue).</td></tr>
+</table>
+
+<p>The <b>Received Channels</b> tab lays channels out over the response by
+byte, exactly as for a receive message, with <b>byte 0 the response's service
+byte</b>: a Read Data By Identifier response is 62 F1 90 and then the data, so
+its first data byte is byte 3. The frame map shows the response as long as
+Response Length says. A negative response decodes nothing and leaves the
+channels as they were; a positive one sets the section's <i>Message Received</i>
+event for User Conditions and counters, as a received frame does.</p>
+
+<p>Each request is sent on its own identifier, so several ECUs on a bus are
+several sections; the unit serves them one at a time. The three buses run
+independently. A section's name stands for its response in a User Condition's
+message terms.</p>
 
 <h2>Scaling</h2>
 

@@ -28,10 +28,12 @@ constexpr int kUsbUnitRole = Qt::UserRole + 1;
 
 } // namespace
 
-ConnectionSettingsDialog::ConnectionSettingsDialog(DeviceLink *link, QWidget *parent)
+ConnectionSettingsDialog::ConnectionSettingsDialog(DeviceLink *link, QWidget *parent,
+                                                   bool closeOnConnect)
     : QDialog(parent),
       m_link(link)
 {
+    m_closeOnConnect = closeOnConnect;
     setWindowTitle(tr("Connection Settings"));
 
     m_portCombo = new QComboBox(this);
@@ -212,6 +214,10 @@ void ConnectionSettingsDialog::onConnectClicked()
                              tr("Failed to open %1:\n%2").arg(port, err));
     }
     updateUi();
+    // Opened to get a link, and there is one: done. The status bar says what
+    // answered, which is where the eye goes next.
+    if (opened && m_closeOnConnect)
+        accept();
 }
 
 void ConnectionSettingsDialog::onTestClicked()

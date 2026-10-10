@@ -16,6 +16,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSet>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
@@ -587,24 +588,41 @@ CountersDialog::CountersDialog(Configuration *config, QWidget *parent)
 void CountersDialog::updatePreserveBudget()
 {
     // The limit is the target's, and it is shared with the integrators, so
-    // theirs count too: they are the ones a unit drops past it.
-    int used = 0;
+    // theirs count too: they are the ones a unit drops past it. On a target
+    // that keeps channels (a CAN Triple 2.0 from phase 4) the channels kept in
+    // the Channel Editor share it as well, and a counter whose output is one of
+    // them is that one value, as the unit counts it.
+    const bool channels = m_config->capacity().retainsChannels();
+    QSet<QString> listed;
+    if (channels)
+        for (const QString &name : m_config->retainedChannels)
+            listed.insert(name.trimmed().toLower());
+    int used = int(listed.size());
     for (const CounterRow &row : m_rows)
-        if (row.active && row.preserveValue)
+        if (row.active && row.preserveValue
+            && !listed.contains(row.outputChannel.trimmed().toLower()))
             ++used;
     for (const IntegratorRow &row : m_config->integratorRows)
-        if (row.active && row.preserveValue)
+        if (row.active && row.preserveValue
+            && !listed.contains(row.outputChannel.trimmed().toLower()))
             ++used;
     const int limit = m_config->capacity().retainedLimit();
     if (used == 0) {
-        m_preserveLabel->setText(tr("Nothing is preserved across power cycles (up to %1 "
-                                    "counters and integrators can be).")
-                                     .arg(limit));
+        m_preserveLabel->setText(channels
+                                     ? tr("Nothing is preserved across power cycles (up to %1 "
+                                          "values can be: channels, counters and integrators).")
+                                           .arg(limit)
+                                     : tr("Nothing is preserved across power cycles (up to %1 "
+                                          "counters and integrators can be).")
+                                           .arg(limit));
         m_preserveLabel->setStyleSheet(QString());
         return;
     }
     m_preserveLabel->setText(
-        tr("Preserved across power cycles: %1 of %2, counters and integrators together.%3")
+        (channels ? tr("Preserved across power cycles: %1 of %2, channels kept, counters and "
+                       "integrators together.%3")
+                  : tr("Preserved across power cycles: %1 of %2, counters and integrators "
+                       "together.%3"))
             .arg(used)
             .arg(limit)
             .arg(used > limit ? tr("  ⚠ Over the limit — the device keeps only %1, "
@@ -639,7 +657,7 @@ void CountersDialog::rebuild()
 
 void CountersDialog::onAdd()
 {
-    const int limit = m_config->capacity().capacityOf(DeviceTable::Counters);
+    const int limit = m_config->capacity().limitOf(DeviceTable::Counters);
     if (m_rows.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
                              tr("The device supports at most %1 counters.").arg(limit));

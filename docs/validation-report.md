@@ -29,7 +29,7 @@ behaviour is surprising.</td><td>No</td></tr>
 - A duplicate receive CAN ID on one bus — only the first message would match.
 - A signal that does not fit its frame, or a row with no channel selected.
 - A message relay that forwards to no bus.
-- A Transmit CRC8 message with no CRC channel selected, or a CRC byte location outside the message; more Transmit CRC8 messages across the buses than the device runs — 20 CRC8 rules on a CAN Triple, 100 on a CAN Triple 2.0; a CRC8 recipe using what only a CAN Triple 2.0 has (a byte past Byte 7, an ID (Whole) element or a Data Run) when the target is not one.
+- A Transmit CRC8 message with no CRC channel selected, or a CRC byte location outside the message; more Transmit CRC8 messages across the buses than the device runs — 20 CRC8 rules on a CAN Triple, and on a CAN Triple 2.0 more CRC8 records than it holds (a record for each 8 elements of a recipe); a CRC8 recipe using what only a CAN Triple 2.0 has (a byte past Byte 7, an ID (Whole) element, a Data Run, or more than 15 elements) when the target is not one, or more than 70 elements on any.
 - A bus with a CAN FD data rate above 2 Mbit/s (4M, 5M or 8M) when the target is not a CAN Triple 2.0.
 - A calculation with no output channel, or an input set to "channel" with no channel chosen.
 - A transmit rate outside 1–200 Hz; an integrator rate beyond what the engine evaluates.
@@ -44,7 +44,7 @@ Other warnings include: messages on a bus whose Mode is Off; routing or relaying
 
 ### Info — examples
 
-Referencing a channel — transmitting it, feeding it to a calculation, driving a table axis — *reads* the value and never alters it, so it is never an Error or a Warning no matter how many sites do it. The one thing worth saying is that a channel nothing writes *yet* reads its default value until a receive row or a calculation writes it — an Info, because building a configuration out of order is normal. Other Info entries: unused catalogue channels (removable via Remove Unused Channels…), the flash-wear note for preserved integrators (see [Integrators](integrators.md)), and the "Device usage" capacity line, which reports how much of each device table the configuration occupies.
+Referencing a channel — transmitting it, feeding it to a calculation, driving a table axis — *reads* the value and never alters it, so it is never an Error or a Warning no matter how many sites do it. The one thing worth saying is that a channel nothing writes *yet* reads its default value until a receive row or a calculation writes it — an Info, because building a configuration out of order is normal. Other Info entries: unused catalogue channels (removable via Remove Unused Channels…), the flash-wear note for preserved integrators (see [Integrators](integrators.md)), and the "Device usage" capacity line, which reports how much of each device table the configuration occupies. For a CAN Triple 2.0 a "Device budget" line follows it: what the configuration takes of the unit's configuration storage, working memory and room for names (see [How much it holds](can-triple-2.md#room)), with an Error for each one it overruns.
 
 ## Marked messages in the report
 

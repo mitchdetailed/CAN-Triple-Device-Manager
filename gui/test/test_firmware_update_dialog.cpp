@@ -21,6 +21,7 @@
 #include <QDir>
 #include <QFile>
 #include <QLabel>
+#include <QPushButton>
 #include <QTemporaryDir>
 
 #include <cstdio>
@@ -135,21 +136,76 @@ QByteArray hardwarePayload(quint8 family, quint8 format = ct::HARDWARE_REPORT_FO
     return QByteArray(reinterpret_cast<const char *>(&r), int(sizeof(r)));
 }
 
-// A unit that answers the hardware report and the status read, and nothing
-// else, with no password in the way.
+// The OTP manufacturing record as the burn tool lays it out (wire_structs.h
+// OTP_INFO_*): the given product, a manufacturer, a hardware version, serial 1
+// (big-endian) and a date; a blank record is 88 bytes of 0xFF, as a virgin OTP
+// reads.
+QByteArray otpPayload(const QString &product, const QString &hardwareVersion = QStringLiteral("2.00"))
+{
+    QByteArray r(ct::OTP_INFO_LEN, char(0));
+    const auto put = [&r](int at, int len, const QByteArray &text) {
+        r.replace(at, len, text.left(len).leftJustified(len, '\0'));
+    };
+    put(ct::OTP_INFO_MANUFACTURER_AT, ct::OTP_INFO_MANUFACTURER_LEN, "Minton Performance");
+    put(ct::OTP_INFO_PRODUCT_AT, ct::OTP_INFO_PRODUCT_LEN, product.toLatin1());
+    put(ct::OTP_INFO_HW_VERSION_AT, ct::OTP_INFO_HW_VERSION_LEN, hardwareVersion.toLatin1());
+    r[ct::OTP_INFO_SERIAL_AT + ct::OTP_INFO_SERIAL_LEN - 1] = 1;
+    put(ct::OTP_INFO_DATE_AT, ct::OTP_INFO_DATE_LEN, "27092026");
+    return r;
+}
+
+QByteArray blankOtp()
+{
+    return QByteArray(ct::OTP_INFO_LEN, char(0xFF));
+}
+
+// A unit that answers the hardware report, the product record and the status
+// read, and nothing else, with no password in the way; and its
+// readout-protection level when one is given (firmware without the command
+// answers ERR_INVALID_CMD). The record: `info` when given; otherwise a CAN
+// Triple 2.0 shows "CAN Triple V2", as every one does, and a CAN Triple is on
+// firmware without the command. `infoFails` makes the read fail outright.
 struct ReportingUnit {
     QByteArray hardware;
     QByteArray status = statusPayload();
+    int readout = -1;
+    QByteArray info;
+    bool infoFails = false;       // the read fails outright
+    bool infoUnsupported = false; // firmware without the command
 
     ct::FakeDeviceLink::Reply answer(quint8 cmd, const QByteArray &)
     {
         if (cmd == ct::CMD_GET_HARDWARE)
             return ct::FakeDeviceLink::Reply::ack(hardware);
+        if (cmd == ct::CMD_GET_DEVICE_INFO) {
+            if (infoFails)
+                return ct::FakeDeviceLink::Reply::nack(ct::ERR_FLASH_WRITE);
+            if (infoUnsupported)
+                return ct::FakeDeviceLink::Reply::nack(ct::ERR_INVALID_CMD);
+            if (!info.isEmpty())
+                return ct::FakeDeviceLink::Reply::ack(info);
+            if (hardware.size() >= int(sizeof(ct::HardwareReport))
+                && reinterpret_cast<const ct::HardwareReport *>(hardware.constData())->family
+                       == ct::HW_FAMILY_CAN_TRIPLE_2)
+                return ct::FakeDeviceLink::Reply::ack(otpPayload(QStringLiteral("CAN Triple V2")));
+            return ct::FakeDeviceLink::Reply::nack(ct::ERR_INVALID_CMD);
+        }
         if (cmd == ct::CMD_FW_UPDATE_STATUS)
             return ct::FakeDeviceLink::Reply::ack(status);
+        if (cmd == ct::CMD_GET_PROTECTION && readout >= 0)
+            return ct::FakeDeviceLink::Reply::ack(QByteArray(1, char(readout)));
         return ct::FakeDeviceLink::Reply::nack(ct::ERR_INVALID_CMD);
     }
 };
+
+// Whether the Update button is live: the one thing every refusal takes away.
+bool updateEnabled(const QWidget &w)
+{
+    for (const QPushButton *b : w.findChildren<QPushButton *>())
+        if (b->text().contains(QStringLiteral("Update Firmware")))
+            return b->isEnabled();
+    return false;
+}
 
 bool windowSays(const QWidget &w, const QString &text)
 {
@@ -165,11 +221,36 @@ bool windowSays(const QWidget &w, const QString &text)
 // line stamps (a 2.0 file from before the 2.0 line asked for less, and is
 // refused) unless `minBootloader` says otherwise.
 QString writeImage(const QTemporaryDir &dir, const QString &name, quint16 product,
-                   quint16 minBootloader = 0)
+                   quint16 minBootloader = 0, int buildFlags = -1)
 {
     QByteArray img(8192, char(0));
     for (int i = 0; i < img.size(); ++i)
         img[i] = char((i * 7 + 11) & 0xFF);
+    // A capacity block when `buildFlags` is given: the built-in tables and a
+    // whole 2.0 extension stating those flags, where a 2.0 image carries it.
+    if (buildFlags >= 0) {
+        const ct::DeviceCapacity cap = ct::DeviceCapacity::builtIn();
+        QByteArray block;
+        const auto u16 = [&block](quint16 v) {
+            block.append(char(v & 0xFF));
+            block.append(char(v >> 8));
+        };
+        const quint32 magic = FW_CAPS_MAGIC;
+        block.append(reinterpret_cast<const char *>(&magic), 4);
+        block.append(char(ct::CAPACITY_REPORT_FORMAT_EXT));
+        block.append(char(cap.tables.size()));
+        u16(quint16(cap.storeVersion));
+        for (const ct::TableCapacity &t : cap.tables) {
+            u16(quint16(t.capacity));
+            u16(quint16(t.itemSize));
+        }
+        ct::CapacityExtension ext{};
+        ext.size = quint16(sizeof(ext));
+        ext.build_flags = quint16(buildFlags);
+        ext.project_bytes = quint32(ct::PROJECT_BYTES);
+        block.append(reinterpret_cast<const char *>(&ext), int(sizeof(ext)));
+        img.replace(int(FW_CAPS_OFFSET), int(block.size()), block);
+    }
     FwImageHeader hdr{};
     hdr.magic = FW_IMAGE_MAGIC;
     hdr.header_version = FW_IMAGE_HDR_VERSION;
@@ -312,6 +393,54 @@ int main(int argc, char **argv)
               "and nothing stands between that file and this unit");
         CHECK(!windowSays(window, QStringLiteral("needs bootloader version")),
               "not even its bootloader");
+        window.close();
+    }
+
+    std::printf("a production build says it will lock an open unit, and only an open one\n");
+    {
+        QTemporaryDir dir;
+        const QString production = writeImage(dir, QStringLiteral("prod.ctf"),
+                                              FW_PRODUCT_CAN_TRIPLE_2, 0,
+                                              ct::CAPACITY_BUILD_PRODUCTION);
+        const QString development = writeImage(dir, QStringLiteral("dev.ctf"),
+                                               FW_PRODUCT_CAN_TRIPLE_2, 0, 0);
+        const QString warning = QStringLiteral("This is a production build.");
+        for (const int level : {0, 1}) {
+            ReportingUnit unit{hardwarePayload(ct::HW_FAMILY_CAN_TRIPLE_2),
+                               v2StatusPayload(ct::FW_STATE_IDLE, ct::FW_RESULT_OK, keptCopies()),
+                               level};
+            ct::FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) {
+                return unit.answer(cmd, p);
+            });
+            ct::FirmwareUpdateDialog window(&link);
+            window.show();
+            QCoreApplication::processEvents();
+            CHECK(windowSays(window, level == 0 ? QStringLiteral("Readout protection: off")
+                                                : QStringLiteral("Readout protection: on")),
+                  level == 0 ? "an open unit says its readout protection is off"
+                             : "a protected unit says it is on");
+            QString err;
+            CHECK(window.selectImage(production, &err), "a production image loads");
+            CHECK(windowSays(window, warning) == (level == 0),
+                  level == 0 ? "and on the open unit it says it will turn protection on"
+                             : "and on the protected one it says nothing about it");
+            CHECK(window.selectImage(development, &err) && !windowSays(window, warning),
+                  "a development image says nothing about protection");
+            window.close();
+        }
+        // A unit that cannot say: nothing is claimed either way.
+        ReportingUnit unit{hardwarePayload(ct::HW_FAMILY_CAN_TRIPLE_2),
+                           v2StatusPayload(ct::FW_STATE_IDLE, ct::FW_RESULT_OK, keptCopies())};
+        ct::FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) {
+            return unit.answer(cmd, p);
+        });
+        ct::FirmwareUpdateDialog window(&link);
+        window.show();
+        QCoreApplication::processEvents();
+        QString err;
+        CHECK(window.selectImage(production, &err) && !windowSays(window, warning)
+                  && !windowSays(window, QStringLiteral("Readout protection:")),
+              "firmware that cannot report its protection: no line, no warning");
         window.close();
     }
 
@@ -462,6 +591,156 @@ int main(int argc, char **argv)
               "the refusal names the board by its number");
         CHECK(windowSays(window, QStringLiteral("update the Device Manager")),
               "and says what to do about it");
+        window.close();
+    }
+
+    std::printf("the product record decides: blank or \"CAN Triple\" takes 1.x firmware only\n");
+    for (const QByteArray &record : {blankOtp(), otpPayload(QStringLiteral("CAN Triple"),
+                                                            QStringLiteral("1.05"))}) {
+        ReportingUnit unit{hardwarePayload(ct::HW_FAMILY_CAN_TRIPLE)};
+        unit.info = record;
+        ct::FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) {
+            return unit.answer(cmd, p);
+        });
+        ct::FirmwareUpdateDialog window(&link);
+        window.show();
+        QCoreApplication::processEvents();
+        CHECK(link.countOf(ct::CMD_GET_DEVICE_INFO) == 1, "the record was asked for once");
+        CHECK(windowSays(window, record == blankOtp() ? QStringLiteral("Product record: <b>blank")
+                                                       : QStringLiteral("Product record: <b>CAN Triple<")),
+              "the window shows the record");
+        QTemporaryDir dir;
+        QString err;
+        CHECK(window.selectImage(writeImage(dir, QStringLiteral("one.ctf"), FW_PRODUCT_CAN_TRIPLE),
+                                 &err),
+              "a CAN Triple (1.x) file loads");
+        CHECK(updateEnabled(window) && !windowSays(window, QStringLiteral("product record says")),
+              "and the record lets it through");
+        CHECK(window.selectImage(writeImage(dir, QStringLiteral("two.ctf"), FW_PRODUCT_CAN_TRIPLE_2),
+                                 &err),
+              "a CAN Triple 2.0 file loads");
+        CHECK(!updateEnabled(window)
+                  && windowSays(window, QStringLiteral("This image is firmware for the CAN Triple "
+                                                       "2.0, but this unit's product record says "
+                                                       "it is a CAN Triple")),
+              "and is refused on the record");
+        window.close();
+    }
+
+    std::printf("\"CAN Triple V2\" takes 2.0 firmware only\n");
+    {
+        ReportingUnit unit{hardwarePayload(ct::HW_FAMILY_CAN_TRIPLE_2),
+                           v2StatusPayload(ct::FW_STATE_IDLE, ct::FW_RESULT_OK, keptCopies())};
+        ct::FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) {
+            return unit.answer(cmd, p);
+        });
+        ct::FirmwareUpdateDialog window(&link);
+        window.show();
+        QCoreApplication::processEvents();
+        CHECK(windowSays(window, QStringLiteral("Product record: <b>CAN Triple V2</b>")),
+              "the window shows the record");
+        QTemporaryDir dir;
+        QString err;
+        CHECK(window.selectImage(writeImage(dir, QStringLiteral("one.ctf"), FW_PRODUCT_CAN_TRIPLE),
+                                 &err),
+              "a CAN Triple (1.x) file loads");
+        CHECK(!updateEnabled(window)
+                  && windowSays(window, QStringLiteral("This image is firmware for the CAN Triple, "
+                                                       "but this unit's product record says it is "
+                                                       "a CAN Triple 2.0 (\"CAN Triple V2\")")),
+              "and is refused on the record, which is quoted");
+        CHECK(window.selectImage(writeImage(dir, QStringLiteral("two.ctf"), FW_PRODUCT_CAN_TRIPLE_2),
+                                 &err),
+              "a CAN Triple 2.0 file loads");
+        CHECK(updateEnabled(window) && !windowSays(window, QStringLiteral("product record says")),
+              "and the record lets it through");
+        window.close();
+    }
+
+    std::printf("a record and a board report that disagree stop the update\n");
+    {
+        ReportingUnit unit{hardwarePayload(ct::HW_FAMILY_CAN_TRIPLE_2),
+                           v2StatusPayload(ct::FW_STATE_IDLE, ct::FW_RESULT_OK, keptCopies())};
+        unit.info = otpPayload(QStringLiteral("CAN Triple"), QStringLiteral("1.05"));
+        ct::FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) {
+            return unit.answer(cmd, p);
+        });
+        ct::FirmwareUpdateDialog window(&link);
+        window.show();
+        QCoreApplication::processEvents();
+        CHECK(windowSays(window, QStringLiteral("This unit reports itself as a CAN Triple 2.0, "
+                                                "but its product record says it is a CAN Triple")),
+              "the disagreement is named");
+        QTemporaryDir dir;
+        QString err;
+        CHECK(window.selectImage(writeImage(dir, QStringLiteral("two.ctf"), FW_PRODUCT_CAN_TRIPLE_2),
+                                 &err),
+              "a CAN Triple 2.0 file loads");
+        CHECK(!updateEnabled(window), "and nothing is sent until the two agree");
+        window.close();
+    }
+
+    std::printf("a product this Manager does not know is refused by name\n");
+    {
+        ReportingUnit unit{hardwarePayload(ct::HW_FAMILY_CAN_TRIPLE_2),
+                           v2StatusPayload(ct::FW_STATE_IDLE, ct::FW_RESULT_OK, keptCopies())};
+        unit.info = otpPayload(QStringLiteral("CAN Quad"));
+        ct::FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) {
+            return unit.answer(cmd, p);
+        });
+        ct::FirmwareUpdateDialog window(&link);
+        window.show();
+        QCoreApplication::processEvents();
+        CHECK(windowSays(window, QStringLiteral("product record says \"CAN Quad\", which this "
+                                                "version of the Device Manager does not know")),
+              "the refusal quotes the product");
+        CHECK(windowSays(window, QStringLiteral("Update the Device Manager")),
+              "and says what to do about it");
+        window.close();
+    }
+
+    std::printf("a CAN Triple 2.0 whose record cannot be read is not updated\n");
+    {
+        ReportingUnit unit{hardwarePayload(ct::HW_FAMILY_CAN_TRIPLE_2),
+                           v2StatusPayload(ct::FW_STATE_IDLE, ct::FW_RESULT_OK, keptCopies())};
+        unit.infoFails = true;
+        ct::FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) {
+            return unit.answer(cmd, p);
+        });
+        ct::FirmwareUpdateDialog window(&link);
+        window.show();
+        QCoreApplication::processEvents();
+        CHECK(windowSays(window, QStringLiteral("product record could not be read")),
+              "the failed read is named");
+        QTemporaryDir dir;
+        QString err;
+        CHECK(window.selectImage(writeImage(dir, QStringLiteral("two.ctf"), FW_PRODUCT_CAN_TRIPLE_2),
+                                 &err),
+              "a CAN Triple 2.0 file loads");
+        CHECK(!updateEnabled(window), "and is not sent");
+        window.close();
+    }
+
+    std::printf("a CAN Triple 2.0 on firmware without the command is not updated\n");
+    {
+        ReportingUnit unit{hardwarePayload(ct::HW_FAMILY_CAN_TRIPLE_2),
+                           v2StatusPayload(ct::FW_STATE_IDLE, ct::FW_RESULT_OK, keptCopies())};
+        unit.infoUnsupported = true;
+        ct::FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) {
+            return unit.answer(cmd, p);
+        });
+        ct::FirmwareUpdateDialog window(&link);
+        window.show();
+        QCoreApplication::processEvents();
+        CHECK(windowSays(window, QStringLiteral("reports itself as a CAN Triple 2.0 but cannot "
+                                                "show its product record")),
+              "the missing record is named");
+        QTemporaryDir dir;
+        QString err;
+        CHECK(window.selectImage(writeImage(dir, QStringLiteral("two.ctf"), FW_PRODUCT_CAN_TRIPLE_2),
+                                 &err),
+              "a CAN Triple 2.0 file loads");
+        CHECK(!updateEnabled(window), "and is not sent");
         window.close();
     }
 

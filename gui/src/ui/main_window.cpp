@@ -6,6 +6,8 @@
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QCommandLinkButton>
+#include <QDateTime>
+#include <QDialog>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QDir>
@@ -16,6 +18,7 @@
 #include <QFormLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -26,13 +29,16 @@
 #include <QSettings>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <cstring>
 #include <utility>
 
 #include "../model/access_keys.h"
+#include "../model/config_file.h"
 #include "../model/device_mapper.h"
+#include "../model/plan_budget.h"
 #include "../model/secure_file.h"
 #include "../model/package_builder.h"
 #include "../model/sealed_stream.h"
@@ -42,6 +48,7 @@
 #include "../model/validation.h"
 #include "../protocol/config_transfer.h"
 #include "../protocol/device_session.h"
+#include "../protocol/stored_project.h"
 #include "../protocol/usb_port.h"
 #include "../protocol/firmware_update.h" // FwUpdateStatus — the running store version
 #include "access_passwords_dialog.h"
@@ -62,6 +69,7 @@
 #include "firmware_license_dialog.h"
 #include "led_brightness_dialog.h"
 #include "theme.h"
+#include "options_dialog.h"
 #include "secure_builder_dialog.h"
 #include "help_window.h"
 #include "lua_console_dialog.h"
@@ -124,6 +132,47 @@ QString startIn(const QString &currentFile)
     return dir;
 }
 
+// WHICH DOCUMENTS ARE SENT WITHOUT THEIR PROJECT. The Send confirmation's
+// "Store this project on the unit" is ticked unless the user untick it for
+// that document, and the choice is remembered per file: storing is the
+// default, so only the exceptions are kept (the most recent 200, by path,
+// compared as Windows compares them). A document with no file yet always
+// starts ticked.
+const char *kProjectStoreOffKey = "send/projectStoreOff";
+constexpr int kProjectStoreOffKept = 200;
+
+QString projectStoreKey(const QString &path)
+{
+    return QDir::cleanPath(QFileInfo(path).absoluteFilePath()).toLower();
+}
+
+bool projectStoreOff(const QString &path)
+{
+    if (path.isEmpty())
+        return false;
+    return QSettings().value(kProjectStoreOffKey).toStringList().contains(projectStoreKey(path));
+}
+
+void rememberProjectStore(const QString &path, bool store)
+{
+    if (path.isEmpty())
+        return;
+    QSettings settings;
+    QStringList off = settings.value(kProjectStoreOffKey).toStringList();
+    const QString key = projectStoreKey(path);
+    off.removeAll(key);
+    if (!store) {
+        off.prepend(key);
+        while (off.size() > kProjectStoreOffKept)
+            off.removeLast();
+    }
+    settings.setValue(kProjectStoreOffKey, off);
+}
+
+// How long the status bar says a Get opened the stored project. The device's
+// own log lines share the bar and replace it sooner when they come.
+constexpr int kUnitProjectStatusMs = 30000;
+
 // Blocks interaction while a synchronous device command runs its nested
 // event loop, so the user can't re-enter menus mid-command.
 class BusyScope
@@ -155,6 +204,28 @@ MainWindow::MainWindow(QWidget *parent)
     statusBar();
     m_documentLabel = new QLabel;
     statusBar()->addWidget(m_documentLabel);
+    // What the document takes of its target's flash and RAM, and how much
+    // there is (updateMemoryStatus): a CAN Triple 2.0 holds as many of each
+    // item as those allow, so the room left is worth keeping in view. It is a
+    // link drawn as text: a click opens File > Target Firmware, which breaks
+    // the figures down table by table.
+    m_memoryLabel = new QLabel;
+    m_memoryLabel->setTextFormat(Qt::RichText);
+    m_memoryLabel->setTextInteractionFlags(Qt::LinksAccessibleByMouse);
+    m_memoryLabel->setVisible(false);
+    connect(m_memoryLabel, &QLabel::linkActivated, this, [this](const QString &href) {
+        if (href == QLatin1String("adopt"))
+            adoptUnitTarget(true);
+        else
+            onTargetFirmware();
+    });
+    statusBar()->addPermanentWidget(m_memoryLabel);
+    // Worked out from the whole document: a moment after the last change, not
+    // once for every row of a bulk one.
+    m_memoryTimer = new QTimer(this);
+    m_memoryTimer->setSingleShot(true);
+    m_memoryTimer->setInterval(250);
+    connect(m_memoryTimer, &QTimer::timeout, this, &MainWindow::updateMemoryStatus);
     // Says whether this session can see the protected messages, so "why does
     // this message show no detail?" is answerable without hunting through menus.
     // Hidden entirely when the document has no comms password, because then
@@ -167,11 +238,21 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(&m_config, &Configuration::dirtyChanged, this, [this]() { updateWindowTitle(); });
     connect(&m_config, &Configuration::documentReset, this, [this]() {
+        // A New, an Open or a Get: whatever document this is, it is not the
+        // unit's project until runGetTransfer says so, after the load.
+        m_fromUnitProject = false;
+        m_unitProjectFile.clear();
+        m_targetPicked = false; // a target chosen for the last document is not this one's
         updateWindowTitle();
         updateProtectionState(); // New/Open/Get changes which document is protected
         updateCapacityGates();   // ...and which firmware it is sized against
+        m_memoryTimer->start();  // ...and what it takes of that firmware's memory
     });
     connect(&m_config, &Configuration::capacityChanged, this, &MainWindow::updateCapacityGates);
+    // The memory figures follow every edit and every change of target.
+    connect(&m_config, &Configuration::edited, m_memoryTimer, qOverload<>(&QTimer::start));
+    connect(&m_config, &Configuration::capacityChanged, m_memoryTimer,
+            qOverload<>(&QTimer::start));
     connect(&m_link, &DeviceLink::connected, this, &MainWindow::updateConnectionStatus);
     connect(&m_link, &DeviceLink::disconnected, this, &MainWindow::updateConnectionStatus);
     connect(&m_link, &DeviceLink::logMessage, this, [this](const QString &text) {
@@ -219,6 +300,11 @@ void MainWindow::buildMenus()
     // fact shows up as "n of m".
     m_documentActions << fileMenu->addAction(tr("Target &Firmware…"), this,
                                              &MainWindow::onTargetFirmware);
+    // The document's notes: in the file, in Config Summary, and on a CAN Triple
+    // 2.0 that keeps them, with the configuration.
+    // No&tes: N is New's.
+    m_documentActions << fileMenu->addAction(tr("Config No&tes…"), this,
+                                             &MainWindow::onConfigNotes);
     fileMenu->addSeparator();
     m_revealAction = fileMenu->addAction(tr("&Reveal Protected Comms…"), this,
                                          &MainWindow::onRevealProtectedComms);
@@ -363,21 +449,10 @@ void MainWindow::buildMenus()
     toolsMenu->addSeparator();
     // Serial port settings belong to the app, not the document.
     toolsMenu->addAction(tr("Connection &Settings…"), this, &MainWindow::onConnectionSettings);
-    // So does how it looks: see theme.h. A choice applies at once, to every
-    // window, and is kept for this Windows account.
-    QMenu *themeMenu = toolsMenu->addMenu(tr("&Theme"));
-    auto *themeGroup = new QActionGroup(themeMenu);
-    for (const ThemeInfo &info : availableThemes()) {
-        QAction *action = themeMenu->addAction(info.name);
-        action->setCheckable(true);
-        action->setChecked(info.theme == currentTheme());
-        themeGroup->addAction(action);
-        const Theme theme = info.theme;
-        connect(action, &QAction::triggered, this, [theme]() {
-            applyTheme(theme);
-            saveTheme(theme);
-        });
-    }
+    // So do the look and how Connect behaves: Options holds the theme (see
+    // theme.h; a choice applies at once, to every window) and "Remember last
+    // connection", both kept for this Windows account.
+    toolsMenu->addAction(tr("&Options…"), this, &MainWindow::onOptions);
 
     // Help
     QMenu *helpMenu = menuBar()->addMenu(tr("&Help"));
@@ -408,24 +483,219 @@ void MainWindow::updateCapacityGates()
                                                "Target Firmware.")
                                                 .arg(what));
     };
-    gate(m_mathAction, cap.capacityOf(DeviceTable::Math), tr("math channels"));
-    gate(m_conditionsAction, cap.capacityOf(DeviceTable::Conditions), tr("User Conditions"));
-    gate(m_timersAction, cap.capacityOf(DeviceTable::Timers), tr("timers"));
-    gate(m_countersAction, cap.capacityOf(DeviceTable::Counters), tr("counters"));
-    gate(m_integratorsAction, cap.capacityOf(DeviceTable::Integrators), tr("integrators"));
-    gate(m_constantsAction, cap.capacityOf(DeviceTable::Constants), tr("constants"));
+    // Each table's limit: its capacity, or on a target that takes a plan its
+    // ceiling (DeviceCapacity::limitOf).
+    gate(m_mathAction, cap.limitOf(DeviceTable::Math), tr("math channels"));
+    gate(m_conditionsAction, cap.limitOf(DeviceTable::Conditions), tr("User Conditions"));
+    gate(m_timersAction, cap.limitOf(DeviceTable::Timers), tr("timers"));
+    gate(m_countersAction, cap.limitOf(DeviceTable::Counters), tr("counters"));
+    gate(m_integratorsAction, cap.limitOf(DeviceTable::Integrators), tr("integrators"));
+    gate(m_constantsAction, cap.limitOf(DeviceTable::Constants), tr("constants"));
     // Either kind of table keeps the dialog: it has a tab per kind, and each
     // tab's Add already refuses at that kind's own capacity.
     gate(m_tablesAction,
-         cap.capacityOf(DeviceTable::Tables2x16Def) + cap.capacityOf(DeviceTable::Tables8x8Def),
+         cap.limitOf(DeviceTable::Tables2x16Def) + cap.limitOf(DeviceTable::Tables8x8Def),
          tr("lookup tables"));
-    gate(m_scriptAction, cap.capacityOf(DeviceTable::Script), tr("device script"));
+    gate(m_scriptAction, cap.limitOf(DeviceTable::Script), tr("device script"));
 }
 
 void MainWindow::onTargetFirmware()
 {
+    const DeviceCapacity before = m_config.capacity();
     TargetFirmwareDialog dialog(&m_config, &m_link, this);
     dialog.exec();
+    // A target chosen here is the document's own: no unit resizes it later.
+    const DeviceCapacity &after = m_config.capacity();
+    if (!before.sameTarget(after) || before.label != after.label
+        || before.reported != after.reported)
+        m_targetPicked = true;
+}
+
+void MainWindow::onConfigNotes()
+{
+    // The notes are the document's (Configuration::comments): saved in the file,
+    // printed by Config Summary, and kept by a CAN Triple 2.0 that keeps notes
+    // with its configuration (LABEL_KIND_NOTE), written by a Send and read back
+    // by a Get. 16 KB is what such a unit keeps, so OK stays off past it rather
+    // than cutting what was typed.
+    constexpr int kMost = LABEL_NOTE_SLOTS_MAX * LABEL_STORE_BYTES;
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Config Notes"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *intro = new QLabel(
+        tr("Notes about this configuration. They are saved in the file, and a CAN Triple 2.0 "
+           "with firmware 2.0.3 or later keeps them with the configuration: Send Configuration "
+           "writes them and Get Configuration reads them back. Up to 16 KB."),
+        &dialog);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    auto *edit = new QPlainTextEdit(&dialog);
+    edit->setPlainText(m_config.comments);
+    layout->addWidget(edit, 1);
+    auto *count = new QLabel(&dialog);
+    layout->addWidget(count);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    const auto recount = [this, edit, count, buttons]() {
+        const int bytes = int(edit->toPlainText().toUtf8().size());
+        const bool over = bytes > kMost;
+        count->setText(tr("%1 of %2 bytes")
+                           .arg(QLocale().toString(bytes), QLocale().toString(kMost)));
+        QPalette pal = count->palette();
+        pal.setColor(QPalette::WindowText,
+                     over ? errorColor(palette()) : palette().color(QPalette::WindowText));
+        count->setPalette(pal);
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(!over);
+    };
+    connect(edit, &QPlainTextEdit::textChanged, &dialog, recount);
+    recount();
+    dialog.resize(640, 480);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    const QString notes = edit->toPlainText();
+    if (notes == m_config.comments)
+        return;
+    m_config.comments = notes;
+    m_config.setDirty();
+}
+
+void MainWindow::adoptUnitTarget(bool asked)
+{
+    if (!m_hasDocument || !m_unitCapacity || !m_unitCapacity->plansTables())
+        return;
+    if (!asked && !adoptsUnitTarget(m_config, *m_unitCapacity, m_targetPicked))
+        return;
+    const bool wasDirty = m_config.isDirty();
+    m_config.setCapacity(*m_unitCapacity);
+    // Sizing a document nobody chose a target for is not an edit of it: a new
+    // document nobody has touched still closes without asking to be saved.
+    // Asked for, it is the user's own change, and their choice from then on.
+    if (asked)
+        m_targetPicked = true;
+    else if (!wasDirty)
+        m_config.setDirty(false);
+    statusBar()->showMessage(
+        tr("Sized for the CAN Triple 2.0 on %1: as many of each item as its memory allows.")
+            .arg(m_link.portName()),
+        8000);
+}
+
+void MainWindow::updateMemoryStatus()
+{
+    if (!m_memoryLabel)
+        return;
+    if (!m_hasDocument) {
+        m_memoryLabel->setVisible(false);
+        return;
+    }
+    const DeviceCapacity &target = m_config.capacity();
+    const QString targetName =
+        target.reported ? target.label : tr("this program's built-in numbers");
+    // A link drawn as the status bar's own text: "target" opens File > Target
+    // Firmware, "adopt" sizes the document for the connected CAN Triple 2.0.
+    const auto asLink = [this](const QString &href, const QString &html) {
+        return QStringLiteral("<a href=\"%1\" style=\"color:%2; text-decoration:none\">%3</a>")
+            .arg(href, palette().color(QPalette::WindowText).name(), html);
+    };
+    if (!target.plansTables()) {
+        // Fixed tables: a set number of each item, and no memory to share out.
+        // Said all the same, with the way to a target that sizes by memory: a
+        // click sizes the document for a connected CAN Triple 2.0 that does.
+        if (m_unitCapacity && m_unitCapacity->plansTables()) {
+            m_memoryLabel->setText(
+                asLink(QStringLiteral("adopt"),
+                       tr("Fixed tables: click to size for the CAN Triple 2.0 on %1")
+                           .arg(m_link.portName())
+                           .toHtmlEscaped()));
+            m_memoryLabel->setToolTip(
+                tr("This configuration is sized for fixed tables, a set number of each item "
+                   "(its target firmware: %1).\n\nClick to size it for the CAN Triple 2.0 on "
+                   "%2 instead: it then holds as many of each item as that unit's flash and RAM "
+                   "allow.")
+                    .arg(targetName, m_link.portName()));
+            m_memoryLabel->setVisible(true);
+            return;
+        }
+        m_memoryLabel->setText(asLink(QStringLiteral("target"), tr("Fixed tables").toHtmlEscaped()));
+        m_memoryLabel->setToolTip(
+            tr("This configuration is sized for fixed tables, a set number of each item "
+               "(its target firmware: %1).\n\nA CAN Triple 2.0 holds as many of each item as "
+               "its flash and RAM allow. To size this configuration for one, click here (File > "
+               "Target Firmware…) and choose Use Connected Device or a CAN Triple 2.0 firmware "
+               "image. A Get from a CAN Triple 2.0 does it too.")
+                .arg(targetName));
+        m_memoryLabel->setVisible(true);
+        return;
+    }
+    // The Send's own mapping, the script with it. A script that does not
+    // compile is left out (the Send would refuse it), and so are any rows the
+    // mapper refuses.
+    MappingResult mapped = mapWithScript(m_config);
+    bool scriptLeftOut = false;
+    if (!mapped.ok()) {
+        MappingResult plain = mapToDevice(m_config);
+        scriptLeftOut = plain.ok(); // it maps without the script: the script was the trouble
+        mapped = std::move(plain);
+    }
+    const MemoryUse use = memoryUseOf(mapped.tables);
+    const QLocale locale;
+    // "Flash 49,392 / 229,296 bytes (21%)": amber from 90 %, red past the end.
+    const auto figure = [&](const QString &name, qint64 used, qint64 total, bool known) {
+        if (!known)
+            return tr("%1 ? / %2 bytes").arg(name, locale.toString(total)).toHtmlEscaped();
+        const QString text = tr("%1 %2 / %3 bytes (%4%)")
+                                 .arg(name, locale.toString(used), locale.toString(total))
+                                 .arg(total > 0 ? int(used * 100 / total) : 0)
+                                 .toHtmlEscaped();
+        if (used > total)
+            return QStringLiteral("<span style=\"color:%1\">%2</span>")
+                .arg(errorColor(palette()).name(), text);
+        if (used * 10 >= total * 9)
+            return QStringLiteral("<span style=\"color:%1\">%2</span>")
+                .arg(warningColor(palette()).name(), text);
+        return text;
+    };
+    m_memoryLabel->setText(
+        asLink(QStringLiteral("target"),
+               figure(tr("Flash"), use.flashUsed, use.flashTotal, true)
+               + QStringLiteral("&nbsp;&nbsp;&middot;&nbsp;&nbsp;")
+               + figure(tr("RAM"), use.ramUsed, use.ramTotal, use.costed)));
+    QStringList tip;
+    tip << tr("Sized for: %1").arg(targetName);
+    tip << tr("Flash (configuration storage): %1 of %2 bytes, for the configuration's tables%3.")
+               .arg(locale.toString(use.flashUsed), locale.toString(use.flashTotal),
+                    mapped.tables.scriptChunks.isEmpty() ? QString() : tr(" and its script"));
+    if (use.costed) {
+        tip << (target.holdsTxQueues()
+                    ? tr("RAM (working memory): %1 of %2 bytes, for each table's working state, "
+                         "a link for every channel a calculation reads or writes, and %3 bytes "
+                         "for each bus's queue of frames waiting to go out. The unit gives the "
+                         "rest, %4 bytes, to those queues as well.")
+                          .arg(locale.toString(use.ramUsed), locale.toString(use.ramTotal),
+                               locale.toString(target.plan.txQueueFloor),
+                               locale.toString(qMax<qint64>(0, use.ramTotal - use.ramUsed)))
+                    : tr("RAM (working memory): %1 of %2 bytes, for each table's working state "
+                         "and a link for every channel a calculation reads or writes.")
+                          .arg(locale.toString(use.ramUsed), locale.toString(use.ramTotal)));
+    } else {
+        tip << tr("RAM (working memory): %1 bytes. This firmware states its memory in a way "
+                  "this version of the Device Manager cannot work out; the unit checks a Send "
+                  "before anything changes.")
+                   .arg(locale.toString(use.ramTotal));
+    }
+    tip << tr("Names: %1 of %2 bytes.")
+               .arg(locale.toString(use.namesUsed), locale.toString(use.namesTotal));
+    tip << tr("Values kept across power cycles: %1 of %2.").arg(use.keptUsed).arg(use.keptTotal);
+    if (scriptLeftOut)
+        tip << tr("The device script does not compile, so its flash is not counted.");
+    else if (!mapped.ok())
+        tip << tr("The configuration has errors (File > Check Channels): what they leave out is "
+                  "not counted.");
+    tip << tr("Click for the figures table by table (File > Target Firmware…).");
+    m_memoryLabel->setToolTip(tip.join(QStringLiteral("\n\n")));
+    m_memoryLabel->setVisible(true);
 }
 
 // What replaced the old document-wide lock, and why it does so much less.
@@ -632,6 +902,12 @@ void MainWindow::updateDocumentState()
     if (m_central)
         m_central->setCurrentWidget(m_hasDocument ? m_documentPage : m_startPage);
     updateWindowTitle();
+    // The memory figures: gone at once with the document, worked out a moment
+    // after one arrives.
+    if (m_memoryLabel && !m_hasDocument)
+        m_memoryLabel->setVisible(false);
+    if (m_memoryTimer && m_hasDocument)
+        m_memoryTimer->start();
 }
 
 void MainWindow::updateWindowTitle()
@@ -659,13 +935,20 @@ void MainWindow::updateWindowTitle()
             m_documentLabel->setText(tr("No configuration open"));
         return;
     }
+    // A project a Get opened off a unit has no file yet, and goes by the name
+    // it was sent under until a Save gives it one.
+    const bool unitProject = m_fromUnitProject && m_config.filePath().isEmpty();
+    const QString name = unitProject && !m_unitProjectFile.isEmpty()
+                             ? QFileInfo(m_unitProjectFile).completeBaseName()
+                             : m_config.displayName();
     setWindowTitle(tr("%1 - %2%3%4")
-                       .arg(product, m_config.displayName(),
+                       .arg(product, name,
                             m_config.isDirty() ? QStringLiteral(" *") : QString(),
                             m_config.hasCommsPassword() ? tr(" [protected]") : QString()));
     if (m_documentLabel)
-        m_documentLabel->setText(m_config.filePath().isEmpty() ? tr("Unsaved configuration")
-                                                               : m_config.filePath());
+        m_documentLabel->setText(!m_config.filePath().isEmpty() ? m_config.filePath()
+                                 : unitProject ? tr("Project from the unit, not saved")
+                                               : tr("Unsaved configuration"));
 }
 
 void MainWindow::updateConnectionStatus()
@@ -681,14 +964,14 @@ void MainWindow::updateConnectionStatus()
         if (m_deviceHardware)
             text += QStringLiteral(" — ") + m_deviceHardware->summary();
         m_connectionLabel->setText(text);
-        // Remembered for Online > Connect, for THIS session only — the port
-        // is chosen fresh every run on purpose, but within a run "the port I
-        // was just using" is almost always the answer.
-        m_lastPort = m_link.portName();
-        m_lastBaud = m_link.baudRate();
+        // Kept for Online > Connect while Tools > Options says to remember the
+        // last connection; otherwise the port is chosen fresh every time.
+        if (rememberLastConnection())
+            saveConnection(m_link.portName(), m_link.baudRate());
     } else {
         // What was learned about the unit belongs to that connection.
         m_deviceHardware.reset();
+        m_unitCapacity.reset();
         m_connectionLabel->setText(tr("Not connected"));
     }
     // Null-guarded: the first call happens while the window is still being
@@ -702,6 +985,10 @@ void MainWindow::updateConnectionStatus()
     // dropped.
     if (m_monitorDialog && m_deviceHardware)
         m_monitorDialog->setUnitHardware(m_deviceHardware);
+    // On a document with fixed tables the memory note offers the connected
+    // CAN Triple 2.0, so it follows the connection.
+    if (m_memoryTimer && m_hasDocument)
+        m_memoryTimer->start();
 }
 
 bool MainWindow::unitIsUsbDevice() const
@@ -804,7 +1091,9 @@ bool MainWindow::ensureConnected()
 {
     if (m_link.isOpen())
         return true;
-    ConnectionSettingsDialog dialog(&m_link, this);
+    // Opened to get a link for the command that asked; it closes once there
+    // is one.
+    ConnectionSettingsDialog dialog(&m_link, this, /*closeOnConnect=*/true);
     dialog.exec();
     // The dialog may well have just connected; without this the status bar
     // (and the Connect/Disconnect pair) said "Not connected" until some other
@@ -834,26 +1123,49 @@ void MainWindow::identifyConnectedUnit()
     }
     if (ok)
         m_deviceHardware = hardware;
+    // A CAN Triple 2.0's capacity report, kept for this connection: a new
+    // document is sized for the unit by it (adoptUnitTarget), and the status
+    // bar offers it to a document with fixed tables.
+    m_unitCapacity.reset();
+    if (ok && hardware.family == BoardFamily::CanTriple2) {
+        DeviceCapacity capacity;
+        QString ignored;
+        bool read = false;
+        {
+            BusyScope busy(this);
+            read = device_session::readCapacity(&m_link, &capacity, &ignored);
+        }
+        if (read && capacity.reported) {
+            capacity.label = tr("device on %1").arg(m_link.portName()); // as a Get names it
+            m_unitCapacity = capacity;
+        }
+    }
     updateConnectionStatus();
+    adoptUnitTarget(false);
 }
 
 void MainWindow::onConnect()
 {
     if (m_link.isOpen())
         return;
-    // This session's last successful settings first — see the menu comment.
-    // A failure here (port gone, taken by another program) is not reported,
-    // it just falls through to the dialog, which shows the live port list
-    // and is the better error message.
-    if (!m_lastPort.isEmpty()) {
+    // With "Remember last connection" on (Tools > Options), the last
+    // successful port and baud first. A failure there (port gone, taken by
+    // another program) is not reported, it just falls through to the dialog,
+    // which shows the live port list and is the better error message. Off,
+    // the dialog asks every time.
+    QString port;
+    qint32 baud = 0;
+    if (rememberLastConnection() && savedConnection(&port, &baud)) {
         QString error;
-        if (m_link.open(m_lastPort, m_lastBaud, &error)) {
+        if (m_link.open(port, baud, &error)) {
             updateConnectionStatus();
             identifyConnectedUnit();
             return;
         }
     }
-    ConnectionSettingsDialog dialog(&m_link, this);
+    // The dialog closes itself once connected: a Connect wanted a link, not a
+    // settings page (Tools > Connection Settings… keeps it open).
+    ConnectionSettingsDialog dialog(&m_link, this, /*closeOnConnect=*/true);
     dialog.exec();
     updateConnectionStatus();
     if (m_link.isOpen())
@@ -890,6 +1202,7 @@ void MainWindow::onNew()
     m_config.clear();
     m_hasDocument = true;
     updateDocumentState();
+    adoptUnitTarget(false); // sized for a connected CAN Triple 2.0 from the start
 }
 
 void MainWindow::onOpen()
@@ -1005,6 +1318,13 @@ bool MainWindow::onSave()
     if (m_config.filePath().isEmpty())
         return onSaveAs();
 
+    // An older JSON .ct3 is saved sealed (Configuration::loadFromFile), and the
+    // status bar says so: the file keeps its name and its place, and someone
+    // reading it with another program would otherwise find it changed unannounced.
+    const QString savedPath = m_config.filePath();
+    const bool sealsLegible = m_config.fileFormat() == Configuration::FileFormat::Sealed
+                              && QFileInfo::exists(savedPath) && !isBinaryConfigFile(savedPath)
+                              && !isSecureFile(savedPath);
     QString error;
     bool ok = false;
     // SAVE FOLLOWS THE FORMAT THE FILE ALREADY HAS, all three of them. Changing
@@ -1028,6 +1348,11 @@ bool MainWindow::onSave()
         return false;
     }
     updateWindowTitle();
+    if (sealsLegible)
+        statusBar()->showMessage(tr("%1 was a readable JSON file; it is now saved encrypted and "
+                                    "compressed. Save As… → JSON writes a readable copy.")
+                                     .arg(QFileInfo(savedPath).fileName()),
+                                 15000);
     return true;
 }
 
@@ -1038,8 +1363,12 @@ bool MainWindow::onSaveAs()
     // suffix has to become something, and the dropdown is the only place the
     // user said which.
     QString selected;
-    QString path = QFileDialog::getSaveFileName(this, tr("Save Configuration"),
-                                                startIn(m_config.filePath()),
+    // A project opened off a unit is offered back under the name it was sent
+    // under, in the folder a new file would go to.
+    QString suggested = startIn(m_config.filePath());
+    if (m_config.filePath().isEmpty() && m_fromUnitProject && !m_unitProjectFile.isEmpty())
+        suggested = QDir(suggested).filePath(m_unitProjectFile);
+    QString path = QFileDialog::getSaveFileName(this, tr("Save Configuration"), suggested,
                                                 tr(kSaveAsFilter), &selected);
     if (path.isEmpty())
         return false;
@@ -1779,6 +2108,55 @@ bool MainWindow::checkPackagePolicy(const SecurePackagePolicy &policy, const QSt
                "its target."));
         return false;
     }
+    // The CRC8 records: 8 elements a record on a CAN Triple 2.0 from its store
+    // v22, 15 on any other unit, so a package's CRC8 rules fit only one kind.
+    if (verdict.crc8FormMismatch) {
+        QMessageBox::critical(
+            this, title,
+            policy.crc8Records8
+                ? tr("This package's Transmit CRC8 rules are written for a CAN Triple 2.0 whose "
+                     "firmware keeps 8 elements a record. The connected unit takes them in the "
+                     "earlier, 15-element form.\n\nIt has NOT been sent. Update the unit's "
+                     "firmware, or build a package with this unit as its target.")
+                : tr("This package's Transmit CRC8 rules are written in the 15-element form. The "
+                     "connected unit is a CAN Triple 2.0 whose firmware keeps 8 elements a "
+                     "record.\n\nIt has NOT been sent. Build a package with this unit as its "
+                     "target."));
+        return false;
+    }
+    // CAN FD without the bit rate switch, which this unit's firmware cannot send.
+    if (verdict.brsPerMessageMissing) {
+        QMessageBox::critical(
+            this, title,
+            tr("This package sends CAN FD messages without the bit rate switch (BRS off). The "
+               "connected unit's firmware switches the bit rate on every CAN FD frame.\n\nIt "
+               "has NOT been sent. Update the unit's firmware, or build the package with BRS "
+               "on."));
+        return false;
+    }
+    // Built for a CAN Triple 2.0 that sizes each configuration's tables (phase
+    // 4), and this one's firmware does not. Asked after the names, so a CAN
+    // Triple (1.x) is told it is the wrong kind of unit rather than to update.
+    if (verdict.planMissing) {
+        QMessageBox::critical(
+            this, title,
+            tr("This package was built for CAN Triple 2.0 firmware that sizes each "
+               "configuration's tables to fit, and the connected unit's firmware predates "
+               "that.\n\nIt has NOT been sent. Update the unit's firmware first."));
+        return false;
+    }
+    // Built for a CAN Triple 2.0 that keeps each channel's unit and the value
+    // names with the configuration (phase 4, step 3b), and this one's firmware
+    // does not.
+    if (verdict.labelKindsMissing) {
+        QMessageBox::critical(
+            this, title,
+            tr("This package was built for CAN Triple 2.0 firmware that keeps each channel's "
+               "unit and its value names with the configuration, and the connected unit's "
+               "firmware predates that.\n\nIt has NOT been sent. Update the unit's firmware "
+               "first."));
+        return false;
+    }
     if (!verdict.shortfalls.isEmpty()) {
         // Not a wrong unit — the right fleet, holding less than the package
         // writes. Named by table, like a Send's own refusal, because the fix
@@ -2029,18 +2407,32 @@ void MainWindow::onSendConfiguration()
         FwUpdateStatus fw{};
         QString statusError;
         bool gotStatus = false;
+        // Which board line the unit is decides which format it should be on:
+        // the CAN Triple 2.0's store left the 1.x's behind at 21 (phase 4,
+        // EXPECTED_STORE_VERSION_2). Asked again here when connecting did not
+        // learn it; a unit that cannot say is a 1.x (DeviceHardware::builtIn).
+        std::optional<DeviceHardware> hardware = m_deviceHardware;
         {
             BusyScope busy(this);
             FirmwareUpdater updater(&m_link);
             gotStatus = updater.readStatus(&fw, &statusError);
+            if (!hardware) {
+                DeviceHardware read;
+                QString ignored;
+                if (device_session::readHardware(&m_link, &read, &ignored))
+                    hardware = read;
+            }
         }
+        const quint16 expectedStore = hardware && hardware->family == BoardFamily::CanTriple2
+                                          ? EXPECTED_STORE_VERSION_2
+                                          : EXPECTED_STORE_VERSION;
         // Only when the device actually reported one. A unit whose firmware
         // predates the field, or has no bootloader, answers 0 — and "I could not
         // tell" must not become "it is wrong", or this would block sends to
         // hardware this build talks to perfectly well.
         if (gotStatus && fw.running_store_version != 0
-            && fw.running_store_version != EXPECTED_STORE_VERSION) {
-            const bool deviceOlder = fw.running_store_version < EXPECTED_STORE_VERSION;
+            && fw.running_store_version != expectedStore) {
+            const bool deviceOlder = fw.running_store_version < expectedStore;
             QMessageBox::warning(
                 this, tr("Send Configuration"),
                 deviceOlder
@@ -2053,13 +2445,13 @@ void MainWindow::onSendConfiguration()
                          "configuration, so it will need this one sending afterwards either "
                          "way.")
                           .arg(fw.running_store_version)
-                          .arg(EXPECTED_STORE_VERSION)
+                          .arg(expectedStore)
                     : tr("This device's firmware stores configurations in a NEWER format than "
                          "this version of the Device Manager writes (device v%1, this app v%2)."
                          "\n\nNothing has been sent. Use the Device Manager that came with "
                          "that firmware.")
                           .arg(fw.running_store_version)
-                          .arg(EXPECTED_STORE_VERSION));
+                          .arg(expectedStore));
             return;
         }
     }
@@ -2161,6 +2553,27 @@ void MainWindow::onSendConfiguration()
                          .arg(mapped.tables.conditions.size())
                          .arg(mapped.tables.counters.size())
                          .arg(mapped.tables.timers.size());
+    // What it takes of a unit that sizes it (a CAN Triple 2.0 that takes a
+    // plan): its tables in the configuration storage, and their working memory
+    // with the links between channels and calculations, as the unit's SAVE
+    // counts them. The fit check above has made sure both fit.
+    if (unitCapacity.plansTables()) {
+        const PlanCostResult cost =
+            unitCapacity.planCost(planCapacities(tableCountsOf(mapped.tables)),
+                                  valueNamesFor(mapped.tables, unitCapacity),
+                                  notesSlotsFor(mapped.tables, unitCapacity));
+        if (cost.costed) {
+            const QLocale locale;
+            detail += tr("\n\nOn this unit it takes %1 of %2 bytes of configuration storage and "
+                         "%3 of %4 bytes of working memory.")
+                          .arg(locale.toString(cost.flashBytes),
+                               locale.toString(unitCapacity.plan.flashBytes),
+                               locale.toString(unitCapacity.arenaWithReferences(
+                                   cost.arenaBytes, planReferences(mapped.tables),
+                                   planUdsBytes(mapped.tables))),
+                               locale.toString(unitCapacity.plan.arenaBytes));
+        }
+    }
     detail += tr("\n\nBus settings applied:\n%1").arg(busSummary.join(QStringLiteral("\n")));
     detail += tr("\n\nThe configuration is saved to flash so it reloads at every power-up.");
     // Made for other firmware than this unit's: said in the confirmation, with
@@ -2296,6 +2709,40 @@ void MainWindow::onSendConfiguration()
     auto *resetCheck = new QCheckBox(tr("Reset device after sending"), &dlg);
     dlgLayout->addWidget(resetCheck);
 
+    // THE PROJECT, on a unit that keeps one (stored_project.h): this whole
+    // document beside the configuration, so a Get gives it back as it is now,
+    // script source, comments and every name as typed, rather than rebuilding
+    // it from the records. Ticked unless this document was last sent without
+    // it; greyed, with the reason, when it cannot go.
+    QCheckBox *storeCheck = nullptr;
+    if (unitCapacity.keepsProject()) {
+        storeCheck = new QCheckBox(tr("Store this project on the unit"), &dlg);
+        const int room = qMin(unitCapacity.projectBytes, PROJECT_BYTES) - kStoredProjectHeaderBytes;
+        QString bodyError;
+        const qsizetype bodyBytes = m_config.projectBody(&bodyError).size();
+        const auto kb = [](qsizetype bytes) { return QString::number((bytes + 1023) / 1024); };
+        if (bodyBytes == 0) {
+            storeCheck->setEnabled(false);
+            storeCheck->setToolTip(tr("This project cannot be prepared for the unit: %1")
+                                       .arg(bodyError));
+        } else if (bodyBytes > room) {
+            storeCheck->setEnabled(false);
+            storeCheck->setToolTip(tr("This project is too large to keep on the unit: it takes "
+                                      "%1 KB, and the unit keeps up to %2 KB.")
+                                       .arg(kb(bodyBytes), kb(room)));
+        } else {
+            storeCheck->setChecked(!projectStoreOff(m_config.filePath()));
+            storeCheck->setToolTip(
+                tr("Keeps this whole document on the unit with the configuration (%1 KB), so "
+                   "Get Configuration gives it back as it is now: its script source, comments "
+                   "and every name as typed.\n\nUntick it to send the configuration alone. The "
+                   "unit then keeps no project, and a Get rebuilds the document from what the "
+                   "unit runs.")
+                    .arg(kb(bodyBytes)));
+        }
+        dlgLayout->addWidget(storeCheck);
+    }
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
     dlgLayout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
@@ -2324,8 +2771,34 @@ void MainWindow::onSendConfiguration()
     // the retirement comment in wire_structs.h describes.
     const QString configTitle = titleEdit->text().trimmed();
     const bool resetAfter = resetCheck->isChecked();
+    const bool storeProject = storeCheck && storeCheck->isEnabled() && storeCheck->isChecked();
+    if (storeCheck && storeCheck->isEnabled())
+        rememberProjectStore(m_config.filePath(), storeCheck->isChecked());
     m_config.setConfigTitle(configTitle);
     updateWindowTitle();
+
+    // In the unit's own record form, whatever the document targets, and with
+    // the project when it is to be kept: encoded now, with the title just
+    // typed in it. ConfigTransfer stamps its header with the fingerprint of
+    // exactly what it writes.
+    DeviceTables sendTables = tablesForUnit(mapped.tables, unitCapacity);
+    if (storeProject) {
+        QString bodyError;
+        StoredProjectHeader header;
+        header.sentMs = QDateTime::currentMSecsSinceEpoch();
+        header.writer = QCoreApplication::applicationVersion();
+        header.fileName = QFileInfo(m_config.filePath()).fileName();
+        sendTables.storedProject = buildStoredProject(m_config.projectBody(&bodyError), header);
+        if (sendTables.storedProject.isEmpty()
+            && QMessageBox::question(
+                   this, tr("Send Configuration"),
+                   tr("This project could not be prepared for the unit%1.\n\nSend the "
+                      "configuration without it? The unit then keeps no project.")
+                       .arg(bodyError.isEmpty() ? QString() : QStringLiteral(": ") + bodyError),
+                   QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                   != QMessageBox::Yes)
+            return;
+    }
 
     // Binding goes BEFORE the tables. It is an ordinary write, so it is accepted
     // now that Send has been proved, and doing it first means a send that dies
@@ -2356,8 +2829,7 @@ void MainWindow::onSendConfiguration()
     // firmware reads as "leave the stored version alone". Only a package —
     // through Send Secure Configuration — stamps a version on a unit.
     // In the unit's own record form, whatever the document targets.
-    auto *transfer = ConfigTransfer::send(&m_link, tablesForUnit(mapped.tables, unitCapacity),
-                                          /*verify=*/true, busSetups,
+    auto *transfer = ConfigTransfer::send(&m_link, sendTables, /*verify=*/true, busSetups,
                                           /*saveToFlash=*/true, std::nullopt, configTitle,
                                           resetAfter, this);
     connect(transfer, &ConfigTransfer::progress, progress,
@@ -2385,9 +2857,11 @@ void MainWindow::onSendConfiguration()
     const bool reconnectAfter = resetAfter && unitIsUsbDevice();
     const QString port = m_link.portName();
     const qint32 baud = m_link.baudRate();
+    const bool projectStored = !sendTables.storedProject.isEmpty();
     connect(transfer, &ConfigTransfer::finished, this,
             [this, progress, transfer, notApplied, bound, boundTo, readsTxDropped, readsSupply,
-             unitMeasuresSupply, reconnectAfter, port, baud](bool ok, const QString &error) {
+             unitMeasuresSupply, reconnectAfter, port, baud,
+             projectStored](bool ok, const QString &error) {
         progress->close();
         progress->deleteLater();
         if (ok) {
@@ -2402,6 +2876,9 @@ void MainWindow::onSendConfiguration()
             if (bound)
                 text += tr("\n\nLocked to this device (%1). It will not run on any other "
                            "CAN Triple.").arg(boundTo);
+            if (projectStored)
+                text += tr("\n\nThis project is stored on the unit with it: Get Configuration "
+                           "gives it back as it is now.");
             if (!notApplied.isEmpty())
                 text += tr("\n\nNot applied:\n%1").arg(notApplied.join(QStringLiteral("\n")));
             if (!transfer->skippedStages().isEmpty())
@@ -2612,6 +3089,78 @@ void MainWindow::runGetTransfer(bool allowUnlockRetry)
                    "must be sent again."));
             return;
         }
+        // THE STORED PROJECT (stored_project.h): the document this
+        // configuration was sent from, which a CAN Triple 2.0 keeps beside it.
+        // Opened in place of a document rebuilt from the records when the unit
+        // still runs exactly what was sent with it (the fingerprint its Send
+        // stamped, against the one these tables give), and the status line
+        // says so. When the configuration has changed since, the user chooses;
+        // when the project cannot be read, the configuration is rebuilt as
+        // before and the message below says why.
+        QString projectNote;
+        {
+            StoredProjectHeader stored;
+            QByteArray body;
+            const StoredProjectState state =
+                openStoredProject(tables.storedProject, &stored, &body);
+            if (state == StoredProjectState::Valid) {
+                const QString sent = QLocale().toString(
+                    QDateTime::fromMSecsSinceEpoch(stored.sentMs).toLocalTime(),
+                    QLocale::ShortFormat);
+                const QString what = stored.fileName.isEmpty()
+                                         ? tr("sent %1").arg(sent)
+                                         : tr("%1, sent %2").arg(stored.fileName, sent);
+                bool open = stored.fingerprint == ConfigTransfer::configurationFingerprint(tables);
+                if (!open) {
+                    QMessageBox ask(QMessageBox::Question, tr("Get Configuration"),
+                                    tr("This unit holds the project its configuration was sent "
+                                       "with (%1), but the configuration has been changed "
+                                       "since, so that project no longer describes what the "
+                                       "unit runs.\n\nOpen the project as it was sent, or the "
+                                       "configuration as the unit runs it now?")
+                                        .arg(what),
+                                    QMessageBox::NoButton, this);
+                    QPushButton *storedButton =
+                        ask.addButton(tr("Open the Stored Project"), QMessageBox::AcceptRole);
+                    QPushButton *readButton =
+                        ask.addButton(tr("Open as Read"), QMessageBox::RejectRole);
+                    ask.setDefaultButton(readButton);
+                    ask.exec();
+                    open = ask.clickedButton() == storedButton;
+                    if (!open)
+                        projectNote = tr("This is the configuration as the unit runs it, not "
+                                         "the project it was sent with (%1): the configuration "
+                                         "has been changed since that was sent.")
+                                          .arg(what);
+                }
+                if (open) {
+                    QString error;
+                    if (m_config.loadProjectBody(body, &error)) {
+                        m_fromUnitProject = true; // after the load: its reset clears it
+                        m_unitProjectFile = stored.fileName;
+                        m_hasDocument = true;
+                        updateDocumentState();
+                        updateProtectionState();
+                        updateWindowTitle();
+                        if (m_monitorDialog)
+                            m_monitorDialog->rebuild();
+                        statusBar()->showMessage(
+                            tr("Opened the project stored on the unit (%1).").arg(what),
+                            kUnitProjectStatusMs);
+                        return;
+                    }
+                    projectNote = tr("The project stored on the unit (%1) could not be opened: "
+                                     "%2 This is the configuration rebuilt from what the unit "
+                                     "runs.")
+                                      .arg(what, error);
+                }
+            } else if (state == StoredProjectState::Damaged) {
+                projectNote = tr("The unit holds a project with its configuration, but it could "
+                                 "not be read, so this is the configuration rebuilt from what "
+                                 "the unit runs.");
+            }
+        }
+
         QStringList notes;
         mapFromDevice(tables, m_config, &notes, transfer->deviceBusSetup());
         m_hasDocument = true; // a Get is the third way a document comes to exist
@@ -2652,6 +3201,8 @@ void MainWindow::runGetTransfer(bool allowUnlockRetry)
                                "empty here):"));
             lines += transfer->skippedStages();
         }
+        if (!projectNote.isEmpty())
+            lines << QString() << projectNote;
         QMessageBox::information(this, tr("Get Configuration"),
                                  tr("Configuration read.\n\n%1").arg(lines.join(QStringLiteral("\n"))));
     });
@@ -3356,6 +3907,18 @@ void MainWindow::onConnectionSettings()
     // link now is asked which board it is.
     if (m_link.isOpen())
         identifyConnectedUnit();
+}
+
+void MainWindow::onOptions()
+{
+    OptionsDialog dialog(this);
+    // The memory figures carry their colours in their text, so a theme change
+    // redraws them.
+    connect(&dialog, &OptionsDialog::themeApplied, this, [this]() {
+        if (m_memoryTimer && m_hasDocument)
+            m_memoryTimer->start();
+    });
+    dialog.exec();
 }
 
 // The manual is a window rather than a dialog, and a singleton like Monitor

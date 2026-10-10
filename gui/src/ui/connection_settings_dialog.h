@@ -17,11 +17,17 @@ class ConnectionSettingsDialog : public QDialog
 {
     Q_OBJECT
 public:
-    explicit ConnectionSettingsDialog(DeviceLink *link, QWidget *parent = nullptr);
+    // closeOnConnect: the dialog was opened to get a link (Online > Connect, or
+    // a command that connects first), so a successful Connect is the answer
+    // and the dialog closes on it. Off, as from Tools > Connection Settings…,
+    // it stays for the Test button and a Disconnect.
+    explicit ConnectionSettingsDialog(DeviceLink *link, QWidget *parent = nullptr,
+                                      bool closeOnConnect = false);
 
 private:
     void refreshPorts();
     void onConnectClicked();
+    bool m_closeOnConnect = false;
     void onTestClicked();
     void updateUi();
 

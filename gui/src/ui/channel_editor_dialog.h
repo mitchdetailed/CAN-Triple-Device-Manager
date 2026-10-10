@@ -36,6 +36,7 @@ private:
     QLabel *m_summaryLabel;
     QPushButton *m_editButton;
     QPushButton *m_newButton;
+    bool m_filling = false; // rebuild() is setting the Kept boxes
 };
 
 } // namespace ct

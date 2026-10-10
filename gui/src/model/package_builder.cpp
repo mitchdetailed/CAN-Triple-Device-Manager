@@ -9,6 +9,7 @@
 #include "../scripting/script_compiler.h"
 #include "access_keys.h"
 #include "configuration.h"
+#include "plan_budget.h"
 #include "sealed_stream.h"
 
 namespace ct {
@@ -96,12 +97,15 @@ PackageBuildResult buildSecurePackage(const PackageBuildRequest &request)
     // Mapped here, at build time, which is what lets the customer's Manager
     // never map it at all. A configuration that will not map is refused now,
     // with the count, rather than producing a package that fails on a bench.
-    const MappingResult mapped = mapWithScript(source);
+    MappingResult mapped = mapWithScript(source);
     if (!mapped.ok())
         return fail(QStringLiteral("This configuration cannot be programmed onto a device: the "
                                    "mapping reports %1 error(s). Open it and use Check "
                                    "Channels to see them.")
                         .arg(mapped.errors.size()));
+    // A package carries no Config Notes: they are its author's, and a package is
+    // for a configuration someone may install without reading.
+    mapped.tables.noteLabels.clear();
 
     const QByteArray fleetKey = deriveLicenseKey(request.fleetPassphrase);
     if (fleetKey.size() != kLicenseKeyBytes)
@@ -134,6 +138,12 @@ PackageBuildResult buildSecurePackage(const PackageBuildRequest &request)
         PlannedFrame probe;
         probe.cmd = CMD_WRITE_LABELS;
         probe.payload = QByteArray(5, '\0'); // kind 0, start 0, count 0
+        // Phase 4, step 3b: a stream that writes units, or value names, probes
+        // the last kind it writes, which a unit from before them refuses.
+        if (mapped.tables.capacity.keepsValueNames())
+            probe.payload[0] = char(LABEL_KIND_VALUE_NAME);
+        else if (mapped.tables.capacity.keepsUnits())
+            probe.payload[0] = char(LABEL_KIND_UNIT);
         probe.stage = QStringLiteral("Checking where the device keeps names");
         frames.append(probe);
     }
@@ -170,6 +180,24 @@ PackageBuildResult buildSecurePackage(const PackageBuildRequest &request)
     written.tableCounts = tableCountsOf(mapped.tables);
     written.needsExtendedDeviceChannels = needsExt;
     written.needsLabelStore = labelsApart;
+    // A target that takes a plan: the stream declares one (planInstallFrames,
+    // from the same tables), and the unit's working memory takes the
+    // references beside the tables, so they ride with the counts.
+    written.needsPlan = mapped.tables.capacity.plansTables();
+    // The CRC8 records' form the stream writes (long rules, store v22).
+    written.crc8Records8 = mapped.tables.capacity.crc8LongRules();
+    // Any CAN FD transmit message sent without the bit rate switch.
+    for (const CanMessageConfig &m : mapped.tables.messages)
+        written.fdWithoutBrs = written.fdWithoutBrs
+                               || ((m.flags & MSGFLAG_TRANSMIT) && (m.flags & MSGFLAG_FD)
+                                   && (m.tx_trigger_flags & MSGTX_NO_BRS));
+    written.references = written.needsPlan ? planReferences(mapped.tables) : -1;
+    written.udsBytes = planUdsBytes(mapped.tables);
+    // What it writes beside the names (phase 4, step 3b).
+    if (labelsApart)
+        written.labelFlags =
+            mapped.tables.capacity.labelFlags & (LABEL_FLAG_UNITS | LABEL_FLAG_VALUE_NAMES);
+    written.valueNames = valueNamesOf(mapped.tables);
     if (!written.isValid())
         return fail(QStringLiteral("The package policy could not be sealed."));
 

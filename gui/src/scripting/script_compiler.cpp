@@ -24,7 +24,12 @@ namespace ct {
 static ScriptSymbols symbolsFromTables(const DeviceTables &tables)
 {
     ScriptSymbols out;
-    out.signalSlots = tables.capacity.capacityOf(DeviceTable::Signals);
+    // The unit's channel table: its capacity, or on one that takes a plan the
+    // channels this configuration declares, which is every slot the mapper
+    // made (the unit verifies a script against exactly that many).
+    out.signalSlots = tables.capacity.plansTables()
+                          ? int(tables.signalConfigs.size())
+                          : tables.capacity.capacityOf(DeviceTable::Signals);
     for (int i = 0; i < tables.signalConfigs.size(); ++i) {
         const auto &sig = tables.signalConfigs[i];
         // The label list when it has the name (the whole of it: a CAN Triple
@@ -96,7 +101,7 @@ bool ScriptCompiler::attachTo(const Configuration &config, const ScriptSymbols &
                               QVector<ScriptChunk> *chunks, QString *error)
 {
     chunks->clear();
-    const int maxChunks = config.capacity().capacityOf(DeviceTable::Script);
+    const int maxChunks = config.capacity().limitOf(DeviceTable::Script);
 
     // The precedence rule, at the one place that turns a document's script into
     // bytes for a device. Configuration::setScript() has already made "a source
@@ -116,8 +121,7 @@ bool ScriptCompiler::attachTo(const Configuration &config, const ScriptSymbols &
         // the old script nor a new one, so the user loses both; refusing before
         // the transfer starts costs them nothing.
         QString reason;
-        if (!validateScriptImage(retained, &reason,
-                                 config.capacity().capacityOf(DeviceTable::Signals))) {
+        if (!validateScriptImage(retained, &reason, symbols.signalSlots)) {
             if (error) {
                 *error = QObject::tr(
                              "The compiled script kept from a device is not a valid script "

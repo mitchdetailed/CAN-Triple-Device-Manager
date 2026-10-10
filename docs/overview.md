@@ -26,18 +26,27 @@ Viewer… (F4), Reset Device, Device Status…, Set Access
 Passwords…, Update Firmware…, Firmware License Manager…. See
 <a href="online.md">Online: Send, Get &amp; Flash</a>.</td></tr>
 <tr><td><b>Tools</b></td><td>Channel Editor…, Lua Console…, Connection
-Settings… and Theme (the serial port and the look belong to the
-application, not the document). See <a href="#themes">Themes</a>.</td></tr>
+Settings… and Options… (the serial port, the look and how Connect behaves
+belong to the application, not the document). See
+<a href="#options">Options</a>.</td></tr>
 <tr><td><b>Help</b></td><td>Contents… (F1) — this help — and About….</td></tr>
 </table>
 
 The status bar shows the document's file path on the left (or "Unsaved configuration"), and on the right the protected-comms state (only when the document carries a Protected Comms password) and the link state — "Connected: COM5 @ 7372800" or "Not connected".
 
+<a id="options"></a>
+
+## Options
+
+**Tools → Options…** holds the two settings that belong to the program rather than to a configuration. Both are kept for your Windows account.
+
+**Remember last connection** — unticked (the default), **Online → Connect** asks which port to use every time, in Connection Settings. Ticked, it goes straight back to the port it last connected to, and asks only when that port is gone.
+
 <a id="themes"></a>
 
-## Themes
+### Theme
 
-**Tools → Theme** sets the colours the whole program is drawn in:
+**Theme** sets the colours the whole program is drawn in; a choice applies as soon as it is picked, and Cancel puts the previous one back:
 
 <table>
 <tr><th>Theme</th><th>Look</th></tr>

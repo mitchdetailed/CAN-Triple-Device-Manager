@@ -166,8 +166,12 @@ endif()
 # (firmwareImagesDirectoryV2 in the Manager, which spells the folder name too,
 # as does the installer's cleanup).
 #
-# The private tree builds it under v2/.pio/build/CANTriple2/, and a tree with
-# the 2.0 line but no build fails like the 1.x image does. A tree without the
+# The PRODUCTION build, the one a unit should ship and be updated with: it sets
+# the chip's readout protection the first time it starts (the firmware's
+# v2/platformio.ini, "TWO BUILDS"). The private tree builds it under
+# v2/.pio/build/CANTriple2_production/, beside the development build the bench
+# uses, which never goes into an installer; a tree with the 2.0 line but no
+# production build fails like the 1.x image does. A tree without the
 # line (the public one, until the 2.0 ships) would carry released binaries
 # beside the 1.x one, and with none it stages nothing and leaves no folder.
 set(_v2_dir "${DEPLOY_DIR}/Firmware/CAN Triple 2.0")
@@ -178,7 +182,7 @@ if(EXISTS "${FIRMWARE_DIR}/v2/VERSION")
     file(MAKE_DIRECTORY "${_v2_dir}")
     set(_v2_dest "${_v2_dir}/can-triple-2-${_v2_version}.ctf")
     stage_one("can-triple-2-${_v2_version}.ctf (CAN Triple 2.0)"
-        "${FIRMWARE_DIR}/v2/.pio/build/CANTriple2/firmware.ctf"
+        "${FIRMWARE_DIR}/v2/.pio/build/CANTriple2_production/firmware.ctf"
         "${FIRMWARE_DIR}/can-triple-2-${_v2_version}.ctf"
         "${_v2_dest}")
     list(APPEND _v2_staged "${_v2_dest}")

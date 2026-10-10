@@ -19,6 +19,7 @@
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QPushButton> // QDialogButtonBox::button() returns one; the base-class conversion needs the full type
 #include <QSpinBox>
 #include <QTableWidget>
@@ -436,6 +437,65 @@ static void testTargetFirmwareDialog()
                                                      "numbers"))
               != nullptr);
         CHECK(table->item(integratorsRow, 1)->text() == QString::number(MAX_INTEGRATORS));
+    }
+
+    // A CAN Triple 2.0 that takes a plan (phase 4): each table up to its
+    // ceiling, then the rooms the document's tables take — and a room too
+    // small shows red.
+    DeviceCapacity planned = DeviceCapacity::builtIn();
+    planned.labelBytes = LABEL_STORE_BYTES;
+    planned.reported = true;
+    planned.label = QStringLiteral("can-triple-2-9.9.9.ctf (firmware 9.9.9)");
+    planned.plan.flags = CAPACITY_PLAN_STAGE;
+    planned.plan.headerBytes = 512;
+    planned.plan.flashBytes = 229296;
+    planned.plan.arenaBytes = 65536;
+    planned.plan.labelRegionBytes = 786432;
+    planned.plan.labelAlign = 4096;
+    planned.plan.refBytes = 2;
+    planned.plan.ceiling = {4094, 65534, 4095, 4095, 4095, 4095, 4095, 4095,
+                            4095, 4095, 4095, 4095 * TABLE_8X8_SITES, 4095, MAX_SCRIPT_CHUNKS, 254};
+    planned.plan.measureCount = ARENA_MEASURE_COUNT;
+    planned.plan.stageTables = {6, 8, 10, 2, 4, 3};
+    planned.plan.slices = {PlanBudget::Slice{ARENA_MEASURE_CHANNEL, 4, 8},
+                           PlanBudget::Slice{ARENA_MEASURE_MESSAGE, 4, 16}};
+    cfg.setCapacity(planned);
+    {
+        TargetFirmwareDialog dlg(&cfg, &link);
+        auto *table = dlg.findChild<QTableWidget *>();
+        CHECK(table != nullptr);
+        if (!table)
+            return;
+        CHECK(table->rowCount() == 17);
+        CHECK(table->item(0, 0)->text() == QStringLiteral("messages"));
+        CHECK(table->item(0, 1)->text() == QStringLiteral("up to 4094"));
+        CHECK(table->item(13, 0)->text() == QStringLiteral("values kept across power cycles"));
+        CHECK(table->item(14, 0)->text() == QStringLiteral("configuration storage (bytes)"));
+        CHECK(table->item(15, 0)->text() == QStringLiteral("working memory (bytes)"));
+        CHECK(table->item(16, 0)->text() == QStringLiteral("names (bytes)"));
+        CHECK(table->item(15, 1)->text() == QLocale().toString(65536));
+        // The two constants and their channels take storage: more than the
+        // header alone, well inside the room.
+        const qint64 storage = QLocale().toLongLong(table->item(14, 2)->text());
+        CHECK(storage > 512 && storage < 229296);
+        CHECK(table->item(14, 2)->toolTip().isEmpty()); // not over
+    }
+    planned.plan.flashBytes = 520; // the header and one constant's worth
+    cfg.setCapacity(planned);
+    {
+        TargetFirmwareDialog dlg(&cfg, &link);
+        auto *table = dlg.findChild<QTableWidget *>();
+        CHECK(table != nullptr && table->rowCount() == 17);
+        if (!table)
+            return;
+        CHECK(table->item(14, 2)->toolTip().contains(QStringLiteral("More than the target has")));
+    }
+    // And back to a 1.x target: the rooms' rows go again.
+    cfg.setCapacity(DeviceCapacity::builtIn());
+    {
+        TargetFirmwareDialog dlg(&cfg, &link);
+        auto *table = dlg.findChild<QTableWidget *>();
+        CHECK(table != nullptr && table->rowCount() == 14);
     }
 }
 

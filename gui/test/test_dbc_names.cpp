@@ -965,6 +965,52 @@ void testAMultiplexedMessageTransmitsAsCompound()
     CHECK(s.rows.isEmpty());
 }
 
+// VAL_ lines (phase 4, step 3b): a signal's value names, each by its raw value,
+// become its channel's at the physical values those decode to; a raw value
+// that decodes to a fraction is left out, VAL_TABLE_ is not a signal's, and a
+// VAL_ for a signal the file does not have is said and skipped. The import
+// dialog's channel carries them.
+void testValueNamesComeFromVal()
+{
+    const char *const dbc = R"DBC(VERSION "value-names"
+
+BO_ 1601 Trans_Status: 8 TCU
+ SG_ Gear_Selector : 0|8@1+ (1,0) [0|15] "" Dash
+ SG_ Shift_Load : 8|8@1+ (0.5,0) [0|127.5] "%" Dash
+ SG_ Drive_Mode : 16|8@1+ (1,-1) [-1|254] "" Dash
+
+VAL_TABLE_ Unused 0 "Nothing" ;
+VAL_ 1601 Gear_Selector 0 "Park" 1 "Reverse" 2 "Neutral" 3 "Drive" 15 "Not Available" ;
+VAL_ 1601 Shift_Load 1 "Half" 2 "One" ;
+VAL_ 1601 Drive_Mode 0 "Off" 1 "Eco" ;
+VAL_ 1601 Missing_Signal 0 "x" ;
+)DBC";
+    QStringList warnings;
+    const DbcFile file = parseDbc(QString::fromLatin1(dbc), &warnings);
+    REQUIRE(file.messages.size() == 1 && file.messages[0].signalList.size() == 3);
+    const DbcSignal &gear = file.messages[0].signalList[0];
+    CHECK(gear.valueNames.size() == 5 && gear.valueNames.value(3) == QStringLiteral("Drive")
+          && gear.valueNames.value(15) == QStringLiteral("Not Available"));
+    const Channel g = channelFromDbcSignal(gear, QStringLiteral("Gear Selector"));
+    CHECK(g.enumLabels.size() == 5 && g.enumLabels.value(0) == QStringLiteral("Park"));
+    const Channel s = channelFromDbcSignal(file.messages[0].signalList[1], QStringLiteral("Shift Load"));
+    CHECK(s.enumLabels.size() == 1 && s.enumLabels.value(1) == QStringLiteral("One"));
+    const Channel m = channelFromDbcSignal(file.messages[0].signalList[2], QStringLiteral("Drive Mode"));
+    CHECK(m.enumLabels.value(-1) == QStringLiteral("Off") && m.enumLabels.value(0) == QStringLiteral("Eco"));
+    bool warned = false;
+    for (const QString &w : warnings)
+        warned = warned || w.contains(QStringLiteral("VAL_ for unknown signal 'Missing_Signal'"));
+    CHECK(warned);
+    std::printf("  Gear Selector's value names        : %d, Shift Load's %d (one a fraction)\n",
+                int(g.enumLabels.size()), int(s.enumLabels.size()));
+
+    Configuration config;
+    config.clear();
+    QStringList shown;
+    importAll(config, file, &shown);
+    CHECK(config.catalog().findByName(QStringLiteral("Gear Selector")).enumLabels == g.enumLabels);
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -995,6 +1041,7 @@ int main(int argc, char **argv)
     testSwitchingModesKeepsTheTicksAndTheChoices();
     testNothingToSendDisablesImport();
     testAMultiplexedMessageTransmitsAsCompound();
+    testValueNamesComeFromVal();
 
     if (fails == 0)
         std::printf("test_dbc_names: all checks passed\n");

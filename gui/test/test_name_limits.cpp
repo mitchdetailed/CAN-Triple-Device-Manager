@@ -18,6 +18,9 @@
 
 #include <QApplication>
 #include <QLineEdit>
+#include <QPushButton>
+#include <QSpinBox>
+#include <QTableWidget>
 
 #include <cstdio>
 
@@ -234,6 +237,41 @@ void testTypingCharacterByCharacterStopsAtTheBudget()
     CHECK(edit.text().toUtf8().size() == MAX_MESSAGE_NAME_BYTES);
 }
 
+// Value names in Edit Custom Channel (phase 4, step 3b): a channel's come in as
+// rows, the rows that name something go back out, Add offers the next value
+// after the highest named, Remove takes the row, and a name stops at what a CAN
+// Triple 2.0 keeps of one (VALUE_NAME_BYTES).
+void testTheValueNamesTable()
+{
+    Configuration config;
+    config.clear();
+    Channel gear;
+    gear.name = QStringLiteral("Gear");
+    gear.dataType = QStringLiteral("u8");
+    gear.enumLabels = {{0, QStringLiteral("Park")}, {1, QStringLiteral("Reverse")}};
+    EditChannelDialog dialog(&config, gear, false);
+    auto *table = dialog.findChild<QTableWidget *>(QStringLiteral("valueNames"));
+    auto *add = dialog.findChild<QPushButton *>(QStringLiteral("addValueName"));
+    auto *remove = dialog.findChild<QPushButton *>(QStringLiteral("removeValueName"));
+    REQUIRE(table != nullptr && add != nullptr && remove != nullptr);
+    CHECK(table->rowCount() == 2);
+    CHECK(dialog.channel().enumLabels == gear.enumLabels);
+    add->click();
+    REQUIRE(table->rowCount() == 3);
+    auto *value = qobject_cast<QSpinBox *>(table->cellWidget(2, 0));
+    auto *name = qobject_cast<QLineEdit *>(table->cellWidget(2, 1));
+    REQUIRE(value != nullptr && name != nullptr);
+    CHECK(value->value() == 2);
+    CHECK(dialog.channel().enumLabels.size() == 2); // a row with no name names nothing
+    name->setText(QStringLiteral("Neutral, selected by the driver")); // 31 bytes
+    CHECK(name->text().toUtf8().size() == VALUE_NAME_BYTES);
+    CHECK(dialog.channel().enumLabels.value(2) == name->text());
+    std::printf("  a value name held to %d bytes: '%s'\n", VALUE_NAME_BYTES, qPrintable(name->text()));
+    table->setCurrentCell(0, 1);
+    remove->click();
+    CHECK(table->rowCount() == 2 && !dialog.channel().enumLabels.contains(0));
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -248,6 +286,7 @@ int main(int argc, char **argv)
     testAConstantsNameStopsToo();
     testA20TargetKeepsThirtyTwoBytes();
     testTypingCharacterByCharacterStopsAtTheBudget();
+    testTheValueNamesTable();
 
     if (fails == 0)
         std::printf("test_name_limits: all checks passed\n");

@@ -5,12 +5,14 @@
 #include <utility>
 
 #include <QHash>
+#include <QLocale>
 #include <QSet>
 
 #include "config_report.h"
 #include "configuration.h"
 #include "device_mapper.h"
 #include "frame_layout.h"
+#include "plan_budget.h"
 
 namespace ct {
 
@@ -43,12 +45,13 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
     // rather than looked up again when a clash is found: by then the only
     // handle on the earlier message is its name, and its name is precisely what
     // must not be printed when it turns out to be a protected one.
-    struct IdOwner { QString name; bool concealed = false; };
+    struct IdOwner { QString name; bool concealed = false; bool uds = false; };
     QHash<QString, IdOwner> idUsers; // "bus|ext|id" -> the section that claimed it
     // Transmit CRC8 sections, counted ACROSS the buses: the device's CRC8 table
     // is one table of MAX_CRC8_MESSAGES rules, not one per bus, so a per-bus
     // count would pass three buses of 15 stamps each. Reported after the loop.
     int crc8Sections = 0;
+    int crc8Records = 0; // the CRC8 table's records those take (long rules: one per 8 elements)
     for (int busIdx = 0; busIdx < 3; ++busIdx) {
         const BusConfig &bus = config.bus[busIdx];
         if (!bus.enabled) {
@@ -113,6 +116,57 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                 return; // skip all message/channel checks below
             }
 
+            if (s.isUds()) {
+                // What a UDS request needs of its target and its fields; the
+                // response's identifier takes a receive slot on the bus like any
+                // receive message's. The rows are checked below with the
+                // response's length as the message's.
+                if (!config.capacity().udsRequests())
+                    add(ValidationIssue::Error, loc,
+                        QStringLiteral("UDS requests need a CAN Triple 2.0 target with firmware "
+                                       "2.0.4 or later (File > Target Firmware)"));
+                if (s.udsRequest.isEmpty() || s.udsRequest.size() > UDS_REQUEST_MAX)
+                    add(ValidationIssue::Error, loc,
+                        QStringLiteral("the request must be 1 to 64 bytes, the service first "
+                                       "(e.g. 22 F1 90)"));
+                if (s.udsResponseAddress == s.baseAddress)
+                    add(ValidationIssue::Error, loc,
+                        QStringLiteral("the response ID must differ from the request ID"));
+                if (s.extended ? s.udsResponseAddress > 0x1FFFFFFFu : s.udsResponseAddress > 0x7FFu)
+                    add(ValidationIssue::Error, loc,
+                        QStringLiteral("response ID 0x%1 exceeds the %2 range")
+                            .arg(QString::number(s.udsResponseAddress, 16).toUpper(),
+                                 s.extended ? QStringLiteral("29-bit") : QStringLiteral("11-bit")));
+                if (s.messageLengthBytes < 1 || s.messageLengthBytes > UDS_RESPONSE_MAX)
+                    add(ValidationIssue::Error, loc,
+                        QStringLiteral("response length must be 1 to 4,095 bytes"));
+                if (!s.udsAwaitResponse && !s.allRows().isEmpty())
+                    add(ValidationIssue::Warning, loc,
+                        QStringLiteral("no response is awaited, so its channels never decode"));
+                if (s.udsStMin < 0 || s.udsStMin > 127)
+                    add(ValidationIssue::Error, loc, QStringLiteral("STmin must be 0 to 127 ms"));
+                if (!s.cyclic && s.transmitCondition.isEmpty())
+                    add(ValidationIssue::Error, loc,
+                        QStringLiteral("Triggered request with no User Condition selected"));
+                // One ECU answers every request on one identifier, so UDS requests
+                // may share a response ID among themselves (the unit's transport
+                // tells the responses apart by the request in flight); a receive
+                // message may not share it, since only the first message with an
+                // identifier matches a frame.
+                {
+                    const QString key = QStringLiteral("%1|%2|%3")
+                                            .arg(busIdx).arg(s.extended ? 1 : 0).arg(s.udsResponseAddress);
+                    const auto owner = idUsers.constFind(key);
+                    if (owner == idUsers.constEnd())
+                        idUsers.insert(key, IdOwner{s.name, false, true});
+                    else if (!owner->uds)
+                        add(ValidationIssue::Error, loc,
+                            QStringLiteral("response ID 0x%1 is already received on this bus (by %2) — "
+                                           "only the first message would match")
+                                .arg(QString::number(s.udsResponseAddress, 16).toUpper(), owner->name));
+                }
+            }
+
             if (s.isReceive()) {
                 const QString key = QStringLiteral("%1|%2|%3")
                                         .arg(busIdx).arg(s.extended ? 1 : 0).arg(s.baseAddress);
@@ -147,7 +201,7 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
             static const QList<int> kFdLengths = {0, 1, 2, 3, 4, 5, 6, 7, 8,
                                                   12, 16, 20, 24, 32, 48, 64};
             if (s.fd) {
-                if (!kFdLengths.contains(s.messageLengthBytes))
+                if (!s.isUds() && !kFdLengths.contains(s.messageLengthBytes))
                     add(ValidationIssue::Error, loc,
                         QStringLiteral("message length must be 0–8, 12, 16, 20, 24, 32, 48 or "
                                        "64 bytes (CAN FD)"));
@@ -166,7 +220,16 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                                        busRateLabel(bus.rateKbps))
                             : QStringLiteral("CAN FD frame on a bus without an FD data rate "
                                              "(set one in CAN Bus Setup)"));
-            } else if (s.messageLengthBytes < 0 || s.messageLengthBytes > 8) {
+                // The bit rate switch, a transmit message's own: off only where
+                // the target honours it. Anywhere else the device switches the
+                // bit rate regardless, and a node that needs the whole frame at
+                // the base rate would not get it.
+                if (s.isTransmit() && !s.brs && !config.capacity().brsPerMessage())
+                    add(ValidationIssue::Error, loc,
+                        QStringLiteral("BRS is off, but the target firmware switches the bit "
+                                       "rate on every CAN FD frame (a CAN Triple 2.0 with "
+                                       "firmware 2.0.3 or later can send one without it)"));
+            } else if (!s.isUds() && (s.messageLengthBytes < 0 || s.messageLengthBytes > 8)) {
                 add(ValidationIssue::Error, loc,
                     QStringLiteral("message length must be 0–8 bytes (classic CAN — "
                                    "enable CAN FD for longer frames)"));
@@ -228,7 +291,7 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                         // hand-editable text and a Get can hand back a foreign
                         // configuration, so both are worth naming rather than
                         // letting the device quietly disagree with the file.
-                        if (s.isReceive())
+                        if (s.isReceive() || s.isUds())
                             add(ValidationIssue::Warning, rloc,
                                 QStringLiteral("set to roll over, but this is a receive row — "
                                                "the device always clamps on receive and will "
@@ -415,6 +478,10 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
             }
             if (s.isCrc8()) {
                 ++crc8Sections;
+                crc8Records += config.capacity().crc8LongRules()
+                                   ? qMax(1, (int(s.crcElements.size()) + CRC8_V2_RECORD_ELEMENTS - 1)
+                                                 / CRC8_V2_RECORD_ELEMENTS)
+                                   : 1;
                 // The recipe's own coherence. These sit inside checkSection on
                 // purpose: a concealed section's CRC findings collapse with the
                 // rest of its detail, since a byte location or an element index
@@ -459,6 +526,20 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                         QStringLiteral("element count is 0 — nothing feeds the checksum, so "
                                        "the stamp is the constant init/final-XOR value in "
                                        "every frame"));
+                // How many elements a rule takes: 15 in the one record a rule is
+                // on a CAN Triple, up to 70 on a CAN Triple 2.0 whose rules run
+                // on into more records (store v22, long rules). The mapper
+                // refuses the same recipe; a build before long rules cut it.
+                if (s.crcElements.size() > crcTarget.crc8MaxElements())
+                    add(ValidationIssue::Error, loc,
+                        crcTarget.crc8LongRules()
+                            ? QStringLiteral("%1 CRC elements — a rule takes at most %2")
+                                  .arg(s.crcElements.size())
+                                  .arg(crcTarget.crc8MaxElements())
+                            : QStringLiteral("%1 CRC elements — more than %2 %3")
+                                  .arg(s.crcElements.size())
+                                  .arg(crcTarget.crc8MaxElements())
+                                  .arg(needs20));
                 // Element sanity. Both are warnings, not errors: the firmware
                 // computes exactly what the recipe says, and some protocols
                 // genuinely feed the pre-stamp byte — but each is far more
@@ -579,8 +660,17 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
     // Named the way the preserved-values overflow is: the total, the limit, and
     // how many to take back, because "over capacity" without a number sends the
     // user counting sections by hand.
-    const int maxCrc8 = config.capacity().capacityOf(DeviceTable::Crc8);
-    if (crc8Sections > maxCrc8)
+    const int maxCrc8 = config.capacity().limitOf(DeviceTable::Crc8);
+    // Records where a rule may take more than one (long rules): the table
+    // counts them, and long recipes fill it faster than messages do.
+    if (config.capacity().crc8LongRules()) {
+        if (crc8Records > maxCrc8)
+            add(ValidationIssue::Error, QStringLiteral("Transmit CRC8"),
+                QStringLiteral("the CRC8 rules take %1 records (one per 8 elements), but the "
+                               "device holds at most %2 — shorten or remove some of them")
+                    .arg(crc8Records)
+                    .arg(maxCrc8));
+    } else if (crc8Sections > maxCrc8)
         add(ValidationIssue::Error, QStringLiteral("Transmit CRC8"),
             QStringLiteral("%1 messages stamp a CRC8, but the device runs at most %2 CRC8 "
                            "rules across all buses — remove the checksum from %3 of them")
@@ -610,7 +700,7 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
     };
     for (int busIdx = 0; busIdx < 3; ++busIdx)
         for (const CommsSection &s : config.bus[busIdx].sections)
-            if (s.isReceive() && s.device != SectionDevice::Off) {
+            if ((s.isReceive() || s.isUds()) && s.device != SectionDevice::Off) {
                 // Count each channel at most once per section — a compound
                 // section may legitimately define the same channel in several
                 // identifiers (one per multiplexor value).
@@ -629,6 +719,14 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
     // appear to do nothing.
     for (const Channel &c : ChannelCatalog::deviceChannels())
         addWriter(c.name, QStringLiteral("the device"));
+    // A UDS request's result channel is device-written: the transport tells it
+    // how each request ended, so a calculation also writing it earns the
+    // shared-slot warning like a receive row's channel.
+    for (int busIdx = 0; busIdx < 3; ++busIdx)
+        for (const CommsSection &s : config.bus[busIdx].sections)
+            if (s.isUds() && !s.udsResultChannel.isEmpty())
+                addWriter(s.udsResultChannel,
+                          QStringLiteral("CAN %1 · %2 result").arg(busIdx + 1).arg(s.name));
     // The CRC channel is device-written too: the transmit composer publishes
     // every stamped frame's checksum into its slot. Collected exactly like a
     // receive row's channel so a calculation also writing the name earns the
@@ -1181,10 +1279,11 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
     int rxCount = 0, txCount = 0;
     for (const CanMessageConfig &m : mapped.tables.messages)
         (m.flags & MSGFLAG_TRANSMIT) ? ++txCount : ++rxCount;
-    // The "of" figures are the capacity the tables were mapped against — the
-    // document's, which a Get set to the unit's report — not this build's
-    // constants.
-    const auto holds = [&mapped](DeviceTable t) { return mapped.tables.capacity.capacityOf(t); };
+    // The "of" figures are the limits the tables were mapped against — the
+    // document's target, which a Get set to the unit's report — not this
+    // build's constants. On a target that takes a plan that is each table's
+    // ceiling, and the budget below is what binds.
+    const auto holds = [&mapped](DeviceTable t) { return mapped.tables.capacity.limitOf(t); };
     add(ValidationIssue::Info, QStringLiteral("Device usage"),
         // The 8x8 figure counts DEFINITIONS, which is the capacity a user can
         // exhaust. Its grid rows are a second device table of eight rows per
@@ -1194,7 +1293,7 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
         QStringLiteral("%1/%2 messages (%3 receive + %4 transmit), %5/%6 signals, "
                        "%7/%8 math, %9/%10 conditions, %11/%12 counters, %13/%14 timers, "
                        "%15/%16 constants, %17/%18 relays, %19/%20 2x16 + %21/%22 8x8 tables, "
-                       "%23/%24 integrators, %25/%26 CRC8 rules")
+                       "%23/%24 integrators, %25/%26 %27%28")
             .arg(mapped.tables.messages.size()).arg(holds(DeviceTable::Messages))
             .arg(rxCount).arg(txCount)
             .arg(mapped.tables.signalConfigs.size()).arg(holds(DeviceTable::Signals))
@@ -1207,7 +1306,60 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
             .arg(mapped.tables.tables2x16Def.size()).arg(holds(DeviceTable::Tables2x16Def))
             .arg(mapped.tables.tables8x8Def.size()).arg(holds(DeviceTable::Tables8x8Def))
             .arg(mapped.tables.integrators.size()).arg(holds(DeviceTable::Integrators))
-            .arg(mapped.tables.crc8.size()).arg(holds(DeviceTable::Crc8)));
+            .arg(mapped.tables.crc8.size()).arg(holds(DeviceTable::Crc8))
+            // Records where a rule may take several (long rules), rules elsewhere.
+            .arg(mapped.tables.capacity.crc8LongRules() ? QStringLiteral("CRC8 records")
+                                                        : QStringLiteral("CRC8 rules"))
+            // The UDS requests only where the target has their table (a 2.0 from
+            // store v23): "0/0" on every CAN Triple would say nothing.
+            .arg(mapped.tables.capacity.udsRequests()
+                     ? QStringLiteral(", %1/%2 UDS requests")
+                           .arg(mapped.tables.uds.size()).arg(holds(DeviceTable::Uds))
+                     : QString()));
+
+    // THE BUDGET, on a target that takes a plan (a CAN Triple 2.0 from phase
+    // 4): what the tables take of its configuration storage, working memory
+    // and room for names, and an error for each room they overrun, worded as
+    // the Send's refusal is. The script's chunks are attached at the Send
+    // (mapWithScript) and take configuration storage only, so they are left
+    // out here and the Send counts them.
+    const DeviceCapacity &target = mapped.tables.capacity;
+
+    // CONFIG NOTES: a target that keeps them keeps 16 KB; the file keeps them
+    // all. A warning, since nothing the unit runs depends on them.
+    if (const int bytes = int(config.comments.toUtf8().size());
+        target.keepsNotes() && bytes > LABEL_NOTE_SLOTS_MAX * LABEL_STORE_BYTES)
+        add(ValidationIssue::Warning, QStringLiteral("Config Notes"),
+            QStringLiteral("the notes are %1 bytes; the device keeps the first 16 KB of them "
+                           "with the configuration (the file keeps them all)")
+                .arg(QLocale().toString(bytes)));
+
+    if (target.plansTables()) {
+        const QVector<int> counts = tableCountsOf(mapped.tables);
+        const qint64 references = planReferences(mapped.tables);
+        const int valueNames = valueNamesOf(mapped.tables);
+        const int notes = notesSlotsOf(mapped.tables);
+        const qint64 udsBytes = planUdsBytes(mapped.tables);
+        for (const QString &shortfall :
+             countsExceeding(counts, target, references, valueNames, notes, udsBytes))
+            add(ValidationIssue::Error, QStringLiteral("Device budget"),
+                QStringLiteral("This configuration does not fit the device: %1").arg(shortfall));
+        const PlanCostResult cost = target.planCost(planCapacities(counts), valueNames, notes);
+        if (cost.costed) {
+            const QLocale locale;
+            const bool script = config.hasScriptSource() || !config.scriptBytecode().isEmpty();
+            add(ValidationIssue::Info, QStringLiteral("Device budget"),
+                QStringLiteral("%1 of %2 bytes of configuration storage%3, %4 of %5 bytes of "
+                               "working memory, %6 of %7 bytes of names")
+                    .arg(locale.toString(cost.flashBytes), locale.toString(target.plan.flashBytes),
+                         script ? QStringLiteral(" (the script not counted)") : QString(),
+                         locale.toString(target.arenaWithReferences(cost.arenaBytes, references,
+                                                                    udsBytes)),
+                         locale.toString(target.plan.arenaBytes),
+                         locale.toString(cost.labelBytes),
+                         locale.toString(target.plan.labelRegionBytes)));
+        }
+    }
 
     return issues;
 }

@@ -6,6 +6,7 @@
 #include <QSet>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 
 namespace ct {
@@ -55,6 +56,13 @@ DbcFile parseDbc(const QString &text, QStringList *warnings)
         R"RX(^\s*BA_DEF_DEF_\s+"GenMsgCycleTime"\s+(\d+(?:\.\d+)?)\s*;)RX"));
     int defaultCycleMs = 0;
     QSet<int> statedCycle; // message indices with a BA_ line of their own
+    // VAL_ <msgId> <SigName> <raw> "<name>" <raw> "<name>" ... ;  A signal's
+    // value names. An environment variable's VAL_ has no message id and does not
+    // match; VAL_TABLE_ (a named table no signal line refers to) is skipped.
+    static const QRegularExpression valRe(
+        QStringLiteral(R"RX(^\s*VAL_\s+(\d+)\s+([A-Za-z_]\w*)\s+(.*)$)RX"));
+    static const QRegularExpression valPairRe(
+        QStringLiteral(R"RX((-?\d+(?:\.\d+)?)\s+"([^"]*)")RX"));
 
     // Track the current message by index, not pointer: appending another
     // message can reallocate the QList and dangle a cached pointer.
@@ -187,6 +195,42 @@ DbcFile parseDbc(const QString &text, QStringList *warnings)
                     QStringLiteral("Float signal '%1' has bit length %2 — IEEE754 floats must "
                                    "be 32 bits; the length is forced to 32")
                         .arg(sigName).arg(found->bitLength));
+            continue;
+        }
+
+        // VAL_ lines come after the BO_/SG_ blocks too, so every signal they
+        // name is parsed; found as SIG_VALTYPE_ finds it.
+        if (trimmed.startsWith(QStringLiteral("VAL_"))
+            && !trimmed.startsWith(QStringLiteral("VAL_TABLE_"))) {
+            const auto vm = valRe.match(line);
+            if (!vm.hasMatch())
+                continue;
+            const quint32 rawId = vm.captured(1).toUInt();
+            const QString sigName = vm.captured(2);
+            DbcSignal *found = nullptr;
+            for (DbcMessage &msg : file.messages) {
+                if (msg.rawId != rawId && msg.canId != (rawId & 0x1FFFFFFFu))
+                    continue;
+                for (DbcSignal &s : msg.signalList)
+                    if (s.name == sigName) {
+                        found = &s;
+                        break;
+                    }
+                if (found)
+                    break;
+            }
+            if (!found) {
+                if (warnings)
+                    warnings->append(
+                        QStringLiteral("VAL_ for unknown signal '%1' (message %2) — ignored")
+                            .arg(sigName).arg(rawId));
+                continue;
+            }
+            auto pairs = valPairRe.globalMatch(vm.captured(3));
+            while (pairs.hasNext()) {
+                const auto p = pairs.next();
+                found->valueNames.insert(qint64(p.captured(1).toDouble()), p.captured(2));
+            }
             continue;
         }
     }
@@ -417,6 +461,17 @@ Channel channelFromDbcSignal(const DbcSignal &sig, const QString &channelName)
     const DbcUnit picked = dbcUnitFor(sig.unit);
     c.unit = picked.unit;
     c.quantity = picked.quantity;
+    // Its value names (VAL_), each at the physical value its raw value decodes
+    // to: a channel names whole values, so one that decodes to a fraction (a
+    // scaled signal whose raw steps are not whole units) is left out.
+    for (auto it = sig.valueNames.constBegin(); it != sig.valueNames.constEnd(); ++it) {
+        const double physical = double(it.key()) * sig.factor + sig.offset;
+        const double whole = std::round(physical);
+        const QString name = it.value().trimmed();
+        if (!name.isEmpty() && std::fabs(physical - whole) < 1e-9 && whole >= double(INT_MIN)
+            && whole <= double(INT_MAX))
+            c.enumLabels.insert(int(whole), name);
+    }
     c.decimalPlaces = decimalsForFactor(sig.factor);
     c.baseResolution = std::pow(10.0, -c.decimalPlaces);
 

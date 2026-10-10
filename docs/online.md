@@ -4,11 +4,12 @@ The Online menu moves configurations between the editor and a connected CAN Trip
 
 <table>
 <tr><th>Command</th><th>Shortcut</th><th>What it does</th></tr>
-<tr><td>Connect</td><td></td><td>Opens the serial link. Reuses this session's
-last port; the first connect of a session (or a port that has gone away)
-opens Connection Settings. The status bar's right side shows the result, and
-which board answered — CAN Triple or CAN Triple 2.0 — with its firmware
-version.</td></tr>
+<tr><td>Connect</td><td></td><td>Opens the serial link. Connection Settings
+asks which port to use and closes itself once the link is open; with
+<b>Remember last connection</b> ticked in <b>Tools → Options…</b>, Connect
+goes straight back to the last port and asks only when that port is gone. The
+status bar's right side shows the result, and which board answered — CAN
+Triple or CAN Triple 2.0 — with its firmware version.</td></tr>
 <tr><td>Disconnect</td><td></td><td>Closes the serial link. The device keeps
 running its configuration; the live windows simply stop updating.</td></tr>
 <tr><td>Send Configuration</td><td>F5</td><td>Programs the open document onto the device and saves it to flash.</td></tr>
@@ -35,10 +36,11 @@ To program the device with the open document, choose Online → Send Configurati
 6. **Confirmation.** A dialog summarises what will be sent (messages, channels, math, User Conditions, counters, timers), the bus settings that will be applied, and any mapper warnings. It asks for a required **Configuration Title :** (stored on the device, up to 32 bytes) and offers two checkboxes:
     - **Lock this configuration to this device** — stores the device's unique chip ID with the configuration, so the device refuses to run it if it is copied to a different CAN Triple. Sending to another device re-binds it. Offered only when the firmware can report a device ID.
     - **Reset device after sending** — reboots the unit once the transfer completes.
+    - **Store this project on the unit** — offered by a CAN Triple 2.0, which keeps this whole document with the configuration, so [Get Configuration](#get-project) gives it back as it is now: its script source, comments and every name as typed. Ticked unless you untick it, and the choice is remembered for each document file. Untick it to send the configuration alone; the unit then keeps no project. Greyed, with the reason in its tooltip, when the project is larger than the unit keeps.
 
 > **Note:** Nothing on the device asks for a password because of a message marking — the Protect Communication check above runs before the transfer starts, and acting on it is this program's doing. Earlier releases asked for one during the transfer — the device refused to erase a marked message, so a send to a unit somebody else had protected stopped at the first step. That rule is gone: **removal is permitted at every protection tier**, so a send always clears what the unit is holding. See [Communications Setup](communications.md).
 
-The transfer itself opens with a **configuration clear**: the device's running configuration is erased before the new tables are written. The tables are then sent in chunks, the per-bus CAN setup is applied (v2 firmware; v1 NACKs the step and it is reported as skipped), the sent tables are **verified by reading every record back and comparing the echoed bytes** with what was written, and finally the image is **saved to flash**, which is what makes it boot-persistent — it reloads automatically at every power-up. The configuration's own revision number rides the save step, so the version the device reports afterwards matches the tables it just committed.
+The transfer itself opens with a **configuration clear**: the device's running configuration is erased before the new tables are written. The tables are then sent in chunks, the per-bus CAN setup is applied (v2 firmware; v1 NACKs the step and it is reported as skipped), the sent tables are **verified by reading every record back and comparing the echoed bytes** with what was written, and finally the image is **saved to flash**, which is what makes it boot-persistent — it reloads automatically at every power-up. The configuration's own revision number rides the save step, so the version the device reports afterwards matches the tables it just committed. A project being stored goes in after everything else and is read back with the rest; one that does not go in whole fails the Send before the save, and a CAN Triple 2.0 keeps running what it had.
 
 > **Warning:** Cancelling or losing the link mid-send leaves the device cleared but not reprogrammed — the clear has already happened and the flash save has not. Send again before relying on the unit.
 
@@ -59,11 +61,19 @@ Installs a `.ct3s` package on the connected device **without opening it**: the p
 
 Reads the device's configuration into the editor, replacing the current document (you are asked first if it has unsaved changes). If the device protects "Get a Configuration", that password is proved first.
 
-The read recovers every message, channel, math channel, User Condition, counter, timer, constant, table and integrator, the stored configuration title, and — on current firmware — the live bus setup (mode, bit rates, termination), so what comes back can be re-sent without guessing. A [device script](device-scripts.md) comes back as well, as the **compiled bytecode** the device stores — sending that document back puts the same script on a unit byte for byte. What a Get cannot recover is a script's *Lua source*, because bytecode does not turn back into source: the Script Editor shows a retrieved script as a [read-only disassembly](device-scripts.md#retrieved), and replaces it only if you deliberately ask it to.
+The read recovers every message, channel, math channel, User Condition, counter, timer, constant, table and integrator, the stored configuration title, and — on current firmware — the live bus setup (mode, bit rates, termination), so what comes back can be re-sent without guessing. A [device script](device-scripts.md) comes back as well, as the **compiled bytecode** the device stores — sending that document back puts the same script on a unit byte for byte. What a Get cannot recover from the configuration alone is a script's *Lua source*, because bytecode does not turn back into source: the Script Editor shows a retrieved script as a [read-only disassembly](device-scripts.md#retrieved), and replaces it only if you deliberately ask it to. A CAN Triple 2.0 that keeps the project it was sent with gives the source back with it: see [below](#get-project).
 
 On firmware that cannot report its bus setup, the assumed bring-up rates are used and a note tells you to check Connections → Communications before sending. A bus running listen-only reads back as enabled, and a note is raised whenever that conversion happens.
 
 > **Note:** A device holding a configuration that was locked to a *different* CAN Triple reads back as empty, because its engine refused to load the image. Get Configuration says so instead of handing you a blank document: send a configuration to that device to replace it.
+
+<a id="get-project"></a>
+
+### A CAN Triple 2.0 that keeps its project
+
+A CAN Triple 2.0 sent a configuration with **Store this project on the unit** ticked keeps the document it came from. Get Configuration then opens that document exactly as it was sent: its script's Lua source, its comments, its names and its layout, everything a configuration on its own leaves out. The status bar says so, and the window is titled with the name the project was sent under until you save it, which File → Save As offers.
+
+It is opened only while the unit still runs exactly what was sent with it. If the configuration has been changed since, by another tool writing to the unit, you are asked whether to open the project as it was sent or the configuration as the unit runs it now. A stored project that cannot be read is named in the result, and the configuration is rebuilt from what the unit runs, as on any other unit. A unit sent a configuration without its project, or by a secure package, holds none.
 
 ### Reading a device that holds marked messages
 

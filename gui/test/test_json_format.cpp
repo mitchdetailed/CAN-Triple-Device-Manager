@@ -176,6 +176,38 @@ void testAJsonDocumentKeepsSavingAsJson(const QTemporaryDir &dir)
     CHECK(!isBinaryConfigFile(path));
 }
 
+void testAnOldJsonCt3IsSealedOnSave(const QTemporaryDir &dir)
+{
+    // A legible file NAMED .ct3 is one from before the sealed formats (or a
+    // script's). Nobody chose JSON for it, so it is a sealed document on load and
+    // its next Save seals it, as the help says (Mitch, 2026-10-08). A .json keeps
+    // saving as JSON (the test above); the suffix is what says JSON was chosen.
+    Configuration source;
+    build(source);
+    const QString path = dir.filePath(QStringLiteral("before-sealing.ct3"));
+    REQUIRE(source.saveJsonToFile(path, nullptr));
+    CHECK(!isBinaryConfigFile(path) && bytesOf(path).contains("ECU Temps"));
+
+    Configuration back;
+    REQUIRE(back.loadFromFile(path, nullptr));
+    CHECK(back.fileFormat() == Configuration::FileFormat::Sealed);
+    // The route MainWindow::onSave takes for a sealed document.
+    REQUIRE(back.saveToFile(back.filePath(), nullptr));
+    CHECK(isBinaryConfigFile(path));
+    CHECK(!bytesOf(path).contains("ECU Temps"));
+    Configuration again;
+    REQUIRE(again.loadFromFile(path, nullptr));
+    REQUIRE(again.bus[0].sections.size() == 1);
+    CHECK(again.bus[0].sections.first().name == QStringLiteral("ECU Temps"));
+
+    // Whatever the case of the suffix, .json is a choice.
+    const QString upper = dir.filePath(QStringLiteral("CHOSEN.JSON"));
+    REQUIRE(source.saveJsonToFile(upper, nullptr));
+    Configuration chosen;
+    REQUIRE(chosen.loadFromFile(upper, nullptr));
+    CHECK(chosen.fileFormat() == Configuration::FileFormat::Json);
+}
+
 void testSealedIsStillTheDefaultEverywhere(const QTemporaryDir &dir)
 {
     // THE GUARD. JSON is opt-in, and every path that did not opt in stays
@@ -309,6 +341,7 @@ int main(int argc, char **argv)
     testJsonIsActuallyReadable(dir);
     testJsonRoundTrips(dir);
     testAJsonDocumentKeepsSavingAsJson(dir);
+    testAnOldJsonCt3IsSealedOnSave(dir);
     testSealedIsStillTheDefaultEverywhere(dir);
     testNewDocumentDoesNotInheritAFormat(dir);
     testASecureDocumentIsNotDowngradedByOpeningJson(dir);

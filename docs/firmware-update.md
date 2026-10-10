@@ -38,6 +38,8 @@ So the update reads the configuration out first and saves it as a dated `.ct3` f
 
 If the device does come back empty, the program offers to send the backup straight back. On a password-protected device you will be asked for the Send Configuration password again at that point — the restart clears the device's memory of it, which is expected.
 
+On a CAN Triple 2.0 that keeps the project its configuration was sent with, and still runs exactly that, the backup *is* that project, saved as `device-project-`*date*`.ct3`: your document as you sent it, script source and comments included. Restoring it sends it back and stores the project on the unit again. See [Keeping the project](can-triple-2.md#project).
+
 If the backup *fails*, the update does not start. Continuing would destroy the very thing the backup was protecting.
 
 ## Warnings you may see
@@ -58,6 +60,16 @@ wrote it, so it will start up with no configuration exactly as for a format
 change. Keep the backup ticked. After the update, open the document and set
 <b>File → Target Firmware…</b> to the connected device before
 sending, so the document is sized for what the unit now holds.</td></tr>
+
+<tr><td>This is a production build</td>
+<td>A CAN Triple 2.0 whose readout protection is off, and an image that turns
+it on the first time it starts, as the firmware that comes with the Device
+Manager does. Readout protection keeps the unit's memory from being read
+through its debug connector: once it is on, the unit can be read or programmed
+there only after a complete erase, licence and configuration included.
+Updates through the Device Manager work exactly as before. A unit you receive
+already has it on, and the window then shows <b>Readout protection: on</b> and
+says nothing more.</td></tr>
 
 <tr><td>This image is OLDER than the firmware the device is running</td>
 <td>Going backwards is allowed, but rarely intended. Check you picked the right
@@ -80,6 +92,24 @@ Triple (or the reverse)</td>
 <td>There are two boards, the CAN Triple and the CAN Triple 2.0, and each takes
 its own firmware. The <b>Device</b> panel names the board, and the file's panel
 names the board the file is for. Pick the file for this unit's board.</td></tr>
+
+<tr><td>This image is firmware for the …, but this unit's product record says it
+is a …</td>
+<td>Every unit carries a product record burned in at manufacture, which no
+firmware can change; the <b>Device</b> panel shows it. A blank record or
+<b>CAN Triple</b> is a CAN Triple and takes 1.x firmware only; <b>CAN Triple
+V2</b> is a CAN Triple 2.0 and takes 2.0 firmware only. The record decides,
+whatever firmware the unit happens to be running, so firmware for the other
+board is refused before anything is sent.</td></tr>
+
+<tr><td>This unit reports itself as a …, but its product record says it is a
+…</td>
+<td>The firmware the unit runs claims one board and its record names the other.
+Nothing is sent until the two agree; the record is the one to trust.</td></tr>
+
+<tr><td>This unit's product record says "…", which this version of the Device
+Manager does not know</td>
+<td>A product newer than this program. Update the Device Manager.</td></tr>
 
 <tr><td>This unit is a … This version of the Device Manager does not update
 that board</td>

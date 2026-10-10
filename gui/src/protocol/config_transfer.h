@@ -97,6 +97,20 @@ public:
     // a unit reported without a link or a device.
     static QList<QPair<quint8, QByteArray>> planGetRequestsForTest(const DeviceCapacity &capacity);
 
+    // The configuration a unit holds, as a fingerprint (kStoredProjectFingerprintBytes):
+    // every table's records in the form the unit takes them (sliced on a CAN
+    // Triple 2.0 that keeps its names apart) and, there, the names, each list
+    // cut after its last entry that holds anything, which is where a Send
+    // stops writing and a Get's zero-filled tail begins. A Send stamps it into
+    // the stored project's header (stored_project.h) from exactly the tables
+    // it writes; a Get computes it from what it read. The two agree exactly
+    // when nothing has changed the configuration's records or names since. The
+    // bus setup, the configuration's name, the message passwords and the
+    // device channels are not part of it: a Send does not read them back, and
+    // the bus setup a unit reports is the one it is running, which a script
+    // can change without the configuration changing.
+    static QByteArray configurationFingerprint(const DeviceTables &tables);
+
     void cancel();
 
     // Configuration name read back from the device (get() only, valid after
@@ -190,6 +204,14 @@ private:
         // read step: a CMD_READ_LABELS reply of this LABEL_KIND_*, into the
         // matching DeviceTables label list; -1 = not a label read.
         int captureLabels = -1;
+        // read step: a CMD_READ_PROJECT reply, appended to
+        // DeviceTables::storedProject. The header's plans the body's reads.
+        bool captureProject = false;
+        // read step: a CMD_GET_USAGE reply, from a unit that takes a plan. It
+        // says how many records each table of the running configuration holds,
+        // and plans the reads of the tables and their names that far
+        // (tableReadSteps), behind itself.
+        bool captureUsage = false;
         QByteArray expectedEcho; // verify steps: expected response payload
         // Marks the read-back phase. expectedEcho would nearly do, but this is
         // also what runNext() scans forward over to abandon the REST of the
@@ -203,6 +225,16 @@ private:
                         std::optional<quint16> configVersion, const QString &configName,
                         bool resetAfter);
     void buildGetSteps(const DeviceCapacity &capacity);
+    // A Get's reads of the stored project's bytes [from, to), behind the steps
+    // planned so far.
+    void addProjectReads(int from, int to);
+    // A Get's reads of each table over [0, ranges[table]) (ranges indexed by
+    // DeviceTable), records and then, on a unit that keeps them apart, names;
+    // from the counters on optional, as ever. `labelSlots`: GET_USAGE's slots
+    // for each label kind the running configuration's names have (phase 4,
+    // step 3b), which add its units and value names; empty, the names alone.
+    QList<Step> tableReadSteps(const QVector<int> &ranges, const DeviceCapacity &capacity,
+                               const QVector<int> &labelSlots = {}) const;
     // Runs over the freshly built plan; a non-empty m_buildFault stops the
     // transfer before its first request, with the fix in the message. See the
     // definition for the six-entry history this guard answers to.

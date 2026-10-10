@@ -1136,7 +1136,7 @@ ConfigPatch TablesDialog::liveView() const
 
 void TablesDialog::onAdd2x16()
 {
-    const int limit = m_config->capacity().capacityOf(DeviceTable::Tables2x16Def);
+    const int limit = m_config->capacity().limitOf(DeviceTable::Tables2x16Def);
     if (m_rows2x16.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
                              tr("The device supports at most %1 2x16 tables.").arg(limit));
@@ -1156,7 +1156,7 @@ void TablesDialog::onAdd2x16()
 
 void TablesDialog::onAdd8x8()
 {
-    const int limit = m_config->capacity().capacityOf(DeviceTable::Tables8x8Def);
+    const int limit = m_config->capacity().limitOf(DeviceTable::Tables8x8Def);
     if (m_rows8x8.size() >= limit) {
         QMessageBox::warning(this, windowTitle(),
                              tr("The device supports at most %1 8x8 tables.").arg(limit));
@@ -1307,14 +1307,21 @@ void TablesDialog::commit()
         dropIfGone(n);
     for (const QString &n : m_orig8x8)
         dropIfGone(n);
+    // An output keeps the value names it was given (Edit Custom Channel): the
+    // table says nothing about them.
+    const auto output = [this](const QString &name, const QString &dataType, int decimals) {
+        Channel ch = channelForOutput(name, dataType, decimals);
+        ch.enumLabels = m_config->catalog().findByName(name).enumLabels;
+        return ch;
+    };
     for (const Table2x16Row &t : m_rows2x16)
         if (!t.outputChannel.isEmpty())
             m_config->catalog().addOrUpdateUserChannel(
-                channelForOutput(t.outputChannel, t.dataType, t.decimalPlaces));
+                output(t.outputChannel, t.dataType, t.decimalPlaces));
     for (const Table8x8Row &t : m_rows8x8)
         if (!t.outputChannel.isEmpty())
             m_config->catalog().addOrUpdateUserChannel(
-                channelForOutput(t.outputChannel, t.dataType, t.decimalPlaces));
+                output(t.outputChannel, t.dataType, t.decimalPlaces));
 
     m_config->setDirty();
 }
