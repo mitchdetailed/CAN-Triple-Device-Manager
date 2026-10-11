@@ -278,6 +278,13 @@ constexpr unsigned kCmdOverrideLease = CMD_OVERRIDE_LEASE;
 constexpr unsigned kCmdClearOverrides = CMD_CLEAR_OVERRIDES;
 constexpr unsigned kOverrideLeaseMs = OVERRIDE_LEASE_MS;
 constexpr unsigned kCapacityReportFormat = CAPACITY_REPORT_FORMAT;
+// 1.0.16: compound identifiers of 4 bytes on received messages, the report's
+// CAN feature and the four bits that carry the mask's upper digits.
+constexpr unsigned kCanSelector32Rx = CAPACITY_CAN_SELECTOR_32_RX;
+constexpr unsigned kSigFlagRxMuxHiD4 = SIG_FLAG_RX_MUXHI_D4;
+constexpr unsigned kSigFlagRxMuxHiD5 = SIG_FLAG_RX_MUXHI_D5;
+constexpr unsigned kSigFlagRxMuxHiD6 = SIG_FLAG_RX_MUXHI_D6;
+constexpr unsigned kSigBitsRxMuxHiD7 = SIG_BITS_RX_MUXHI_D7;
 constexpr int kFlashNumTables = FLASH_NUM_TABLES;
 static const ::CapacityReport kCapacityFromList = CAPACITY_REPORT_INIT;
 constexpr int kOtpInfoLen = OTP_INFO_LEN;
@@ -405,6 +412,11 @@ constexpr unsigned kLicenseKeyClear = LICENSE_KEY_CLEAR;
 #undef CMD_CLEAR_OVERRIDES
 #undef OVERRIDE_LEASE_MS
 #undef CAPACITY_REPORT_FORMAT
+#undef CAPACITY_CAN_SELECTOR_32_RX
+#undef SIG_FLAG_RX_MUXHI_D4
+#undef SIG_FLAG_RX_MUXHI_D5
+#undef SIG_FLAG_RX_MUXHI_D6
+#undef SIG_BITS_RX_MUXHI_D7
 #undef OTP_INFO_LEN
 #undef OTP_INFO_MANUFACTURER_AT
 #undef OTP_INFO_MANUFACTURER_LEN
@@ -8392,6 +8404,192 @@ static void testConfigTransferSendAndGetAgainstTheDevice(const SerialProtoCallba
     }
 }
 
+// COMPOUND IDENTIFIERS OF 4 BYTES ON A RECEIVED MESSAGE, a CAN Triple from
+// 1.0.16 (Mitch, 2026-10-10: "Byte 0 & 0xF0, byte 1 & 0xFF, byte 2 & 0xFF,
+// byte 3 & 0xFF"). Mapped against the unit's own report, sent through the real
+// classes, gated by the real engine, and read back whole; the built-in numbers
+// (a 1.0.15, which shares store v20) are refused at the Send, and a
+// transmitted one, which a CAN Triple compares in 2 bytes, by the mapper. Each
+// of the mask's four upper digits is its own: a third identifier names only
+// the outer digits of bytes 2 and 3 (00 00 0F F0), its lower half empty. And
+// the requirement check a sealed package leads with answers as protocol.h
+// says.
+static void testWideReceiveIdentifierAgainstTheDevice(const SerialProtoCallbacks *restore)
+{
+    EngineCallbacks cb{};
+    cb.transmit_can = captureTransmit;
+    engine_init(&cb);
+    engine_set_access_keys(nullptr);
+    serial_proto_init(restore);
+    flashErase();
+
+    ct::FakeDeviceLink capLink(firmwareReply);
+    ct::DeviceCapacity unit;
+    {
+        QString err;
+        CHECK(ct::device_session::readCapacity(&capLink, &unit, &err));
+    }
+    CHECK(unit.reported && unit.selector32Receive() && !unit.selector32()
+          && !unit.isCanTriple2());
+
+    quint32 mask = 0;
+    CHECK(ct::parseCompoundBytes(QStringLiteral("F0 FF FF FF"), &mask) && mask == 0xFFFFFFF0u);
+    const auto build = [&](ct::Configuration &cfg, ct::SectionDevice device, bool third) {
+        cfg.setCapacity(unit);
+        cfg.bus[0].enabled = true;
+        for (const char *n : {"Wide A", "Wide B", "Wide C"}) {
+            ct::Channel ch;
+            ch.name = QString::fromLatin1(n);
+            ch.dataType = QStringLiteral("u8");
+            ch.minValue = 0;
+            ch.maxValue = 255;
+            cfg.catalog().addOrUpdateUserChannel(ch);
+        }
+        ct::CommsSection s;
+        s.name = QStringLiteral("Wide");
+        s.device = device;
+        s.baseAddress = 0x300;
+        s.messageLengthBytes = 8;
+        s.alignment = ct::SectionAlignment::WordSwap;
+        s.transmitPeriodMs = 100;
+        s.compound = true;
+        const auto ident = [&](const char *idBytes, const char *maskBytes, const char *channel,
+                               int byte) {
+            ct::CompoundIdentifier i;
+            quint32 id = 0, m = 0;
+            CHECK(ct::parseCompoundBytes(QString::fromLatin1(idBytes), &id)
+                  && ct::parseCompoundBytes(QString::fromLatin1(maskBytes), &m));
+            i.id = id;
+            i.idMask = m;
+            i.configured = true;
+            ct::CommsChannelRow row;
+            row.channelName = QString::fromLatin1(channel);
+            row.startBit = byte * 8;
+            row.bitLength = 8;
+            i.rows.append(row);
+            return i;
+        };
+        s.identifiers.append(ident("10 10 20 30", "F0 FF FF FF", "Wide A", 4));
+        s.identifiers.append(ident("10 10 20 31", "F0 FF FF FF", "Wide B", 5));
+        if (third)
+            s.identifiers.append(ident("00 00 05 30", "00 00 0F F0", "Wide C", 7));
+        cfg.bus[0].sections.append(s);
+    };
+
+    ct::Configuration cfg;
+    build(cfg, ct::SectionDevice::ReceiveMessage, true);
+    const ct::MappingResult mapped = ct::mapToDevice(cfg);
+    CHECK(mapped.ok());
+    const int a = mapped.channelToSignal.value(QStringLiteral("wide a"), -1);
+    const int b = mapped.channelToSignal.value(QStringLiteral("wide b"), -1);
+    const int c = mapped.channelToSignal.value(QStringLiteral("wide c"), -1);
+    CHECK(a >= 0 && b >= 0 && c >= 0);
+    if (a < 0 || b < 0 || c < 0)
+        return;
+    // The upper halves in the record's spare room: the identifier's in
+    // tx_source, the mask's four digits in the four bits.
+    const ct::CanSignalConfig &sa = mapped.tables.signalConfigs[a];
+    CHECK(ct::sigRxMuxMaskHi(sa) == 0xFFFF && sa.tx_source == 0x3020 && sa.mux_mask == 0xFFF0
+          && sa.mux_id == 0x1010);
+    const ct::CanSignalConfig &sc = mapped.tables.signalConfigs[c];
+    CHECK(ct::sigRxMuxMaskHi(sc) == 0xF00F && sc.tx_source == 0x3005 && sc.mux_mask == 0
+          && sc.mux_id == 0);
+    // Built-in numbers (no word of it, as a 1.0.15) and the Send refuses.
+    CHECK(!ct::tablesExceeding(mapped.tables, ct::DeviceCapacity::builtIn()).isEmpty());
+    CHECK(ct::tablesExceeding(mapped.tables, unit).isEmpty());
+
+    // Saved, as the application's Send does: CLEAR holds the engine and only
+    // the SAVE publishes what was written (engine_core.c, "A HALF-WRITTEN
+    // CONFIGURATION DOES NOT RUN").
+    ct::FakeDeviceLink link(firmwareReply);
+    TransferOutcome sent;
+    runTransfer(ct::ConfigTransfer::send(&link, ct::tablesForUnit(mapped.tables, unit),
+                                         /*verify=*/true, {}, /*saveToFlash=*/true),
+                &sent);
+    CHECK(sent.done && sent.ok);
+    if (!sent.ok)
+        std::printf("      send error: %s\n", qPrintable(sent.error));
+
+    const auto frame = [](std::initializer_list<int> bytes) {
+        uint8_t f[8]{};
+        int k = 0;
+        for (int v : bytes)
+            f[k++] = uint8_t(v);
+        engine_process_can(1, 0x300, 0, 0, f, 8);
+    };
+    // The three channels as the unit decoded them.
+    const auto now = [&](float va, float vb, float vc) {
+        return engine_signal_value(quint16(a)) == va && engine_signal_value(quint16(b)) == vb
+               && engine_signal_value(quint16(c)) == vc;
+    };
+    frame({0x15, 0x10, 0x20, 0x30, 0xAA, 0xBB, 0, 0xC1}); // byte 0's low digit is not compared
+    CHECK(now(0xAA, 0, 0));
+    frame({0x1F, 0x10, 0x20, 0x31, 0x11, 0x22, 0, 0xC2}); // byte 3's low digit: B, not A
+    CHECK(now(0xAA, 0x22, 0));
+    frame({0x25, 0x10, 0x20, 0x30, 0x55, 0x66, 0, 0xC3}); // byte 0's high digit: neither
+    CHECK(now(0xAA, 0x22, 0));
+    frame({0x10, 0x10, 0x21, 0x30, 0x77, 0x88, 0, 0xC4}); // byte 2's low digit
+    CHECK(now(0xAA, 0x22, 0));
+    frame({0x10, 0x10, 0x30, 0x30, 0x99, 0x99, 0, 0xC5}); // byte 2's high digit
+    CHECK(now(0xAA, 0x22, 0));
+    frame({0x10, 0x10, 0x20, 0x40, 0x99, 0x99, 0, 0xC6}); // byte 3's high digit
+    CHECK(now(0xAA, 0x22, 0));
+    // The third: byte 2's low digit 5 and byte 3's high digit 3, the other
+    // digits of those bytes, and bytes 0 and 1, free.
+    frame({0x00, 0x00, 0xA5, 0x3B, 0x99, 0x99, 0, 0xC7});
+    CHECK(now(0xAA, 0x22, 0xC7));
+    frame({0xFF, 0xFF, 0x55, 0x4B, 0x99, 0x99, 0, 0xC8}); // byte 3's high digit 4
+    CHECK(now(0xAA, 0x22, 0xC7));
+    frame({0x12, 0x34, 0x56, 0x3B, 0x99, 0x99, 0, 0xC9}); // byte 2's low digit 6
+    CHECK(now(0xAA, 0x22, 0xC7));
+    frame({0x12, 0x34, 0x05, 0x30, 0x99, 0x99, 0, 0xCA}); // the free digits 0
+    CHECK(now(0xAA, 0x22, 0xCA));
+    std::printf("  a received 4-byte identifier, byte 0 & F0 : gated by the 1.x engine as sent, "
+                "digit by digit\n");
+
+    // A Get brings the identifiers back whole.
+    ct::FakeDeviceLink getLink(firmwareReply);
+    TransferOutcome got;
+    runTransfer(ct::ConfigTransfer::get(&getLink, nullptr, unit), &got);
+    CHECK(got.done && got.ok && got.gotTables);
+    ct::Configuration back;
+    ct::mapFromDevice(got.tables, back);
+    bool foundA = false, foundB = false, foundC = false;
+    for (const ct::CommsSection &s : back.bus[0].sections)
+        for (const ct::CompoundIdentifier &i : s.identifiers) {
+            foundA = foundA || (i.id == 0x30201010u && i.idMask == 0xFFFFFFF0u && i.rows.size() == 1);
+            foundB = foundB || (i.id == 0x31201010u && i.idMask == 0xFFFFFFF0u && i.rows.size() == 1);
+            foundC = foundC || (i.id == 0x30050000u && i.idMask == 0xF00F0000u && i.rows.size() == 1);
+        }
+    CHECK(foundA && foundB && foundC);
+    CHECK(back.retainedChannels.isEmpty()); // bit 31 is a mask digit here, not "keep"
+
+    // Transmitted, a CAN Triple compares 2 bytes: refused by name.
+    ct::Configuration txCfg;
+    build(txCfg, ct::SectionDevice::TransmitMessage, false);
+    const ct::MappingResult txMapped = ct::mapToDevice(txCfg);
+    CHECK(!txMapped.ok()
+          && txMapped.errors.join(QStringLiteral(" "))
+                 .contains(QStringLiteral("transmits identifiers of up to 2 bytes")));
+
+    // The requirement check (protocol.h, CMD_GET_CAPACITY): ACK for what this
+    // firmware has, ERR_INVALID_CMD for what it lacks (the 2.0's compound
+    // identifiers of 4 bytes both ways), ERR_INVALID_LEN for any other payload.
+    const auto need = [](quint16 bits) {
+        QByteArray p(2, '\0');
+        qToLittleEndian<quint16>(bits, p.data());
+        return p;
+    };
+    CHECK(expectAck(ct::CMD_GET_CAPACITY, need(ct::CAPACITY_CAN_SELECTOR_32_RX)));
+    CHECK(expectAck(ct::CMD_GET_CAPACITY, need(0)));
+    CHECK(expectNack(ct::CMD_GET_CAPACITY, need(ct::CAPACITY_CAN_SELECTOR_32), ct::ERR_INVALID_CMD));
+    CHECK(expectNack(ct::CMD_GET_CAPACITY,
+                     need(ct::CAPACITY_CAN_SELECTOR_32_RX | ct::CAPACITY_CAN_SELECTOR_32),
+                     ct::ERR_INVALID_CMD));
+    CHECK(expectNack(ct::CMD_GET_CAPACITY, QByteArray(3, '\0'), ct::ERR_INVALID_LEN));
+    std::printf("  the requirement check              : ACK for 0x0010, ERR_INVALID_CMD for 0x0008\n");
+}
+
 // A document whose target keeps its names apart (a CAN Triple 2.0), sent to
 // this unit, which keeps them in its records. In the document's own form this
 // firmware refuses the first record, and only after the CLEAR, which here
@@ -9434,6 +9632,19 @@ static void testBuilderPackageEndToEnd(const SerialProtoCallbacks *restore)
                     || f.contains(QByteArrayLiteral("not for the customer"));
         }
         CHECK(names && !notes);
+        // Its channel records are the 32-byte form, this target comparing no
+        // identifier of 4 bytes; built for 2.0.6, a package says it writes the
+        // 36-byte one, so the verdict can hold each to its units.
+        CHECK(!info.policy.signalRecordsHigh && !info.policy.receivedSelectors32);
+        ct::DeviceCapacity cap206 = cap20;
+        cap206.canFeatures |= ct::CAPACITY_CAN_SELECTOR_32;
+        noted.setCapacity(cap206);
+        CHECK(noted.saveToFile(notedPath, &err));
+        req.outputPath = dir.filePath(QStringLiteral("noted206.ct3s"));
+        CHECK(ct::buildSecurePackage(req).ok);
+        ct::SecureFileInfo info206;
+        CHECK(ct::readSecureInstall(req.outputPath, &info206, &err));
+        CHECK(info206.policy.signalRecordsHigh && !info206.policy.receivedSelectors32);
     }
 
     // ---- 6c. a package that sends CAN FD without the bit rate switch ----------
@@ -9471,6 +9682,95 @@ static void testBuilderPackageEndToEnd(const SerialProtoCallbacks *restore)
         };
         CHECK(built(false));
         CHECK(!built(true));
+    }
+
+    // ---- 6d. a package that receives compound identifiers of 4 bytes ----------
+    // in a CAN Triple's records (1.0.16): its policy says so, its stream asks
+    // the unit first (the capacity request's requirement check, before the
+    // CLEAR), and it installs on this firmware, which gates the frames as a
+    // Send would have had it. A unit that could not say what it compares is
+    // not offered it.
+    {
+        ct::FakeDeviceLink capLink(firmwareReply);
+        ct::DeviceCapacity unitCap;
+        CHECK(ct::device_session::readCapacity(&capLink, &unitCap, &err));
+        ct::Configuration wide;
+        fillTransferFixture(wide);
+        wide.setConfigTitle(QStringLiteral("Wide receive"));
+        wide.setCapacity(unitCap);
+        ct::Channel ch;
+        ch.name = QStringLiteral("Wide A");
+        ch.dataType = QStringLiteral("u8");
+        ch.minValue = 0;
+        ch.maxValue = 255;
+        wide.catalog().addOrUpdateUserChannel(ch);
+        ct::CommsSection s;
+        s.name = QStringLiteral("Wide");
+        s.device = ct::SectionDevice::ReceiveMessage;
+        s.baseAddress = 0x300;
+        s.messageLengthBytes = 8;
+        s.alignment = ct::SectionAlignment::WordSwap;
+        s.compound = true;
+        ct::CompoundIdentifier ident;
+        ident.id = 0x30201010u;     // 10 10 20 30
+        ident.idMask = 0xFFFFFFF0u; // F0 FF FF FF
+        ident.configured = true;
+        ct::CommsChannelRow row;
+        row.channelName = ch.name;
+        row.startBit = 32;
+        row.bitLength = 8;
+        ident.rows.append(row);
+        s.identifiers.append(ident);
+        wide.bus[0].sections.append(s);
+        const ct::MappingResult wideMapped = ct::mapToDevice(wide);
+        CHECK(wideMapped.ok());
+        const int wa = wideMapped.channelToSignal.value(QStringLiteral("wide a"), -1);
+        CHECK(wa >= 0);
+        const QString src = dir.filePath(QStringLiteral("wide-rx.ct3"));
+        CHECK(wide.saveToFile(src, &err));
+        ct::PackageBuildRequest req;
+        req.sourcePath = src;
+        req.outputPath = dir.filePath(QStringLiteral("wide-rx.ct3s"));
+        req.fleetPassphrase = passphrase;
+        const ct::PackageBuildResult built = ct::buildSecurePackage(req);
+        CHECK(built.ok);
+        ct::SecureFileInfo info;
+        CHECK(ct::readSecureInstall(req.outputPath, &info, &err));
+        CHECK(info.policy.receivedSelectors32 && !info.policy.signalRecordsHigh);
+        const QList<QByteArray> inner = innerFrames(info.installStream);
+        CHECK(!inner.isEmpty() && quint8(inner[0][0]) == ct::CMD_GET_CAPACITY
+              && inner[0].mid(1) == QByteArray::fromHex("1000"));
+        // Judged: refused where the unit could not say, offered where it says
+        // it compares them.
+        CHECK(ct::packageInstallVerdict(info.policy, facts).receivedSelectors32Missing);
+        ct::DeviceMatchFacts wideFacts = facts;
+        wideFacts.capacityKnown = true;
+        wideFacts.capacity = unitCap;
+        CHECK(ct::packageInstallVerdict(info.policy, wideFacts).ok());
+        freshUnit();
+        {
+            ct::FakeDeviceLink link(firmwareReply);
+            RelayOutcome out;
+            runRelay(ct::SealedInstall::run(&link, info.installStream), &out);
+            CHECK(out.done && out.ok);
+            if (!out.ok)
+                std::printf("      relay: %s\n", qPrintable(out.error));
+        }
+        if (wa >= 0) {
+            uint8_t f[8] = {0x15, 0x10, 0x20, 0x30, 0xAA, 0, 0, 0};
+            engine_process_can(1, 0x300, 0, 0, f, 8);
+            CHECK(engine_signal_value(quint16(wa)) == float(0xAA));
+            f[1] = 0x11; // byte 1 differs
+            f[4] = 0x55;
+            engine_process_can(1, 0x300, 0, 0, f, 8);
+            CHECK(engine_signal_value(quint16(wa)) == float(0xAA));
+        }
+        // A package without such an identifier asks nothing first.
+        ct::SecureFileInfo plainInfo;
+        CHECK(ct::readSecureInstall(installOnly, &plainInfo, &err));
+        CHECK(!plainInfo.policy.receivedSelectors32);
+        const QList<QByteArray> plainInner = innerFrames(plainInfo.installStream);
+        CHECK(!plainInner.isEmpty() && quint8(plainInner[0][0]) != ct::CMD_GET_CAPACITY);
     }
 
     // ---- refusals ------------------------------------------------------------
@@ -9592,7 +9892,14 @@ static void testReadoutProtection(const SerialProtoCallbacks *restore)
 static void testCapacityReport(const SerialProtoCallbacks *restore)
 {
     CHECK(ct::CMD_GET_CAPACITY == fw::kCmdGetCapacity);
-    CHECK(ct::CAPACITY_REPORT_FORMAT == fw::kCapacityReportFormat);
+    // Format 2 from 1.0.16: the entries, then the head of the 2.0's extension
+    // block, saying the CAN features (CAPACITY_CAN_SELECTOR_32_RX).
+    CHECK(ct::CAPACITY_REPORT_FORMAT_EXT == fw::kCapacityReportFormat);
+    CHECK(ct::CAPACITY_CAN_SELECTOR_32_RX == fw::kCanSelector32Rx
+          && ct::SIG_FLAG_RX_MUXHI_D4 == fw::kSigFlagRxMuxHiD4
+          && ct::SIG_FLAG_RX_MUXHI_D5 == fw::kSigFlagRxMuxHiD5
+          && ct::SIG_FLAG_RX_MUXHI_D6 == fw::kSigFlagRxMuxHiD6
+          && ct::SIG_BITS_RX_MUXHI_D7 == fw::kSigBitsRxMuxHiD7);
     // The 1.x firmware's tables are the first DEVICE_TABLE_COUNT_1X of the
     // DEVICE_TABLE_COUNT this build understands; the sixteenth is the 2.0's
     // UDS requests, which test_firmware_v2 holds to the 2.0 firmware.
@@ -9650,6 +9957,11 @@ static void testCapacityReport(const SerialProtoCallbacks *restore)
     }
     CHECK(cap.storeVersion == FLASH_STORE_VERSION);
     CHECK(cap.tables.size() == FLASH_NUM_TABLES);
+    // 1.0.16: 32-bit compound identifiers of received messages, and nothing
+    // else stated in the extension (a 1.x states no retained values or script
+    // model there; those read as the numbers a host always assumed).
+    CHECK(cap.selector32Receive() && !cap.selector32() && cap.retainedValues == 0
+          && cap.scriptBudget == 0);
     for (int t = 0; t < FLASH_NUM_TABLES; ++t) {
         CHECK(cap.tables[t].capacity == flash_store_capacity(t));
         CHECK(cap.tables[t].itemSize == flash_store_item_size(t));
@@ -9692,7 +10004,7 @@ static void testCapacityReport(const SerialProtoCallbacks *restore)
         CHECK(!ct::parseCapacityReport(raw.left(3), &bad));             // short header
         CHECK(!ct::parseCapacityReport(raw.left(raw.size() - 1), &bad)); // an entry cut short
         QByteArray newer = raw;
-        newer[0] = char(2);
+        newer[0] = char(3);
         CHECK(!ct::parseCapacityReport(newer, &bad)); // a format this build cannot read
         CHECK(!bad.reported);
         // Trailing bytes are the image case — code follows the block — and
@@ -9700,14 +10012,18 @@ static void testCapacityReport(const SerialProtoCallbacks *restore)
         CHECK(ct::parseCapacityReport(raw + QByteArray(100, char(0xAB)), &bad));
         CHECK(bad.sameLayout(cap));
         // An appended sixteenth table parses, indexes past everything this
-        // build names, and makes the layout a different one.
+        // build names, and makes the layout a different one. Appended to the
+        // entries, which the extension follows (format 2, 1.0.16).
         QByteArray longer = raw;
         longer[1] = char(FLASH_NUM_TABLES + 1);
-        longer.append(QByteArray::fromHex("0a000c00")); // 10 records of 12 bytes
+        longer.insert(int(sizeof(::CapacityReportHeader))
+                          + FLASH_NUM_TABLES * int(sizeof(::CapacityEntry)),
+                      QByteArray::fromHex("0a000c00")); // 10 records of 12 bytes
         CHECK(ct::parseCapacityReport(longer, &bad));
         CHECK(bad.tables.size() == FLASH_NUM_TABLES + 1);
         CHECK(bad.capacityOf(ct::DeviceTable::Crc8) == ct::MAX_CRC8_MESSAGES);
-        CHECK(bad.tables.last().capacity == 10 && bad.tables.last().itemSize == 12);
+        CHECK(!bad.tables.isEmpty() && bad.tables.last().capacity == 10
+              && bad.tables.last().itemSize == 12);
         CHECK(!bad.sameLayout(cap));
     }
     // The reader on a unit whose report this build cannot read: an error that
@@ -9716,7 +10032,7 @@ static void testCapacityReport(const SerialProtoCallbacks *restore)
     {
         ct::FakeDeviceLink link([&raw](quint8, const QByteArray &) {
             QByteArray newer = raw;
-            newer[0] = char(2);
+            newer[0] = char(3); // 1 and 2 (an extension follows the entries) read
             return ct::FakeDeviceLink::Reply::ack(newer);
         });
         ct::DeviceCapacity c;
@@ -13212,6 +13528,7 @@ int main(int argc, char *argv[])
     testMessagePasswordSlotSurvivesTheDevice(&protoCb);
     testMessagePasswordRecordRoundTrip(&protoCb);
     testConfigTransferSendAndGetAgainstTheDevice(&protoCb);
+    testWideReceiveIdentifierAgainstTheDevice(&protoCb);
     testNamesApartDocumentToARecordsUnit(&protoCb);
     testConfigTransferRefusesToSwallowAFatalStep(&protoCb);
     testFirmwareUpdaterUploadsAndCancels(&protoCb);

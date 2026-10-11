@@ -655,6 +655,85 @@ records, counted after the references and before the queues' floors
 package's policy records it (`udsBytes`) for the verdict. The firmware's
 `v2/README.md`, "UDS requests", has the transport.
 
+## Compound identifiers of 32 bits
+
+Mitch, 2026-10-10: a compound message selected by four bytes, "Byte 0 & 0xF0,
+byte 1 & 0xFF, byte 2 & 0xFF, byte 3 & 0xFF, for the validation 0xF0FFFFFF".
+`CompoundIdentifier::id`/`idMask` hold what the unit compares — the window
+from `byteOffset` read low byte first, so the byte at the offset is bits 0..7
+— and are written and shown byte by byte, byte 0 first
+(`compoundBytesText`, `parseCompoundBytes`, `compoundSelectorBytes` in
+comms_types.h): the mask F0 FF FF FF is 0xFFFFFFF0 in the model and in files,
+which keep their meaning. Only the display of multi-byte identifiers changed.
+
+What the unit compares (`checkSelectorWidth`, asked by both validation and the
+mapper so they cannot disagree):
+
+- **A CAN Triple 2.0 from 2.0.6** (`CAPACITY_CAN_SELECTOR_32`, store v24)
+  compares 32 bits both ways. Its signal record ends with the identifier's and
+  the mask's upper halves (u16 each), which ours has no room for:
+  `DeviceTables::signalMuxHigh` keeps them beside the records, and
+  `ConfigTransfer` sends, verifies, reads and fingerprints them as the
+  record's last `V2_SIGNAL_HIGH_BYTES` (`Slice::high`). `tablesForUnit` gives
+  the tables the unit's selector bits, so the record's form follows the unit.
+- **A CAN Triple from 1.0.16** (`CAPACITY_CAN_SELECTOR_32_RX`) compares 32
+  bits of a RECEIVED identifier with no store change: the identifier's upper
+  half in `tx_source` (which a received signal never reads), the mask's in
+  whole hex digits, one bit each in the four bits no 1.x record used
+  (`SIG_FLAG_RX_MUXHI_D4..D6`, msg_and_flags 13..15; `SIG_BITS_RX_MUXHI_D7`,
+  bits 31; `sigSetRxMuxHigh`, `sigRxMuxMaskHi`). Those are the 2.0's message
+  index top bits and `SIG_BITS_RETAIN`, so they are read of a 1.x record only,
+  and every reader of "keep this channel" asks only a target that keeps
+  channels (`retainsChannels`). Its capacity report became format 2: the
+  entries, then the head of the 2.0's extension block up to `can_features`,
+  everything else zero ("not stated"). 1.0.15 and 1.0.16 share store v20, so
+  `tablesExceeding` refuses a configuration with such identifiers for a unit
+  whose report does not say it; validation warns on a target that does not.
+  Transmit stays 16 bits on the 1.x (its composer reads `tx_source`).
+- Anything else compares 2 bytes, and a wider mask is an error.
+
+Which form a record is in follows the LINE, not the plan: `isCanTriple2()`
+(names kept apart, or a plan) says a CAN Triple 2.0, whose 2.0.2 to 2.0.5 take
+no 4-byte identifier at all, and only a target that is not one gets the 1.x
+encoding. `signalMuxHighOf` reads a channel's upper halves from either form,
+and the Get's fold, the fit check and the Builder all read them through it.
+
+**Across the lines.** A document may be sent to the other line's unit when the
+unit can run it (unit_target.h). `tablesForUnit` then moves each identifier's
+upper halves into the unit's form, reading and clearing the tables' own before
+the message index moves (a 1.x mask digit sits where a 2.0 keeps its index's
+top bits) and writing the unit's after; a transmitted one never goes into a
+1.x record. It also clears the 2.0's "keep this channel" bit for a unit that
+keeps no channels: on a 1.0.16 that bit is digit D7 and would gate the channel
+on byte 3 of its message (a 2.0 document with kept channels is only warned on
+a 1.x, so this was a live path). `tablesExceeding` judges what the unit will
+compare in its own form: anything on a 2.0.6, received identifiers in whole
+digits on a 1.0.16, nothing wider than 2 bytes anywhere else.
+
+**Sealed packages** carry their records in the form they were built for, so
+the policy says which: `signalRecordsHigh` (channel records of 36 bytes, a
+2.0.6's) is held to the unit's both ways (`signalFormMismatch`; a 2.0 package
+built before 2.0.6 needs rebuilding for a 2.0.6 unit), and
+`receivedSelectors32` (1.x records with mask digits) installs only on a unit
+whose report says `CAPACITY_CAN_SELECTOR_32_RX` (`receivedSelectors32Missing`).
+A 1.0.15 would take such a stream and compare 2 bytes, so the stream also
+leads, before its CLEAR, with the 1.0.16 requirement check: `CMD_GET_CAPACITY`
+carrying the bits it needs, which 1.0.16 answers ACK (or `ERR_INVALID_CMD`
+for a bit it lacks) and 1.0.15 refuses as a length. Whichever Manager relays
+the stream, an older unit stops it with nothing changed.
+
+The identifiers table grew **Add** and **Remove** (a received message takes
+any number of identifiers, a transmitted one `MAX_TX_MUX_IDS`); the frame map
+shades all 32 bits (`identifierBitPositions`); the DBC import takes
+multiplexors of up to 32 bits, Motorola ones over several bytes too (each bit
+placed at its frame position). `test_roundtrip` (`testCompound32`) holds the
+notation, both encodings, the folds, the refusals, twenty identifiers on a
+message, the moves across the lines and the kept-channel bit, and the package
+verdicts; `test_firmware_link` sends 1.x ones through the real 1.0.16 firmware
+and gates frames with its engine digit by digit, asks it the requirement
+check, and installs a sealed package that carries one; `test_firmware_v2`
+holds the 2.0's record.
+
 ## Options
 
 Tools → Options… (`src/ui/options_dialog.*`; Mitch, 2026-10-09) holds what
@@ -1875,7 +1954,10 @@ to be sent, and the help says so.
     Contents: Message Type (Single/Compound);
     Single → checkbox list of channel rows + **Add… / Change… / Remove**;
     Compound → `Identifiers` table (Number | Offset | ID | ID Mask,
-    Change…/Clear) and per-identifier channel list titled "Channels (ID n)".
+    Add/Change…/Clear/Remove; 16 slots to start, any number for a received
+    message, up to `MAX_TX_MUX_IDS` for a transmitted one) and per-identifier
+    channel list titled "Channels (ID n)". The ID and mask are written and
+    shown byte by byte, byte 0 first ("Compound identifiers of 32 bits").
     Switching Single→Compound warns it clears the channel list (Yes/No).
 
     **FRAME ORDER, and it is the STORED order.** `sortSectionRows()` puts every
@@ -2214,10 +2296,14 @@ to be sent, and the help says so.
   skips them, device channels are refused, and the device releases everything
   after `OVERRIDE_LEASE_MS` of silence, the dialog refreshing the lease each
   second and clearing on close),
-  CAN Viewer (raw frame monitor + inject-frame form; display filters per bus,
-  for Tx frames and by arbitration ID — hex IDs, ranges and `!` exclusions
-  typed into the ID filter field, `CanViewerDialog::parseIdFilter`, composed
-  in `frameVisible()` — which hide rows and never touch capture; buffers up to 10M frames
+  CAN Viewer (raw frame monitor + inject-frame form; six Show boxes, CAN 1 Rx
+  to CAN 3 Tx, which decide what is listed AND captured — a frame of an
+  unticked box never reaches the buffer, so neither the count nor Save to File
+  has it, and a drop it reports is carried onto the next frame captured
+  (Mitch, 2026-10-11) — and a display-only filter by arbitration ID — hex IDs,
+  ranges and `!` exclusions typed into the ID filter field,
+  `CanViewerDialog::parseIdFilter`, composed in `frameVisible()`, which hides
+  rows and never touches capture, as it changes with every keystroke; buffers up to 10M frames
   and exports them via "Save to File…" as a Vector ASCII `.asc` log — classic
   frames as standard lines, CAN FD frames as Vector `CANFD` lines carrying
   real BRS and ESI — or, chosen by file type, a SocketCAN candump `.log` or a
@@ -2277,7 +2363,8 @@ shrinking `label` 32 → 16 B (the firmware never reads it; it exists only so a
 Get can rebuild channel names, so 44% of the record did no runtime work),
 hand-bit-packing the eight small fields behind accessors on both sides of the
 wire, and narrowing `mux_id`/`mux_mask` to 16 bits. The
-bit-packing and the narrow mux fields stay. The label does not: the device's
+bit-packing stays, and on the 1.x record so do the narrow mux fields (32-bit
+identifiers came back another way: "Compound identifiers of 32 bits"). The label does not: the device's
 storage grew, which bought the 16 bytes back and 232 signal slots with them, and
 32 + 20 + 8 + 4 = **64** is a whole number of 8-byte units — the record wastes
 nothing to padding, which is the arithmetic that made 32 the right label length
@@ -2291,10 +2378,10 @@ channel names are capped at **31 bytes** (`MAX_CHANNEL_NAME_BYTES` =
 `SIGNAL_LABEL_LEN - 1`, up from 15) — the name editors and DBC import enforce
 that budget up front, and the mapper still clips + warns for documents saved
 before the cap existed, since a silent truncation merges two channels on
-read-back — and a compound multiplexor must fit a **2-byte** selector window
-(DBC import rejects wider ones and the mapper errors rather than truncating,
-since a truncated mask would read as 0 = "always active" and silently un-gate
-the signal). The name budget is a **byte** count, not a character count: the
+read-back — and a compound multiplexor had to fit a **2-byte** selector window
+(4 bytes since 2.0.6 / 1.0.16; the mapper still errors rather than truncating
+a mask wider than its target compares, since a truncated mask would gate on
+less than was asked). The name budget is a **byte** count, not a character count: the
 dialogs stop typing at 31 characters, but one non-ASCII character is 2-4 UTF-8
 bytes, so a legal-looking 31-character name can still overrun the label — which
 is why the dialogs re-check the encoded length and the clip stops on a

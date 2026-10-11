@@ -482,6 +482,12 @@ QJsonObject SecurePackagePolicy::toJson() const
     // Absent means every FD frame switches, which is every package before it.
     if (fdWithoutBrs)
         o[QStringLiteral("fdWithoutBrs")] = true;
+    // Absent means 32-byte channel records and identifiers of 2 bytes, which is
+    // every package before them.
+    if (signalRecordsHigh)
+        o[QStringLiteral("signalRecordsHigh")] = true;
+    if (receivedSelectors32)
+        o[QStringLiteral("receivedSelectors32")] = true;
     if (references >= 0)
         o[QStringLiteral("references")] = double(references);
     if (udsBytes > 0)
@@ -545,6 +551,8 @@ SecurePackagePolicy SecurePackagePolicy::fromJson(const QJsonObject &o)
     p.needsPlan = o[QStringLiteral("needsPlan")].toBool();
     p.crc8Records8 = o[QStringLiteral("crc8Records8")].toBool();
     p.fdWithoutBrs = o[QStringLiteral("fdWithoutBrs")].toBool();
+    p.signalRecordsHigh = o[QStringLiteral("signalRecordsHigh")].toBool();
+    p.receivedSelectors32 = o[QStringLiteral("receivedSelectors32")].toBool();
     p.udsBytes = qMax<qint64>(0, qint64(o[QStringLiteral("udsBytes")].toDouble()));
     p.references = o.contains(QStringLiteral("references"))
                        ? qMax<qint64>(0, qint64(o[QStringLiteral("references")].toDouble()))
@@ -681,6 +689,17 @@ InstallVerdict packageInstallVerdict(const SecurePackagePolicy &policy,
     // CAN FD without the bit rate switch: only where the unit says it can.
     v.brsPerMessageMissing =
         policy.fdWithoutBrs && !(device.capacityKnown && device.capacity.brsPerMessage());
+    // The channel records' form on a unit that keeps names apart: 36 bytes on
+    // a CAN Triple 2.0 from 2.0.6, 32 before. Only where the stream writes
+    // channel records in that form, and only for a unit that could say.
+    if (policy.needsLabelStore && policy.tableCounts.value(int(DeviceTable::Signals)) > 0
+        && device.capacityKnown && device.capacity.labelsApart())
+        v.signalFormMismatch = policy.signalRecordsHigh != device.capacity.selector32();
+    // Received identifiers of 4 bytes in a CAN Triple's records: only where
+    // the unit says it compares them.
+    v.receivedSelectors32Missing =
+        policy.receivedSelectors32
+        && !(device.capacityKnown && device.capacity.selector32Receive());
     return v;
 }
 

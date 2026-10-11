@@ -205,6 +205,15 @@ struct DeviceCapacity {
     {
         return (canFeatures & CAPACITY_CAN_UDS_REQUESTS) != 0 && limitOf(DeviceTable::Uds) > 0;
     }
+    // Compound identifiers of 32 bits (Mitch, 2026-10-10): of every message on
+    // a CAN Triple 2.0 from 2.0.6; of received messages on a CAN Triple from
+    // 1.0.16 too, there with the mask's upper half in whole hex digits. Without
+    // them a unit compares 2 bytes (checkSelectorWidth, device_mapper.h).
+    bool selector32() const { return (canFeatures & CAPACITY_CAN_SELECTOR_32) != 0; }
+    bool selector32Receive() const
+    {
+        return (canFeatures & (CAPACITY_CAN_SELECTOR_32 | CAPACITY_CAN_SELECTOR_32_RX)) != 0;
+    }
     bool sameCan(const DeviceCapacity &other) const { return canFeatures == other.canFeatures; }
 
     // Where the unit keeps names. LABEL_STORE_BYTES on a CAN Triple 2.0 whose
@@ -259,6 +268,11 @@ struct DeviceCapacity {
     // Part of sameTarget(): the budget is what a configuration is judged by.
     PlanBudget plan;
     bool plansTables() const { return (plan.flags & CAPACITY_PLAN_STAGE) != 0; }
+    // A CAN Triple 2.0's numbers, as far as they say: it keeps its names apart
+    // (every 2.0 firmware released) or takes a plan. builtIn() and a CAN
+    // Triple's (1.x) report say neither. What a record's spare bits mean
+    // follows it (signalMuxHighOf, device_mapper.h).
+    bool isCanTriple2() const { return labelsApart() || plansTables(); }
     // The unit reads a channel's message index in twelve bits (wire_structs.h,
     // SIG_MSG_HI_*): it came with the plan, in the same store version.
     bool wideMessageIndex() const { return plansTables(); }

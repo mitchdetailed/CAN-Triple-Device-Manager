@@ -72,6 +72,7 @@ extern const unsigned v2_capacity_label_flags_at;
 extern const unsigned v2_label_bytes;
 extern const unsigned v2_capacity_label_at;
 extern const unsigned v2_record_sizes[3];
+extern const unsigned v2_selector32[5];
 extern const unsigned v2_message_offsets[9];
 extern const unsigned v2_signal_offsets[10];
 extern const unsigned v2_relay_offsets[5];
@@ -553,9 +554,16 @@ void testLabelStore()
     CHECK(unsigned(offsetof(ct::CapacityExtension, label_bytes)) == v2_capacity_label_at,
           "where the capacity report says so");
     CHECK(unsigned(ct::V2_MESSAGE_BYTES) == v2_record_sizes[0]
-              && unsigned(ct::V2_SIGNAL_BYTES) == v2_record_sizes[1]
+              && unsigned(ct::V2_SIGNAL_BYTES + ct::V2_SIGNAL_HIGH_BYTES) == v2_record_sizes[1]
               && unsigned(ct::V2_RELAY_BYTES) == v2_record_sizes[2],
-          "the 2.0's message, signal and relay records are the Manager's slices");
+          "the 2.0's message, signal and relay records are the Manager's slices "
+          "(the signal's, from store v24, then its identifier's upper halves)");
+    CHECK(ct::CAPACITY_CAN_SELECTOR_32 == v2_selector32[0]
+              && ct::CAPACITY_CAN_SELECTOR_32_RX == v2_selector32[1]
+              && v2_selector32[2] == unsigned(ct::V2_SIGNAL_BYTES + ct::V2_SIGNAL_HIGH_BYTES)
+              && v2_selector32[3] == unsigned(ct::V2_SIGNAL_BYTES)
+              && v2_selector32[4] == unsigned(ct::V2_SIGNAL_BYTES) + 2u,
+          "32-bit compound identifiers: the bits, and the upper halves after the 1.x run");
     // Field by field: each 2.0 record is one run of the 1.x struct, starting at
     // V2_*_AT, so every field sits where the 1.x one does, less that start.
     const unsigned msg[9] = {
@@ -608,9 +616,12 @@ void testLabelStore()
               && cap.channelNameBytes() == 32 && cap.messageNameBytes() == 32,
           "the unit's report: names apart, 32 bytes of each kept");
     CHECK(cap.itemSizeOf(ct::DeviceTable::Messages) == ct::V2_MESSAGE_BYTES
-              && cap.itemSizeOf(ct::DeviceTable::Signals) == ct::V2_SIGNAL_BYTES
+              && cap.itemSizeOf(ct::DeviceTable::Signals)
+                     == ct::V2_SIGNAL_BYTES + ct::V2_SIGNAL_HIGH_BYTES
               && cap.itemSizeOf(ct::DeviceTable::Relays) == ct::V2_RELAY_BYTES,
           "and its message, signal and relay record sizes are the 2.0's");
+    CHECK(cap.selector32() && cap.selector32Receive(),
+          "the unit's report says it compares 32-bit compound identifiers both ways");
     ct::DeviceCapacity back;
     CHECK(ct::DeviceCapacity::fromJson(cap.toJson(), &back) && back.sameLabels(cap)
               && back.labelsApart(),

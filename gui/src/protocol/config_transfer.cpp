@@ -34,17 +34,21 @@ struct Slice {
     int bytes;
     int at2 = 0;
     int bytes2 = 0;
-    int total() const { return bytes + bytes2; }
+    // A CAN Triple 2.0 from store v24 (signalHigh): a signal record ends with
+    // its compound identifier's upper halves, kept beside ours
+    // (DeviceTables::signalMuxHigh), V2_SIGNAL_HIGH_BYTES.
+    int high = 0;
+    int total() const { return bytes + bytes2 + high; }
 };
 
 template <typename T>
-Slice sliceFor(bool labelsApart, bool crc8Short = false)
+Slice sliceFor(bool labelsApart, bool crc8Short = false, bool signalHigh = false)
 {
     if (labelsApart) {
         if constexpr (std::is_same_v<T, CanMessageConfig>)
             return {V2_MESSAGE_AT, V2_MESSAGE_BYTES};
         if constexpr (std::is_same_v<T, CanSignalConfig>)
-            return {V2_SIGNAL_AT, V2_SIGNAL_BYTES};
+            return {V2_SIGNAL_AT, V2_SIGNAL_BYTES, 0, 0, signalHigh ? V2_SIGNAL_HIGH_BYTES : 0};
         if constexpr (std::is_same_v<T, RelayConfig>)
             return {V2_RELAY_AT, V2_RELAY_BYTES};
     }
@@ -56,7 +60,7 @@ Slice sliceFor(bool labelsApart, bool crc8Short = false)
 
 template <typename T>
 QByteArray writePayload(quint16 start, const QVector<T> &items, int from, int count,
-                        Slice slice = {0, int(sizeof(T))})
+                        Slice slice = {0, int(sizeof(T))}, const QVector<quint32> *high = nullptr)
 {
     QByteArray b = rangeHeader(start, quint16(count));
     const int oldSize = b.size();
@@ -67,12 +71,16 @@ QByteArray writePayload(quint16 start, const QVector<T> &items, int from, int co
         std::memcpy(out, item + slice.at, size_t(slice.bytes));
         if (slice.bytes2)
             std::memcpy(out + slice.bytes, item + slice.at2, size_t(slice.bytes2));
+        if (slice.high)
+            qToLittleEndian<quint32>(high ? high->value(from + i) : 0u,
+                                     out + slice.bytes + slice.bytes2);
     }
     return b;
 }
 
 template <typename T>
-bool appendItems(QVector<T> &dst, const QByteArray &payload, Slice slice = {0, int(sizeof(T))})
+bool appendItems(QVector<T> &dst, const QByteArray &payload, Slice slice = {0, int(sizeof(T))},
+                 QVector<quint32> *high = nullptr)
 {
     // Response payload: u16 start, u16 count, count records. The echoed start
     // must be exactly the next index we expect — anything else is a stale or
@@ -95,6 +103,15 @@ bool appendItems(QVector<T> &dst, const QByteArray &payload, Slice slice = {0, i
         if (slice.bytes2)
             std::memcpy(reinterpret_cast<char *>(&item) + slice.at2, in + slice.bytes,
                         size_t(slice.bytes2));
+        if (slice.high && high) {
+            const quint32 h = qFromLittleEndian<quint32>(in + slice.bytes + slice.bytes2);
+            const int idx = int(dst.size());
+            if (h != 0 || idx < high->size()) {
+                if (high->size() <= idx)
+                    high->resize(idx + 1);
+                (*high)[idx] = h;
+            }
+        }
         dst.append(item);
     }
     return true;
@@ -389,6 +406,9 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
     // And one whose CRC8 records hold 8 elements (store v22) takes the 2.0's
     // record, two runs of ours.
     const bool crc8Short = tables.capacity.crc8LongRules();
+    // And one from store v24 (2.0.6) whose signal records end with their
+    // identifiers' upper halves.
+    const bool signalHigh = tables.capacity.selector32();
     Step ping;
     ping.cmd = CMD_GET_STATUS;
     ping.stage = QStringLiteral("Checking device");
@@ -453,28 +473,29 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
     }
 
     auto addWrites = [&](quint8 cmd, auto const &items, int chunk, const QString &what,
-                         bool skipIfUnsupported = false) {
+                         bool skipIfUnsupported = false, const QVector<quint32> *high = nullptr) {
         // The WRITE_CHUNK_* constants are sized against MAX_TX_PAYLOAD. A plan
         // built for sealing has less room per frame, so the chunk shrinks to
         // whatever whole records fit the budget it was given.
         using Item = std::decay_t<decltype(items[0])>;
         // A record sent without its label is smaller than the chunk constant
         // was sized for: as many as the payload holds.
-        const Slice slice = sliceFor<Item>(labelsApart, crc8Short);
+        const Slice slice = sliceFor<Item>(labelsApart, crc8Short, signalHigh);
         const int fit = (m_payloadBudget - 4) / slice.total();
         chunk = qMax(1, slice.total() < int(sizeof(Item)) ? fit : qMin(chunk, fit));
         for (int i = 0; i < items.size(); i += chunk) {
             const int count = qMin(chunk, int(items.size()) - i);
             Step s;
             s.cmd = cmd;
-            s.payload = writePayload(quint16(i), items, i, count, slice);
+            s.payload = writePayload(quint16(i), items, i, count, slice, high);
             s.stage = QStringLiteral("Sending %1 (%2/%3)").arg(what).arg(i + count).arg(items.size());
             s.skipIfUnsupported = skipIfUnsupported;
             m_steps.append(s);
         }
     };
     addWrites(CMD_WRITE_MSG_CFG, tables.messages, WRITE_CHUNK_MESSAGES, QStringLiteral("messages"));
-    addWrites(CMD_WRITE_SIG_CFG, tables.signalConfigs, WRITE_CHUNK_SIGNALS, QStringLiteral("channels"));
+    addWrites(CMD_WRITE_SIG_CFG, tables.signalConfigs, WRITE_CHUNK_SIGNALS, QStringLiteral("channels"),
+              false, &tables.signalMuxHigh);
     addWrites(CMD_WRITE_MATH_CFG, tables.math, WRITE_CHUNK_MATH, QStringLiteral("math"));
     addWrites(CMD_WRITE_COND_CFG, tables.conditions, WRITE_CHUNK_CONDITIONS,
               QStringLiteral("conditions"));
@@ -675,23 +696,25 @@ void ConfigTransfer::buildSendSteps(const DeviceTables &sourceTables, bool verif
     // silently skipped along with them.
     if (verify) {
         auto addVerify = [&](quint8 cmd, auto const &items, int chunk, const QString &what,
-                             bool skipIfUnsupported = false) {
+                             bool skipIfUnsupported = false,
+                             const QVector<quint32> *high = nullptr) {
             using Item = std::decay_t<decltype(items[0])>;
-            const Slice slice = sliceFor<Item>(labelsApart, crc8Short);
+            const Slice slice = sliceFor<Item>(labelsApart, crc8Short, signalHigh);
             for (int i = 0; i < items.size(); i += chunk) {
                 const int count = qMin(chunk, int(items.size()) - i);
                 Step s;
                 s.cmd = cmd;
                 s.payload = rangeHeader(quint16(i), quint16(count));
                 s.stage = QStringLiteral("Verifying %1").arg(what);
-                s.expectedEcho = writePayload(quint16(i), items, i, count, slice);
+                s.expectedEcho = writePayload(quint16(i), items, i, count, slice, high);
                 s.isVerify = true;
                 s.skipIfUnsupported = skipIfUnsupported;
                 m_steps.append(s);
             }
         };
         addVerify(CMD_READ_MSG_CFG, tables.messages, READ_CHUNK_MESSAGES, QStringLiteral("messages"));
-        addVerify(CMD_READ_SIG_CFG, tables.signalConfigs, READ_CHUNK_SIGNALS, QStringLiteral("channels"));
+        addVerify(CMD_READ_SIG_CFG, tables.signalConfigs, READ_CHUNK_SIGNALS, QStringLiteral("channels"),
+                  false, &tables.signalMuxHigh);
         addVerify(CMD_READ_MATH_CFG, tables.math, READ_CHUNK_MATH, QStringLiteral("math"));
         addVerify(CMD_READ_COND_CFG, tables.conditions, READ_CHUNK_CONDITIONS,
                   QStringLiteral("conditions"));
@@ -1053,6 +1076,7 @@ QByteArray ConfigTransfer::configurationFingerprint(const DeviceTables &source)
     settleLabels(tables.relays, tables.relayLabels);
     const bool labelsApart = tables.capacity.labelsApart();
     const bool crc8Short = tables.capacity.crc8LongRules();
+    const bool signalHigh = tables.capacity.selector32();
     QCryptographicHash hash(QCryptographicHash::Sha256);
     const auto addWord = [&](quint32 v) {
         char b[4];
@@ -1063,9 +1087,16 @@ QByteArray ConfigTransfer::configurationFingerprint(const DeviceTables &source)
     // records up to the last one holding a nonzero byte (a unit reads every
     // slot past what a Send wrote as zeros), then those records as the unit
     // takes them.
-    const auto addTable = [&](quint32 id, auto const &items) {
+    const auto addTable = [&](quint32 id, auto const &items,
+                              const QVector<quint32> *high = nullptr) {
         using Item = std::decay_t<decltype(items[0])>;
-        const Slice slice = sliceFor<Item>(labelsApart, crc8Short);
+        const Slice slice = sliceFor<Item>(labelsApart, crc8Short, signalHigh);
+        // A signal record's upper halves (store v24), its last 4 bytes.
+        const auto highOf = [&](int i) {
+            char b[4];
+            qToLittleEndian<quint32>(high ? high->value(i) : 0u, b);
+            return QByteArray(b, 4);
+        };
         // A record's bytes as the unit takes them: one run, or two (the 2.0's
         // CRC8 record), the second empty for every other.
         const auto runOf = [&](int i, int which) {
@@ -1078,7 +1109,8 @@ QByteArray ConfigTransfer::configurationFingerprint(const DeviceTables &source)
         };
         int n = int(items.size());
         while (n > 0) {
-            if (nonzero(runOf(n - 1, 0)) || nonzero(runOf(n - 1, 1)))
+            if (nonzero(runOf(n - 1, 0)) || nonzero(runOf(n - 1, 1))
+                || (slice.high && high && high->value(n - 1) != 0))
                 break;
             --n;
         }
@@ -1088,10 +1120,12 @@ QByteArray ConfigTransfer::configurationFingerprint(const DeviceTables &source)
             hash.addData(runOf(i, 0));
             if (slice.bytes2)
                 hash.addData(runOf(i, 1));
+            if (slice.high)
+                hash.addData(highOf(i));
         }
     };
     addTable(0, tables.messages);
-    addTable(1, tables.signalConfigs);
+    addTable(1, tables.signalConfigs, &tables.signalMuxHigh);
     addTable(2, tables.math);
     addTable(3, tables.conditions);
     addTable(4, tables.counters);
@@ -1462,7 +1496,9 @@ void ConfigTransfer::runNext()
                     break;
                 case 1:
                     placed = appendItems(m_readTables.signalConfigs, payload,
-                                         sliceFor<CanSignalConfig>(apart));
+                                         sliceFor<CanSignalConfig>(
+                                             apart, false, m_readTables.capacity.selector32()),
+                                         &m_readTables.signalMuxHigh);
                     break;
                 case 2: placed = appendItems(m_readTables.math, payload); break;
                 case 3: placed = appendItems(m_readTables.conditions, payload); break;

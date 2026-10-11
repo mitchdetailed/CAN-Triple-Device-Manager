@@ -527,47 +527,53 @@ bool muxSelectorForValue(const DbcSignal &mux, int value, int *byteOffset, quint
         return false;
     };
     const int len = mux.bitLength;
-    // v15: the device's selector window is 2 bytes (mux_id/mux_mask are 16-bit),
-    // so a multiplexor field must fit within 16 bits of its byte offset.
-    if (len < 1 || len > 16)
-        return fail(QStringLiteral("multiplexor width %1 is out of range (1–16)").arg(len));
+    // The selector window is 4 bytes (a CAN Triple 2.0 from 2.0.6, received
+    // messages on a CAN Triple from 1.0.16; 2 before, which validation says of
+    // a mask wider than the target compares), so a multiplexor field must lie
+    // within 4 bytes.
+    if (len < 1 || len > 32)
+        return fail(QStringLiteral("multiplexor width %1 is out of range (1–32)").arg(len));
     // The firmware reads the selector window anywhere inside the frame, so the
     // offset limit is the message length (FD frames go up to 64 bytes).
     const int maxOffset = qBound(1, messageLenBytes, 64) - 1;
 
-    // The device selector reads an up-to-4-byte LITTLE-ENDIAN window at
-    // byteOffset and matches (window & idMask) == (id & idMask). Express the
-    // multiplexor's bit field within that window.
+    // The device selector reads a 4-byte LITTLE-ENDIAN window at byteOffset
+    // and matches (window & idMask) == (id & idMask). Each of the field's bits,
+    // least significant first, at its place in the frame: Intel counts up from
+    // the start bit (its least significant); Motorola, DBC's sawtooth, starts
+    // at the most significant and walks down, a byte's bit 0 going on at the
+    // next byte's bit 7. Then each bit at its place in the window, the byte at
+    // byteOffset being bits 0..7.
+    QVector<int> at(len);
     if (!mux.bigEndian) {
-        const int lsb = mux.startBit;         // Intel: start bit is the LSB
-        const int base = lsb / 8;
-        const int bitInWindow = lsb % 8;
-        if (base < 0 || base > maxOffset)
-            return fail(QStringLiteral("multiplexor byte offset %1 is out of range (0–%2)")
-                            .arg(base).arg(maxOffset));
-        if (bitInWindow + len > 16)
-            return fail(QStringLiteral("multiplexor field spans past the 16-bit selector "
-                                       "window at byte %1").arg(base));
-        const quint32 fieldMask = (1u << len) - 1u;
-        *byteOffset = base;
-        *idMask = fieldMask << bitInWindow;
-        *id = (quint32(value) << bitInWindow) & *idMask;
-        return true;
+        for (int i = 0; i < len; ++i)
+            at[i] = mux.startBit + i;
+    } else {
+        int p = mux.startBit;
+        for (int i = len - 1; i >= 0; --i) {
+            at[i] = p;
+            p = (p % 8 == 0) ? p + 15 : p - 1;
+        }
     }
-    // Motorola: the multiplexor's MSB is at mux.startBit and the field descends.
-    // Only a field confined to a single byte maps cleanly to the LE window.
-    const int msbByte = mux.startBit / 8;
-    const int msbBit = mux.startBit % 8;
-    const int loBit = msbBit - (len - 1);
-    if (loBit < 0)
-        return fail(QStringLiteral("Motorola multiplexor spans multiple bytes (unsupported)"));
-    if (msbByte < 0 || msbByte > maxOffset)
+    const int lo = *std::min_element(at.cbegin(), at.cend());
+    const int hi = *std::max_element(at.cbegin(), at.cend());
+    const int base = lo / 8;
+    if (lo < 0 || base > maxOffset)
         return fail(QStringLiteral("multiplexor byte offset %1 is out of range (0–%2)")
-                        .arg(msbByte).arg(maxOffset));
-    const quint32 fieldMask = (1u << len) - 1u;
-    *byteOffset = msbByte;
-    *idMask = fieldMask << loBit;
-    *id = (quint32(value) << loBit) & *idMask;
+                        .arg(base).arg(maxOffset));
+    if (hi / 8 - base >= 4)
+        return fail(QStringLiteral("multiplexor field spans past the 4-byte selector window at "
+                                   "byte %1").arg(base));
+    quint32 mask = 0, idv = 0;
+    for (int i = 0; i < len; ++i) {
+        const int w = at[i] - base * 8;
+        mask |= 1u << w;
+        if ((quint32(value) >> i) & 1u)
+            idv |= 1u << w;
+    }
+    *byteOffset = base;
+    *idMask = mask;
+    *id = idv;
     return true;
 }
 

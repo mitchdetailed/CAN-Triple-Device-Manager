@@ -321,6 +321,21 @@ struct SecurePackagePolicy
     // (DeviceCapacity::brsPerMessage) does: any other switches the bit rate
     // regardless. Absent, false: every package before it.
     bool fdWithoutBrs = false;
+    // The stream's channel records end with their compound identifiers' upper
+    // halves: a CAN Triple 2.0 from 2.0.6 (store v24, DeviceCapacity::
+    // selector32) takes them 36 bytes a record, earlier ones 32. Where the
+    // stream writes channel records to a unit that keeps names apart, it
+    // installs only on a unit whose records are its size, both ways round.
+    // Absent, false: every package before it.
+    bool signalRecordsHigh = false;
+    // The stream gates received messages on compound identifiers of 4 bytes in
+    // a CAN Triple's records (1.0.16, DeviceCapacity::selector32Receive), which
+    // a CAN Triple on earlier firmware would take and compare in 2 bytes. It
+    // installs only on a unit that says it compares them, and its stream leads
+    // with the unit's requirement check (CMD_GET_CAPACITY carrying
+    // CAPACITY_CAN_SELECTOR_32_RX), which earlier firmware refuses, so no
+    // Manager relays it onto one. Absent, false: every package before it.
+    bool receivedSelectors32 = false;
     // The configuration's dependency references (plan_budget.h), which take
     // the unit's working memory beside its tables: recorded with tableCounts so
     // the verdict judges that memory as the unit's SAVE will. -1: not recorded
@@ -417,13 +432,21 @@ struct InstallVerdict
     // The package sends CAN FD without the bit rate switch (fdWithoutBrs) and the
     // unit's firmware cannot, or could not say. Fixed by a firmware update.
     bool brsPerMessageMissing = false;
+    // The package's channel records and this CAN Triple 2.0's are different
+    // sizes (signalRecordsHigh): 2.0.6 ends each with 4 bytes more.
+    bool signalFormMismatch = false;
+    // The package compares received compound identifiers of 4 bytes
+    // (receivedSelectors32) and the unit cannot, or could not say. Fixed by
+    // CAN Triple firmware 1.0.16.
+    bool receivedSelectors32Missing = false;
 
     bool ok() const
     {
         return !noPolicy && !deviceUnlicensed && mismatches.isEmpty() && shortfalls.isEmpty()
                && !viewerPasswordUnsupported && !extendedDeviceChannelsUnsupported
                && !labelStoreMissing && !labelStoreUnexpected && !planMissing
-               && !labelKindsMissing && !crc8FormMismatch && !brsPerMessageMissing;
+               && !labelKindsMissing && !crc8FormMismatch && !brsPerMessageMissing
+               && !signalFormMismatch && !receivedSelectors32Missing;
     }
 };
 

@@ -139,43 +139,52 @@ CanViewerDialog::CanViewerDialog(DeviceLink *link, QWidget *parent)
     m_autoScrollCheck->setObjectName(QStringLiteral("autoScrollCheck"));
     topRow->addWidget(m_pauseCheck);
     topRow->addWidget(m_autoScrollCheck);
-
-    // Display filters. These hide rows; they do NOT stop capture. Every frame
-    // the device streams still goes into the buffer and into Save to File, so
-    // unchecking a bus to read a quiet one cannot silently cost you the trace
-    // you were recording — and re-checking brings its history back.
-    topRow->addSpacing(12);
-    topRow->addWidget(new QLabel(tr("Show:"), this));
-    for (int b = 0; b < 3; ++b) {
-        m_busChecks[b] = new QCheckBox(tr("CAN %1").arg(b + 1), this);
-        m_busChecks[b]->setObjectName(QStringLiteral("busCheck%1").arg(b + 1));
-        m_busChecks[b]->setChecked(true);
-        m_busChecks[b]->setToolTip(tr("Show frames from CAN %1. Hiding a bus only affects "
-                                      "this list — every bus is still captured and saved.")
-                                       .arg(b + 1));
-        connect(m_busChecks[b], &QCheckBox::toggled, this, &CanViewerDialog::rebuildTable);
-        topRow->addWidget(m_busChecks[b]);
-    }
-
-    // The device's own transmissions — engine transmit messages, relayed
-    // frames, and the echo of an injected one. Ticked by default, because
-    // hiding what this device put on the wire is a deliberate act and never a
-    // surprise: on a gateway the Tx side is usually the half you are checking.
-    m_txCheck = new QCheckBox(tr("Tx Msgs"), this);
-    m_txCheck->setObjectName(QStringLiteral("txCheck"));
-    m_txCheck->setChecked(true);
-    m_txCheck->setToolTip(tr("Show frames the device transmitted (the Tx rows). Untick to "
-                             "leave only what the buses carried in. Like the bus filters "
-                             "this affects this list alone — Tx frames are still captured "
-                             "and still written by Save to File."));
-    connect(m_txCheck, &QCheckBox::toggled, this, &CanViewerDialog::rebuildTable);
-    topRow->addWidget(m_txCheck);
-
     topRow->addStretch(1);
     topRow->addWidget(m_countLabel);
     topRow->addWidget(saveButton);
     topRow->addWidget(clearButton);
     mainLayout->addLayout(topRow);
+
+    // The Show boxes, one per bus and direction (Mitch, 2026-10-11: CAN 1 Rx,
+    // CAN 1 Tx, ... CAN 3 Tx). They decide what is listed AND what is captured
+    // (onMonitorFrame): a frame of an unticked box is not kept, so Save to File
+    // writes only what they let through. Frames captured before a box is
+    // unticked stay until Clear, hidden, and come back when it is ticked again.
+    // All ticked by default: leaving out what a bus carried, or what this
+    // device put on it, is a deliberate act and never a surprise. A row of their
+    // own, because six of them beside the controls above would widen the window
+    // past its default.
+    auto *showRow = new QHBoxLayout;
+    showRow->addWidget(new QLabel(tr("Show:"), this));
+    for (int b = 0; b < 3; ++b) {
+        if (b > 0)
+            showRow->addSpacing(12); // the pairs read as three buses
+        for (int dir = 0; dir < 2; ++dir) {
+            const bool tx = dir == 1;
+            QCheckBox *box = new QCheckBox(
+                tx ? tr("CAN %1 Tx").arg(b + 1) : tr("CAN %1 Rx").arg(b + 1), this);
+            box->setObjectName(QStringLiteral("show%1%2")
+                                   .arg(b + 1)
+                                   .arg(tx ? QStringLiteral("Tx") : QStringLiteral("Rx")));
+            box->setChecked(true);
+            box->setToolTip(
+                tx ? tr("Show and capture the frames this device transmitted on CAN %1 (the "
+                        "Tx rows): its transmit messages, the frames its relays forward, and "
+                        "the echo of an injected one. Unticked, they are neither listed nor "
+                        "captured, so Save to File does not write them; those captured "
+                        "before stay until Clear.")
+                         .arg(b + 1)
+                   : tr("Show and capture the frames CAN %1 carried in (the Rx rows). "
+                        "Unticked, they are neither listed nor captured, so Save to File does "
+                        "not write them; those captured before stay until Clear.")
+                         .arg(b + 1));
+            connect(box, &QCheckBox::toggled, this, &CanViewerDialog::rebuildTable);
+            m_showChecks[b][dir] = box;
+            showRow->addWidget(box);
+        }
+    }
+    showRow->addStretch(1);
+    mainLayout->addLayout(showRow);
 
     // --- Second control row: view mode ---------------------------------------
     auto *modeRow = new QHBoxLayout;
@@ -334,25 +343,23 @@ CanViewerDialog::CanViewerDialog(DeviceLink *link, QWidget *parent)
     connect(m_link, &DeviceLink::monitorFrame, this, &CanViewerDialog::onMonitorFrame);
 }
 
-bool CanViewerDialog::busVisible(quint8 busIdx) const
+bool CanViewerDialog::shown(quint8 busIdx, bool tx) const
 {
     // Anything outside 1..3 is shown rather than hidden: a frame the device
     // labelled with a bus this dialog does not know about is exactly the thing
     // a viewer must not swallow.
     if (busIdx < 1 || busIdx > 3)
         return true;
-    return m_busChecks[busIdx - 1]->isChecked();
+    return m_showChecks[busIdx - 1][tx ? 1 : 0]->isChecked();
 }
 
 // Every display filter in one place, so the live path, the rebuild and
 // Overwrite Mode cannot drift apart on what "shown" means.
 bool CanViewerDialog::frameVisible(const ct::MonitorStreamPayload &frame) const
 {
-    if (frame.direction && !m_txCheck->isChecked())
-        return false;
     if (!m_idFilter.matches(frame.can_id))
         return false;
-    return busVisible(frame.bus_idx);
+    return shown(frame.bus_idx, frame.direction != 0);
 }
 
 bool CanViewerDialog::IdFilter::matches(quint32 canId) const
@@ -456,8 +463,9 @@ void CanViewerDialog::onOverwriteToggled()
 }
 
 // Rebuild the visible rows from the capture buffer. Called when a filter or the
-// view mode changes, so hiding and re-showing a category restores its history
-// instead of leaving a hole from the moment it was unticked.
+// view mode changes, so re-showing a category lists what was captured of it:
+// all of its history for an ID the ID filter hid, and for a Show box what came
+// in before it was unticked (nothing was captured of it while it was).
 void CanViewerDialog::rebuildTable()
 {
     // Gap rows span several columns; a stale span left over one of the rows
@@ -533,14 +541,42 @@ void CanViewerDialog::renderOverwriteRow(int row, const OverwriteEntry &entry)
     setCellText(m_table, row, ColData, formatData(frame), &mono);
 }
 
-void CanViewerDialog::onMonitorFrame(const ct::MonitorStreamPayload &frame)
+void CanViewerDialog::onMonitorFrame(const ct::MonitorStreamPayload &incoming)
 {
     if (m_pauseCheck->isChecked())
         return;
 
+    // The Show boxes decide CAPTURE as well as the list (Mitch, 2026-10-11: "if
+    // we don't show them, don't capture them"). A frame whose bus and direction
+    // are unticked when it arrives is kept nowhere: not in the buffer, so not
+    // in Save to File or the count, and not in Overwrite Mode's rows or counts.
+    // What was captured before a box was unticked stays until Clear, hidden,
+    // and is listed again if the box is ticked again. The ID filter stays a view
+    // only: it is typed a character at a time, and a half-typed entry must not
+    // throw a trace away.
+    //
+    // A drop the device reports (MONFLAG_GAP) is the whole stream's, not the
+    // carrying frame's bus's (see appendGapRow), so it is not lost with that
+    // frame: it is noted at once and carried onto the next frame captured,
+    // which puts the hole where it belongs in the trace that is kept. The log
+    // writers do not read the flag.
+    if (!shown(incoming.bus_idx, incoming.direction != 0)) {
+        if (incoming.flags & ct::MONFLAG_GAP) {
+            m_pendingGap = true;
+            m_sawGap = true;
+            updateCountLabel();
+        }
+        return;
+    }
+    MonitorStreamPayload frame = incoming;
+    if (m_pendingGap) {
+        frame.flags |= ct::MONFLAG_GAP;
+        m_pendingGap = false;
+    }
+
     // Full capture buffer (independent of the on-screen window): O(1) append,
-    // drop the single oldest frame once the cap is reached. Deliberately
-    // unfiltered — the bus checkboxes hide rows, they do not stop capture.
+    // drop the single oldest frame once the cap is reached. Everything that
+    // reaches here passed the Show boxes; the ID filter only hides rows.
     m_frames.push_back(frame);
     if (m_frames.size() > kMaxFrames)
         m_frames.pop_front();
@@ -835,6 +871,7 @@ void CanViewerDialog::onClearClicked()
     // traffic it no longer holds any record of.
     m_latest.clear();
     m_sawGap = false;
+    m_pendingGap = false;
     m_identifierLimit = false;
     updateCountLabel();
 }

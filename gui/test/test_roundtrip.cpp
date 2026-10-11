@@ -27,6 +27,7 @@
 #include "../src/model/configuration.h"
 #include "../src/model/dbc_import.h"
 #include "../src/model/device_mapper.h"
+#include "../src/model/frame_layout.h" // identifierBitPositions
 #include "../src/model/plan_budget.h"
 #include "../src/model/config_file.h"
 #include "../src/model/secure_file.h"
@@ -2245,14 +2246,32 @@ SIG_VALTYPE_ 1600 BoostF : 1;
         CHECK(off == 0 && mask == 0xF0u && id == 0x30u); // 3 << 4
     }
     {
-        // A Motorola multiplexor spanning multiple bytes can't be mapped.
+        // A Motorola multiplexor over two bytes: its most significant byte
+        // first in the frame, so the value 0x1234 is the bytes 12 34, which
+        // the unit's window (low byte first) reads as 0x3412.
         DbcSignal m;
         m.startBit = 7;
         m.bitLength = 16;
         m.bigEndian = true;
         int off = -1;
         quint32 id = 0, mask = 0;
+        CHECK(muxSelectorForValue(m, 0x1234, &off, &id, &mask, nullptr));
+        CHECK(off == 0 && mask == 0xFFFFu && id == 0x3412u);
+    }
+    {
+        // Past the 4-byte window: an Intel field of 32 bits from bit 4 needs a
+        // fifth byte.
+        DbcSignal m;
+        m.startBit = 4;
+        m.bitLength = 32;
+        m.bigEndian = false;
+        int off = -1;
+        quint32 id = 0, mask = 0;
         CHECK(!muxSelectorForValue(m, 0, &off, &id, &mask, nullptr));
+        // And 32 bits from a byte's start fill it exactly.
+        m.startBit = 8;
+        CHECK(muxSelectorForValue(m, 0x11223344, &off, &id, &mask, nullptr));
+        CHECK(off == 1 && mask == 0xFFFFFFFFu && id == 0x11223344u);
     }
 
     // --- Full DBC multiplexed message -> compound section -> device tables ---
@@ -2957,7 +2976,7 @@ static void testConfigReport()
     CHECK(text.contains(QStringLiteral("bit: 0, len: 16, unsigned, res: 0.25, +: 0, dflt: 1234")));
     CHECK(text.contains(QStringLiteral("bit: 16, len: 16, signed, res: 0.1, +: -40")));
     // Compound identifier group.
-    CHECK(text.contains(QStringLiteral("Id[1]  offset 0, id 0x1, mask 0xFF")));
+    CHECK(text.contains(QStringLiteral("Id[1]  offset 0, id 01, mask FF (byte 0 first)")));
     CHECK(text.contains(QStringLiteral("[mask 0 - skipped, not sent to the device]")));
     // Calculation headline + constants table.
     CHECK(text.contains(QStringLiteral("Half RPM = Engine RPM * 0.5")));
@@ -3632,9 +3651,14 @@ struct LabelStoreUnit {
     // Its CRC8 record: the 1.x one's 40 bytes, or 26 from the 2.0's store v22
     // (PlanUnit sets it from its report).
     int crc8Bytes = int(sizeof(Crc8Config));
+    // Its signal record: 32 bytes, or 36 from the 2.0's store v24, the
+    // compound identifier's upper halves at its end (PlanUnit, from its report).
+    int signalBytes = V2_SIGNAL_BYTES;
     int recordBytes(quint8 writeCmd) const
     {
-        return writeCmd == CMD_WRITE_CRC8_CFG ? crc8Bytes : v2RecordBytes(writeCmd);
+        return writeCmd == CMD_WRITE_CRC8_CFG  ? crc8Bytes
+               : writeCmd == CMD_WRITE_SIG_CFG ? signalBytes
+                                               : v2RecordBytes(writeCmd);
     }
 
     FakeDeviceLink::Reply answer(quint8 cmd, const QByteArray &p)
@@ -3782,6 +3806,11 @@ static DeviceCapacity planTarget()
     cap.canFeatures |= CAPACITY_CAN_UDS_REQUESTS;
     cap.tables.resize(int(DeviceTable::Uds) + 1);
     cap.tables[int(DeviceTable::Uds)] = TableCapacity{32, int(sizeof(UdsConfig))};
+    // And from store v24 (2.0.6) its compound identifiers are 32 bits, the
+    // signal record ending with their upper halves: every 2.0 Send and Get of
+    // these tests carries them.
+    cap.canFeatures |= CAPACITY_CAN_SELECTOR_32;
+    cap.tables[int(DeviceTable::Signals)].itemSize = V2_SIGNAL_BYTES + V2_SIGNAL_HIGH_BYTES;
     PlanBudget &p = cap.plan;
     p.flags = CAPACITY_PLAN_STAGE;
     p.headerBytes = 512;
@@ -3874,6 +3903,8 @@ struct PlanUnit : LabelStoreUnit {
         // Its CRC8 record, as its report says (store v22: 26 bytes).
         crc8Bytes = report.crc8LongRules() ? V2_CRC8_BYTES + V2_CRC8_VALUES_BYTES
                                            : int(sizeof(Crc8Config));
+        // Its signal record (store v24: 36 bytes).
+        signalBytes = V2_SIGNAL_BYTES + (report.selector32() ? V2_SIGNAL_HIGH_BYTES : 0);
         if (cmd == CMD_CLEAR_CONFIG) {
             sendOpen = true;
             written = false;
@@ -4814,6 +4845,435 @@ static void testUdsRequest()
     for (const QString &s : countsExceeding(counts, queued, 0, 0, 0, queued.plan.arenaBytes))
         ram = ram || s.contains(QStringLiteral("working memory"));
     CHECK(ram);
+}
+
+// COMPOUND IDENTIFIERS OF 32 BITS (Mitch, 2026-10-10: "Byte 0 & 0xF0, byte 1 &
+// 0xFF, byte 2 & 0xFF, byte 3 & 0xFF, for the validation 0xF0FFFFFF"). Written
+// and shown byte by byte, byte 0 first, and kept as the unit compares them. A
+// CAN Triple 2.0 from 2.0.6 takes them both ways, the record's upper halves
+// beside it, sent, read back and folded whole; a CAN Triple from 1.0.16 takes a
+// received one, its upper halves in the record's spare room, the mask's in
+// whole digits, and the record bit that keeps a 2.0 channel is a mask digit
+// there, never a kept value; anything narrower refuses or warns by name; and a
+// received message takes more than the editor's 16 identifiers.
+static void testCompound32()
+{
+    quint32 v = 0;
+    int n = 0;
+    CHECK(parseCompoundBytes(QStringLiteral("F0 FF FF FF"), &v, &n) && v == 0xFFFFFFF0u && n == 4);
+    CHECK(parseCompoundBytes(QStringLiteral("F0FFFFFF"), &v) && v == 0xFFFFFFF0u);
+    CHECK(parseCompoundBytes(QStringLiteral("0xF0FFFFFF"), &v) && v == 0xFFFFFFF0u);
+    CHECK(parseCompoundBytes(QStringLiteral("5"), &v, &n) && v == 0x05u && n == 1);
+    CHECK(parseCompoundBytes(QStringLiteral("12 34"), &v) && v == 0x3412u);
+    CHECK(!parseCompoundBytes(QStringLiteral("FFF"), &v)
+          && !parseCompoundBytes(QStringLiteral("11 22 33 44 55"), &v)
+          && !parseCompoundBytes(QStringLiteral("G1"), &v) && !parseCompoundBytes(QString(), &v));
+    CHECK(compoundBytesText(0xFFFFFFF0u, 4) == QStringLiteral("F0 FF FF FF"));
+    CHECK(compoundSelectorBytes(0x3412u, 0xFFFFu) == 2 && compoundSelectorBytes(0x05u, 0xFFu) == 1
+          && compoundSelectorBytes(0x30201010u, 0xFFFFFFF0u) == 4);
+    {
+        // The frame map shades every bit the mask names, all 32 of the window.
+        CompoundIdentifier shaded;
+        shaded.byteOffset = 2;
+        shaded.idMask = 0xFFFFFFF0u;
+        const QList<int> bits = identifierBitPositions(shaded);
+        CHECK(bits.size() == 28 && bits.first() == 2 * 8 + 4 && bits.last() == 2 * 8 + 31);
+    }
+
+    const auto bytes = [](const char *text) {
+        quint32 value = 0;
+        parseCompoundBytes(QString::fromLatin1(text), &value);
+        return value;
+    };
+    const auto build = [&](Configuration &c, const DeviceCapacity &target, SectionDevice device) {
+        c.setCapacity(target);
+        c.bus[0].enabled = true;
+        for (const char *name : {"Wide A", "Wide B"}) {
+            Channel ch;
+            ch.name = QString::fromLatin1(name);
+            ch.dataType = QStringLiteral("u8");
+            ch.minValue = 0;
+            ch.maxValue = 255;
+            c.catalog().addOrUpdateUserChannel(ch);
+        }
+        CommsSection s;
+        s.name = device == SectionDevice::ReceiveMessage ? QStringLiteral("Wide In")
+                                                         : QStringLiteral("Wide Out");
+        s.device = device;
+        s.baseAddress = 0x300;
+        s.messageLengthBytes = 8;
+        s.alignment = SectionAlignment::WordSwap;
+        s.transmitRateHz = 10;
+        s.compound = true;
+        const auto ident = [&](const char *id, const char *channel, int byte) {
+            CompoundIdentifier i;
+            i.id = bytes(id);
+            i.idMask = bytes("F0 FF FF FF");
+            i.configured = true;
+            CommsChannelRow row;
+            row.channelName = QString::fromLatin1(channel);
+            row.startBit = byte * 8;
+            row.bitLength = 8;
+            i.rows.append(row);
+            return i;
+        };
+        s.identifiers.append(ident("10 10 20 30", "Wide A", 4));
+        s.identifiers.append(ident("10 10 20 31", "Wide B", 5));
+        c.bus[0].sections.append(s);
+    };
+    const auto errorsSay = [](const MappingResult &m, const char *what) {
+        return m.errors.join(QStringLiteral(" ")).contains(QString::fromUtf8(what));
+    };
+    const auto issueSays = [](const Configuration &c, ValidationIssue::Severity severity,
+                              const char *what) {
+        for (const ValidationIssue &vi : validateConfiguration(c))
+            if (vi.severity == severity && vi.message.contains(QString::fromUtf8(what)))
+                return true;
+        return false;
+    };
+    const auto foldedWhole = [](const Configuration &back) {
+        bool a = false, b = false;
+        for (const CommsSection &s : back.bus[0].sections)
+            for (const CompoundIdentifier &i : s.identifiers) {
+                a = a || (i.id == 0x30201010u && i.idMask == 0xFFFFFFF0u && i.rows.size() == 1);
+                b = b || (i.id == 0x31201010u && i.idMask == 0xFFFFFFF0u && i.rows.size() == 1);
+            }
+        return a && b;
+    };
+
+    // A CAN Triple 2.0 from 2.0.6, both ways: the upper halves beside the
+    // record, sent as its last 4 bytes, read back and folded whole.
+    for (SectionDevice device : {SectionDevice::ReceiveMessage, SectionDevice::TransmitMessage}) {
+        const DeviceCapacity cap = planTarget();
+        Configuration c;
+        build(c, cap, device);
+        const bool transmit = device == SectionDevice::TransmitMessage;
+        if (transmit) {
+            // An identifier with no channel of its own: a selector-only
+            // record, its upper halves beside it like any other's.
+            CompoundIdentifier bare;
+            bare.id = bytes("10 10 20 32");
+            bare.idMask = bytes("F0 FF FF FF");
+            bare.configured = true;
+            c.bus[0].sections[0].identifiers.append(bare);
+        }
+        CHECK(!issueSays(c, ValidationIssue::Error, "identifier mask"));
+        const MappingResult mr = mapToDevice(c);
+        for (const QString &e : mr.errors)
+            std::printf("      mapping: %s\n", qPrintable(e));
+        RT_REQUIRE(mr.ok());
+        int wide = 0, bareRecords = 0;
+        for (int i = 0; i < mr.tables.signalConfigs.size(); ++i) {
+            const CanSignalConfig &sig = mr.tables.signalConfigs[i];
+            if (sig.mux_mask != 0xFFF0)
+                continue;
+            ++wide;
+            const quint32 high = mr.tables.signalMuxHigh.value(i);
+            if (sigSelectorOnly(sig)) {
+                bareRecords += high == 0xFFFF3220u;
+                continue;
+            }
+            CHECK(sig.mux_id == 0x1010 && (high == 0xFFFF3020u || high == 0xFFFF3120u));
+        }
+        CHECK(wide == (transmit ? 3 : 2) && bareRecords == (transmit ? 1 : 0));
+        PlanUnit unit;
+        unit.report = cap;
+        FakeDeviceLink link([&unit](quint8 cmd, const QByteArray &p) { return unit.answer(cmd, p); });
+        QString error;
+        const DeviceTables sent = tablesForUnit(mr.tables, cap);
+        CHECK(runLabelTransfer(ConfigTransfer::send(&link, sent, true, {}, true), &error));
+        if (!error.isEmpty())
+            std::printf("      send: %s\n", qPrintable(error));
+        CHECK(unit.tables.value(CMD_WRITE_SIG_CFG).size()
+              == int(mr.tables.signalConfigs.size()) * (V2_SIGNAL_BYTES + V2_SIGNAL_HIGH_BYTES));
+        DeviceTables got;
+        CHECK(runLabelTransfer(ConfigTransfer::get(&link, nullptr, cap), &error, &got));
+        Configuration back;
+        mapFromDevice(got, back);
+        CHECK(foldedWhole(back));
+    }
+
+    // A CAN Triple from 1.0.16: received, in the record's spare room.
+    DeviceCapacity rx1 = DeviceCapacity::builtIn();
+    rx1.canFeatures |= CAPACITY_CAN_SELECTOR_32_RX;
+    rx1.reported = true;
+    {
+        Configuration c;
+        build(c, rx1, SectionDevice::ReceiveMessage);
+        CHECK(!issueSays(c, ValidationIssue::Error, "identifier mask")
+              && !issueSays(c, ValidationIssue::Warning, "identifier mask"));
+        const MappingResult mr = mapToDevice(c);
+        RT_REQUIRE(mr.ok());
+        const int a = mr.channelToSignal.value(QStringLiteral("wide a"), -1);
+        RT_REQUIRE(a >= 0);
+        const CanSignalConfig &sig = mr.tables.signalConfigs[a];
+        CHECK(sigRxMuxMaskHi(sig) == 0xFFFF && sig.tx_source == 0x3020 && sig.mux_mask == 0xFFF0
+              && sig.mux_id == 0x1010);
+        CHECK(std::all_of(mr.tables.signalMuxHigh.cbegin(), mr.tables.signalMuxHigh.cend(),
+                          [](quint32 h) { return h == 0; }));
+        // Bit 31 is set (the mask's top digit), and keeps nothing.
+        CHECK(sigRetain(sig) && retainedValuesOf(mr.tables) == 0
+              && tablesExceeding(mr.tables, rx1).isEmpty());
+        DeviceTables got = mr.tables;
+        got.capacity = rx1;
+        Configuration back;
+        mapFromDevice(got, back);
+        CHECK(foldedWhole(back) && back.retainedChannels.isEmpty());
+    }
+    {
+        // Built-in numbers (a 1.0.15 says nothing): a warning, and the Send
+        // refuses the unit that does not say so.
+        Configuration c;
+        build(c, DeviceCapacity::builtIn(), SectionDevice::ReceiveMessage);
+        CHECK(issueSays(c, ValidationIssue::Warning, "from firmware 1.0.16"));
+        const MappingResult mr = mapToDevice(c);
+        CHECK(mr.ok() && !tablesExceeding(mr.tables, DeviceCapacity::builtIn()).isEmpty()
+              && tablesExceeding(mr.tables, rx1).isEmpty());
+    }
+    {
+        // Transmitted by a CAN Triple: 2 bytes, refused.
+        Configuration c;
+        build(c, rx1, SectionDevice::TransmitMessage);
+        CHECK(errorsSay(mapToDevice(c), "transmits identifiers of up to 2 bytes")
+              && issueSays(c, ValidationIssue::Error, "transmits identifiers of up to 2 bytes"));
+    }
+    {
+        // A digit of the mask's upper half that is not 0 or F: refused.
+        Configuration c;
+        build(c, rx1, SectionDevice::ReceiveMessage);
+        c.bus[0].sections[0].identifiers[0].idMask = bytes("F0 FF F7 FF");
+        CHECK(errorsSay(mapToDevice(c), "whole hex digits")
+              && issueSays(c, ValidationIssue::Error, "whole hex digits"));
+    }
+    {
+        // A mask that reaches past the message: the selector reads zero there.
+        Configuration c;
+        build(c, planTarget(), SectionDevice::ReceiveMessage);
+        c.bus[0].sections[0].identifiers[0].byteOffset = 6;
+        CHECK(issueSays(c, ValidationIssue::Warning, "reaches byte 9, past the 8-byte message"));
+        c.bus[0].sections[0].identifiers[0].byteOffset = 4;
+        CHECK(!issueSays(c, ValidationIssue::Warning, "past the 8-byte message"));
+    }
+    {
+        // A CAN Triple 2.0 before 2.0.6: refused.
+        DeviceCapacity old2 = planTarget();
+        old2.canFeatures &= ~CAPACITY_CAN_SELECTOR_32;
+        old2.tables[int(DeviceTable::Signals)].itemSize = V2_SIGNAL_BYTES;
+        Configuration c;
+        build(c, old2, SectionDevice::ReceiveMessage);
+        CHECK(errorsSay(mapToDevice(c), "from firmware 2.0.6")
+              && issueSays(c, ValidationIssue::Error, "from firmware 2.0.6"));
+    }
+    {
+        // Twenty identifiers on one received message, past the editor's 16.
+        Configuration c;
+        c.bus[0].enabled = true;
+        CommsSection s;
+        s.name = QStringLiteral("Twenty");
+        s.device = SectionDevice::ReceiveMessage;
+        s.baseAddress = 0x310;
+        s.messageLengthBytes = 8;
+        s.alignment = SectionAlignment::WordSwap;
+        s.compound = true;
+        for (int k = 0; k < 20; ++k) {
+            Channel ch;
+            ch.name = QStringLiteral("Segment %1").arg(k + 1);
+            ch.dataType = QStringLiteral("u8");
+            ch.minValue = 0;
+            ch.maxValue = 255;
+            c.catalog().addOrUpdateUserChannel(ch);
+            CompoundIdentifier i;
+            i.id = quint32(k + 1);
+            i.idMask = 0xFF;
+            i.configured = true;
+            CommsChannelRow row;
+            row.channelName = ch.name;
+            row.startBit = 8;
+            row.bitLength = 8;
+            i.rows.append(row);
+            s.identifiers.append(i);
+        }
+        c.bus[0].sections.append(s);
+        const MappingResult mr = mapToDevice(c);
+        RT_REQUIRE(mr.ok());
+        Configuration back;
+        mapFromDevice(mr.tables, back);
+        int idents = 0;
+        for (const CommsSection &b : back.bus[0].sections)
+            if (b.compound)
+                idents += int(b.identifiers.size());
+        CHECK(idents == 20);
+    }
+    {
+        // Which line a target is: a CAN Triple 2.0 keeps its names apart
+        // (every 2.0 released) or takes a plan; a CAN Triple says neither. A
+        // 2.0 before 2.0.6 that takes no plan (2.0.2) is refused as a 2.0,
+        // never taken in a CAN Triple's digits.
+        CHECK(planTarget().isCanTriple2() && labelStoreTarget().isCanTriple2()
+              && !DeviceCapacity::builtIn().isCanTriple2() && !rx1.isCanTriple2());
+        Configuration c;
+        build(c, labelStoreTarget(), SectionDevice::ReceiveMessage);
+        CHECK(errorsSay(mapToDevice(c), "from firmware 2.0.6")
+              && !issueSays(c, ValidationIssue::Warning, "from firmware 1.0.16"));
+    }
+    {
+        // A Send across the lines moves the upper halves into the unit's form
+        // (tablesForUnit): a CAN Triple's received identifier to a CAN Triple
+        // 2.0 from 2.0.6 goes beside the record, the record's spare room
+        // cleared and the channel on the same message...
+        const DeviceCapacity to20 = planTarget();
+        Configuration c;
+        build(c, rx1, SectionDevice::ReceiveMessage);
+        const MappingResult mr = mapToDevice(c);
+        RT_REQUIRE(mr.ok());
+        const int a = mr.channelToSignal.value(QStringLiteral("wide a"), -1);
+        RT_REQUIRE(a >= 0);
+        CHECK(tablesExceeding(mr.tables, to20).isEmpty());
+        const DeviceTables there = tablesForUnit(mr.tables, to20);
+        CHECK(there.capacity.selector32()); // so its records go 36 bytes each
+        const CanSignalConfig &moved = there.signalConfigs[a];
+        CHECK(there.signalMuxHigh.value(a) == 0xFFFF3020u && sigRxMuxMaskHi(moved) == 0
+              && moved.tx_source == 0 && !sigRetain(moved) && moved.mux_id == 0x1010
+              && moved.mux_mask == 0xFFF0
+              && sigMsgIdx(moved, true) == sigMsgIdx(mr.tables.signalConfigs[a]));
+        Configuration back;
+        mapFromDevice(there, back);
+        CHECK(foldedWhole(back) && back.retainedChannels.isEmpty());
+        // The fingerprint a Send stamps covers the upper halves: tables that
+        // differ only there are two configurations.
+        DeviceTables otherId = there;
+        otherId.signalMuxHigh[a] ^= 0x1u;
+        CHECK(ConfigTransfer::configurationFingerprint(there)
+              != ConfigTransfer::configurationFingerprint(otherId));
+        // ...and a CAN Triple 2.0's to a CAN Triple from 1.0.16, in the
+        // record's spare room, nothing beside it.
+        Configuration c2;
+        build(c2, to20, SectionDevice::ReceiveMessage);
+        const MappingResult mr2 = mapToDevice(c2);
+        RT_REQUIRE(mr2.ok());
+        const int a2 = mr2.channelToSignal.value(QStringLiteral("wide a"), -1);
+        RT_REQUIRE(a2 >= 0);
+        CHECK(tablesExceeding(mr2.tables, rx1).isEmpty());
+        const DeviceTables here = tablesForUnit(mr2.tables, rx1);
+        CHECK(!here.capacity.selector32() && here.capacity.selector32Receive());
+        const CanSignalConfig &home = here.signalConfigs[a2];
+        CHECK(sigRxMuxMaskHi(home) == 0xFFFF && home.tx_source == 0x3020
+              && std::all_of(here.signalMuxHigh.cbegin(), here.signalMuxHigh.cend(),
+                             [](quint32 h) { return h == 0; })
+              && sigMsgIdx(home) == sigMsgIdx(mr2.tables.signalConfigs[a2], true));
+        Configuration back2;
+        mapFromDevice(here, back2);
+        CHECK(foldedWhole(back2) && back2.retainedChannels.isEmpty());
+        // What the unit cannot compare in its form is refused by name: a CAN
+        // Triple from 1.0.16 compares received identifiers only, in whole
+        // digits; one before it, none; a 2.0 before 2.0.6, none.
+        CHECK(!tablesExceeding(mr2.tables, DeviceCapacity::builtIn()).isEmpty());
+        CHECK(tablesExceeding(mr.tables, labelStoreTarget())
+                  .join(QStringLiteral(" "))
+                  .contains(QStringLiteral("2.0.6")));
+        Configuration tx;
+        build(tx, to20, SectionDevice::TransmitMessage);
+        const MappingResult txm = mapToDevice(tx);
+        RT_REQUIRE(txm.ok());
+        CHECK(tablesExceeding(txm.tables, rx1)
+                  .join(QStringLiteral(" "))
+                  .contains(QStringLiteral("on received messages only")));
+        CHECK(tablesExceeding(txm.tables, to20).isEmpty());
+        Configuration f7;
+        build(f7, to20, SectionDevice::ReceiveMessage);
+        f7.bus[0].sections[0].identifiers[0].idMask = bytes("F0 FF F7 FF");
+        const MappingResult f7m = mapToDevice(f7);
+        RT_REQUIRE(f7m.ok());
+        CHECK(!tablesExceeding(f7m.tables, rx1).isEmpty()
+              && tablesExceeding(f7m.tables, to20).isEmpty());
+    }
+    {
+        // The bit that keeps a CAN Triple 2.0's channel goes to no unit that
+        // keeps none: on a CAN Triple from 1.0.16 it is a digit of a received
+        // identifier's mask, and would gate the channel on byte 3 of its
+        // message. The identifiers' own digits stay.
+        DeviceCapacity keeps = planTarget();
+        keeps.retainedChannels = true;
+        Configuration c;
+        build(c, keeps, SectionDevice::ReceiveMessage);
+        Channel kept;
+        kept.name = QStringLiteral("Kept");
+        kept.dataType = QStringLiteral("u8");
+        kept.minValue = 0;
+        kept.maxValue = 255;
+        c.catalog().addOrUpdateUserChannel(kept);
+        CommsSection plain;
+        plain.name = QStringLiteral("Plain");
+        plain.device = SectionDevice::ReceiveMessage;
+        plain.baseAddress = 0x310;
+        plain.messageLengthBytes = 8;
+        plain.alignment = SectionAlignment::WordSwap;
+        CommsChannelRow row;
+        row.channelName = kept.name;
+        row.startBit = 0;
+        row.bitLength = 8;
+        plain.rows.append(row);
+        c.bus[0].sections.append(plain);
+        c.setRetainedChannel(kept.name, true);
+        const MappingResult mr = mapToDevice(c);
+        RT_REQUIRE(mr.ok());
+        const int k = mr.channelToSignal.value(QStringLiteral("kept"), -1);
+        const int a = mr.channelToSignal.value(QStringLiteral("wide a"), -1);
+        RT_REQUIRE(k >= 0 && a >= 0);
+        CHECK(sigRetain(mr.tables.signalConfigs[k]));
+        const DeviceTables here = tablesForUnit(mr.tables, rx1);
+        CHECK(!sigRetain(here.signalConfigs[k]) && sigRxMuxMaskHi(here.signalConfigs[k]) == 0
+              && sigRxMuxMaskHi(here.signalConfigs[a]) == 0xFFFF);
+        // To a 2.0 that keeps channels it stays.
+        CHECK(sigRetain(tablesForUnit(mr.tables, keeps).signalConfigs[k]));
+    }
+    {
+        // A CAN Triple's mask digits, each its own: bytes 2 and 3 of
+        // F0 FF 0F F0 are the digits F, 0, 0, F from the lowest.
+        Configuration c;
+        build(c, rx1, SectionDevice::ReceiveMessage);
+        c.bus[0].sections[0].identifiers[0].idMask = bytes("F0 FF 0F F0");
+        const MappingResult mr = mapToDevice(c);
+        RT_REQUIRE(mr.ok());
+        const int a = mr.channelToSignal.value(QStringLiteral("wide a"), -1);
+        RT_REQUIRE(a >= 0);
+        const CanSignalConfig &sig = mr.tables.signalConfigs[a];
+        CHECK(sigRxMuxMaskHi(sig) == 0xF00F && (sig.msg_and_flags & SIG_FLAG_RX_MUXHI_D4)
+              && !(sig.msg_and_flags & (SIG_FLAG_RX_MUXHI_D5 | SIG_FLAG_RX_MUXHI_D6))
+              && (sig.bits & SIG_BITS_RX_MUXHI_D7) && sig.tx_source == 0x3020);
+        DeviceTables got = mr.tables;
+        got.capacity = rx1;
+        Configuration back;
+        mapFromDevice(got, back);
+        bool found = false;
+        for (const CommsSection &s : back.bus[0].sections)
+            for (const CompoundIdentifier &i : s.identifiers)
+                found = found || (i.id == 0x30201010u && i.idMask == 0xF00FFFF0u);
+        CHECK(found);
+    }
+    {
+        // On a CAN Triple a transmitted channel's tx_source is its source, never
+        // an identifier's upper half, whatever its spare bits say; on a
+        // received one the same record is an identifier of 4 bytes.
+        DeviceTables t;
+        t.capacity = rx1;
+        CanMessageConfig m{};
+        m.flags = MSGFLAG_ACTIVE | MSGFLAG_TRANSMIT;
+        t.messages.append(m);
+        CanSignalConfig s{};
+        sigSetHeader(s, 0, 0, 1);
+        s.tx_source = 7;
+        s.msg_and_flags |= SIG_FLAG_RX_MUXHI_D4;
+        t.signalConfigs.append(s);
+        CHECK(signalMuxHighOf(t, 0) == 0);
+        t.messages[0].flags = MSGFLAG_ACTIVE;
+        CHECK(signalMuxHighOf(t, 0) == 0x000F0007u);
+        // And a CAN Triple 2.0's record never reads that way.
+        t.capacity = planTarget();
+        CHECK(signalMuxHighOf(t, 0) == 0);
+    }
+    std::printf("  32-bit compound identifiers         : 2.0.6 both ways, 1.0.16 received, "
+                "refusals named, 20 identifiers, moved across the lines\n");
 }
 
 // THE BIT RATE SWITCH, MESSAGE BY MESSAGE (Mitch, 2026-10-08). A CAN FD
@@ -10786,6 +11246,7 @@ static void testCapacityPlumbing()
         planned.needsLabelStore = true;
         planned.needsPlan = true;
         planned.references = 3;
+        planned.signalRecordsHigh = true; // built for 2.0.6, as planTarget() is
         const SecurePackagePolicy planBack = SecurePackagePolicy::fromJson(planned.toJson());
         CHECK(planBack.needsPlan && planBack.references == 3);
         const SecurePackagePolicy plainBack = SecurePackagePolicy::fromJson(policy.toJson());
@@ -10805,6 +11266,42 @@ static void testCapacityPlumbing()
         unplanned.references = -1;
         unit.capacity = planTarget();
         CHECK(packageInstallVerdict(unplanned, unit).ok());
+        // The channel records' size (store v24): 36 bytes a record on a CAN
+        // Triple 2.0 from 2.0.6, 32 before, held to each other both ways; a
+        // package that writes no channel records is not judged on them.
+        CHECK(SecurePackagePolicy::fromJson(planned.toJson()).signalRecordsHigh
+              && !SecurePackagePolicy::fromJson(policy.toJson()).signalRecordsHigh);
+        SecurePackagePolicy before206 = planned;
+        before206.signalRecordsHigh = false;
+        const InstallVerdict newerUnit = packageInstallVerdict(before206, unit);
+        CHECK(!newerUnit.ok() && newerUnit.signalFormMismatch && newerUnit.shortfalls.isEmpty());
+        DeviceCapacity unit205 = planTarget();
+        unit205.canFeatures &= ~CAPACITY_CAN_SELECTOR_32;
+        unit.capacity = unit205;
+        CHECK(packageInstallVerdict(before206, unit).ok());
+        const InstallVerdict olderUnit = packageInstallVerdict(planned, unit);
+        CHECK(!olderUnit.ok() && olderUnit.signalFormMismatch);
+        SecurePackagePolicy noChannels = before206;
+        noChannels.tableCounts[int(DeviceTable::Signals)] = 0;
+        unit.capacity = planTarget();
+        CHECK(!packageInstallVerdict(noChannels, unit).signalFormMismatch);
+        // Received identifiers of 4 bytes in a CAN Triple's records: only on a
+        // unit that says it compares them (1.0.16), never on one that could not
+        // say.
+        SecurePackagePolicy rx32 = policy;
+        rx32.receivedSelectors32 = true;
+        CHECK(SecurePackagePolicy::fromJson(rx32.toJson()).receivedSelectors32
+              && !SecurePackagePolicy::fromJson(policy.toJson()).receivedSelectors32);
+        unit.capacity = DeviceCapacity::builtIn();
+        unit.capacity.reported = true;
+        const InstallVerdict on1015 = packageInstallVerdict(rx32, unit);
+        CHECK(!on1015.ok() && on1015.receivedSelectors32Missing);
+        unit.capacity.canFeatures |= CAPACITY_CAN_SELECTOR_32_RX;
+        CHECK(packageInstallVerdict(rx32, unit).ok() && packageInstallVerdict(policy, unit).ok());
+        unit.capacityKnown = false;
+        CHECK(packageInstallVerdict(rx32, unit).receivedSelectors32Missing);
+        unit.capacityKnown = true;
+        unit.capacity = planTarget();
         // A unit whose capacity could not be read is not refused for it.
         unit.capacityKnown = false;
         CHECK(!packageInstallVerdict(planned, unit).planMissing);
@@ -10880,6 +11377,7 @@ int main(int argc, char *argv[])
     testConfigNotes();
     testBrsPerMessage();
     testUdsRequest();
+    testCompound32();
     testRetainedChannels();
     testUnitsAndValueNames();
     testUnitTarget();

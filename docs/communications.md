@@ -360,7 +360,26 @@ The **Message Type** box selects **Single** or **Compound** (multiplexed). Switc
 
 **The list is always in frame order:** Start Bit, then Bit Length, then name. So it reads the way the frame map below it is drawn, and a channel is where its bits are rather than where it happened to be added. Two rows may share a start bit — a receive message can decode the same bits twice — and then the narrower field comes first, then the name. Changing a row's Start Bit moves it in the list, and the selection moves with it, so the frame map keeps shading the channel you were looking at. The order is saved with the message, and the **Channels** pane in Communications Setup shows the same one.
 
-**Compound** messages carry channels only inside *identifiers* — there is no shared always-present set; a signal present in every variant is defined in each identifier. The **Identifiers :** table lists 16 numbered slots with **Offset**, **ID** and **ID Mask** columns; **Change…** opens the **Compound Message Identifier** dialog (Offset / Identifier / Identifier Mask) and **Clear** empties a slot. A received frame decodes an identifier's channels only while the frame's selector window at that byte offset matches (selector &amp; mask) == (ID &amp; mask). The channel list and frame map show one identifier at a time — variants may legitimately reuse the same bits.
+**Compound** messages carry channels only inside *identifiers* — there is no shared always-present set; a signal present in every variant is defined in each identifier. The **Identifiers :** table starts with 16 numbered slots with **Offset**, **ID** and **ID Mask** columns. **Add** adds a slot and **Remove** deletes one with its channels; **Change…** opens the **Compound Message Identifier** dialog (Offset / Identifier / Identifier Mask) and **Clear** empties a slot. A received message takes any number of identifiers, since each channel carries its own; a transmitted one up to 32, the variants the unit composes. A received frame decodes an identifier's channels only while the frame's selector window at that byte offset matches (selector &amp; mask) == (ID &amp; mask). The channel list and frame map show one identifier at a time — variants may legitimately reuse the same bits.
+
+<a id="identifier-bytes"></a>
+
+### Identifier and mask, byte by byte
+
+The **Identifier** and **Identifier Mask** are written as bytes in the order they appear in the frame, starting at the **Offset** — byte 0 first, exactly as a trace shows them. A mask of `F0 FF FF FF` at offset 0 compares the high nibble of byte 0 and all of bytes 1, 2 and 3; with the identifier `10 10 20 30`, the frame `1A 10 20 30 …` matches and `2A 10 20 30 …` does not. Spaces are optional (`F0FFFFFF` is the same), each byte is two hex digits, and up to 4 bytes can be compared:
+
+<table>
+<tr><th>Unit</th><th>Identifier width</th></tr>
+<tr><td>CAN Triple 2.0, firmware 2.0.6 or later</td><td>4 bytes, received and
+transmitted, any mask.</td></tr>
+<tr><td>CAN Triple, firmware 1.0.16 or later</td><td>4 bytes on received
+messages, the last two bytes of the mask in whole hex digits (each <code>0</code>
+or <code>F</code>: <code>FF</code>, <code>F0</code>, <code>0F</code> and
+<code>00</code>); 2 bytes on transmitted messages.</td></tr>
+<tr><td>Earlier firmware</td><td>2 bytes.</td></tr>
+</table>
+
+Check Channels says when a mask is wider than the target firmware compares, and a Send refuses a unit whose firmware would compare less of it than the configuration asks.
 
 **An identifier with no channels is still transmitted.** Give a slot an Offset, ID and ID Mask and leave it empty, and the device sends that variant each period carrying its selector over an all-zero payload — which is the whole message for a request or a ping frame, where the ID byte IS the content. Both cadences honour it: Batch sends it alongside the others, and Sequential gives it its turn in the rotation. Only slots you have actually set count; an untouched slot sends nothing.
 

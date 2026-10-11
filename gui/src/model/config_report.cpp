@@ -510,11 +510,13 @@ ReportBuilder buildReport(const Configuration &config)
                     QString idLine =
                         concealed
                             ? QStringLiteral("      Id[%1]  %2").arg(i + 1).arg(withheld)
-                            : QStringLiteral("      Id[%1]  offset %2, id 0x%3, mask 0x%4")
+                            : QStringLiteral("      Id[%1]  offset %2, id %3, mask %4 (byte 0 first)")
                                   .arg(i + 1)
                                   .arg(ident.byteOffset)
-                                  .arg(QString::number(ident.id, 16).toUpper(),
-                                       QString::number(ident.idMask, 16).toUpper());
+                                  .arg(compoundBytesText(ident.id,
+                                                         compoundSelectorBytes(ident.id, ident.idMask)),
+                                       compoundBytesText(ident.idMask,
+                                                         compoundSelectorBytes(ident.id, ident.idMask)));
                     if (ident.idMask == 0 && !concealed)
                         idLine += QStringLiteral("  [mask 0 - skipped, not sent to the device]");
                     r.line(idLine);

@@ -134,7 +134,7 @@ QList<int> identifierBitPositions(const CompoundIdentifier &ident)
     QList<int> bits;
     if (ident.idMask == 0)
         return bits; // "always active" — the device never reads the window
-    for (int b = 0; b < 16; ++b)
+    for (int b = 0; b < 32; ++b) // the window is 4 bytes (2 before 2.0.6 / 1.0.16)
         if ((ident.idMask >> b) & 1u)
             bits.append(ident.byteOffset * 8 + b);
     return bits;

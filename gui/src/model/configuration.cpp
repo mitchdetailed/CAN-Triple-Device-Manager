@@ -6,6 +6,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 
 #include "../protocol/wire_structs.h" // TABLE_2X16_SITES, MSGPROT_*
 #include "comms_template.h"          // kCommsTemplateFileType - the .ct3t marker
@@ -146,6 +147,47 @@ CompoundIdentifier CompoundIdentifier::fromJson(const QJsonObject &o)
     // values — infer that so their identifiers still show up.
     c.configured = o["configured"].toBool(c.id != 0 || c.byteOffset != 0 || !c.rows.isEmpty());
     return c;
+}
+
+int compoundSelectorBytes(quint32 id, quint32 mask)
+{
+    const quint32 v = id | mask;
+    int n = 1;
+    for (int b = 1; b < 4; ++b)
+        if ((v >> (8 * b)) & 0xFFu)
+            n = b + 1;
+    return n;
+}
+
+QString compoundBytesText(quint32 value, int bytes)
+{
+    QStringList parts;
+    for (int b = 0; b < qBound(1, bytes, 4); ++b)
+        parts << QStringLiteral("%1").arg((value >> (8 * b)) & 0xFFu, 2, 16, QLatin1Char('0')).toUpper();
+    return parts.join(QLatin1Char(' '));
+}
+
+bool parseCompoundBytes(const QString &text, quint32 *value, int *bytes)
+{
+    QString t = text.trimmed();
+    if (t.startsWith(QLatin1String("0x"), Qt::CaseInsensitive))
+        t = t.mid(2);
+    t.remove(QLatin1Char(' '));
+    static const QRegularExpression kHex(QStringLiteral("^[0-9A-Fa-f]{1,8}$"));
+    if (!kHex.match(t).hasMatch())
+        return false;
+    if (t.size() == 1)
+        t.prepend(QLatin1Char('0'));
+    if (t.size() % 2)
+        return false; // half a byte: which half is not knowable
+    quint32 v = 0;
+    for (int b = 0; b < t.size() / 2; ++b)
+        v |= quint32(t.mid(2 * b, 2).toUInt(nullptr, 16)) << (8 * b);
+    if (value)
+        *value = v;
+    if (bytes)
+        *bytes = t.size() / 2;
+    return true;
 }
 
 // ---- CommsSection ----

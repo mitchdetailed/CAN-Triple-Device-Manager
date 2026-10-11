@@ -190,11 +190,19 @@ constexpr uint8_t CMD_GET_PROTECTION = 0x4F;
 // the same question — protocol/capacity.h parses both. Older firmware NACKs
 // ERR_INVALID_CMD, which reads as "the numbers this build always assumed"
 // (DeviceCapacity::builtIn()).
+//
+// A CAN Triple from 1.0.16 also takes a REQUIREMENT CHECK: the request
+// carrying a u16 of CapacityExtension.can_features bits, answered ACK when the
+// unit has every one and ERR_INVALID_CMD when it lacks one (never the report).
+// Earlier firmware refuses any request that carries a payload
+// (ERR_INVALID_LEN). Only a sealed package's stream sends it, at its head,
+// where its reply is the sealed frame's ACK (package_builder.cpp).
 constexpr uint8_t CMD_GET_CAPACITY = 0x50;
 constexpr uint8_t CAPACITY_REPORT_FORMAT = 1;
 // The CAN Triple 2.0 line: format 1 followed by a CapacityExtension, which says
 // what the unit holds besides its tables (today: its retained values). The 1.x
-// line, and every image before the 2.0 line, sends format 1.
+// line sends format 1 until 1.0.16, and then format 2 with the extension's
+// head as far as can_features (the 1.x's CapacityExtensionHead).
 constexpr uint8_t CAPACITY_REPORT_FORMAT_EXT = 2;
 // v25 (firmware 1.0.12): channel overrides. SET pins one signal at a value in
 // its physical units (OverridePayload below, 7 bytes) or releases it; LEASE
@@ -1926,6 +1934,15 @@ constexpr uint16_t CAPACITY_CAN_FAST_DATA = 0x0001;
 constexpr uint16_t CAPACITY_CAN_BRS_PER_MESSAGE = 0x0002;
 // The unit makes UDS requests as a tester (DeviceTable::Uds, UdsConfig).
 constexpr uint16_t CAPACITY_CAN_UDS_REQUESTS = 0x0004;
+// Compound identifiers and masks of 32 bits, of every message: a CAN Triple
+// 2.0 from 2.0.6 (store v24), whose signal record ends with the two upper
+// halves (V2_SIGNAL_HIGH_BYTES). Without it a unit compares 2 bytes.
+constexpr uint16_t CAPACITY_CAN_SELECTOR_32 = 0x0008;
+// Of RECEIVED messages only, the mask's upper half in whole hex digits: a CAN
+// Triple (1.x) from 1.0.16, whose record keeps them in its spare room
+// (SIG_FLAG_RX_MUXHI_*). Its report is format 2 from then, an extension of
+// the 2.0's block as far as can_features.
+constexpr uint16_t CAPACITY_CAN_SELECTOR_32_RX = 0x0010;
 // CapacityExtension.build_flags: a PRODUCTION build, which sets the chip's
 // readout protection the first time it starts, licensed or not. Clear: a
 // development build, which leaves it alone unless the unit is licensed.
@@ -2099,7 +2116,7 @@ constexpr uint16_t EXPECTED_STORE_VERSION = 20;
 // the unit is (its hardware report) and expects that line's number.
 // 22 since its CRC8 record holds 8 elements (long rules, above); 23 since its
 // sixteenth table, the UDS requests.
-constexpr uint16_t EXPECTED_STORE_VERSION_2 = 23;
+constexpr uint16_t EXPECTED_STORE_VERSION_2 = 24;
 
 #pragma pack(pop)
 
@@ -2137,6 +2154,17 @@ constexpr uint16_t SIG_FLAG_SELECTOR_ONLY = 0x1000;
 // (CAPACITY_RETAINED_CHANNELS); the 1.x reads none of it. See the 2.0
 // protocol.h's SIG_BITS_RETAIN.
 constexpr uint32_t SIG_BITS_RETAIN = 0x80000000u;
+// A CAN Triple (1.x) from 1.0.16: A RECEIVED COMPOUND IDENTIFIER OF 32 BITS,
+// with no store change. The identifier's upper half rides in tx_source, which
+// a received signal never reads; the mask's upper half is set in whole hex
+// digits by four bits no 1.x record has used — the same bits the 2.0 uses for
+// a message index's top bits (msg_and_flags 13..15) and for SIG_BITS_RETAIN
+// (bits 31), so these are read of a 1.x record only. A set bit makes that
+// digit of the mask F, a clear one 0. See the firmware's protocol.h.
+constexpr uint16_t SIG_FLAG_RX_MUXHI_D4 = 0x2000;     // mask bits 16..19
+constexpr uint16_t SIG_FLAG_RX_MUXHI_D5 = 0x4000;     // mask bits 20..23
+constexpr uint16_t SIG_FLAG_RX_MUXHI_D6 = 0x8000;     // mask bits 24..27
+constexpr uint32_t SIG_BITS_RX_MUXHI_D7 = 0x80000000u; // mask bits 28..31
 
 inline uint16_t sigMsgIdx(const CanSignalConfig &s)
 {
@@ -2158,6 +2186,51 @@ inline int8_t sigDecimalPlaces(const CanSignalConfig &s)
 inline uint8_t sigMuxByteOffset(const CanSignalConfig &s)
 { return uint8_t((s.bits >> 25) & SIG_MUXOFF_MASK); }
 inline bool sigRetain(const CanSignalConfig &s) { return (s.bits & SIG_BITS_RETAIN) != 0; }
+// A 1.x record's received identifier: its mask's upper half, from the four
+// digit bits (SIG_FLAG_RX_MUXHI_*).
+inline uint16_t sigRxMuxMaskHi(const CanSignalConfig &s)
+{
+    uint16_t m = 0;
+    if (s.msg_and_flags & SIG_FLAG_RX_MUXHI_D4)
+        m |= 0x000F;
+    if (s.msg_and_flags & SIG_FLAG_RX_MUXHI_D5)
+        m |= 0x00F0;
+    if (s.msg_and_flags & SIG_FLAG_RX_MUXHI_D6)
+        m |= 0x0F00;
+    if (s.bits & SIG_BITS_RX_MUXHI_D7)
+        m |= 0xF000;
+    return m;
+}
+// Whether a mask's upper half is whole hex digits, each 0 or F: what a 1.x
+// record can say.
+inline bool muxMaskHiByDigits(uint16_t hi)
+{
+    for (int d = 0; d < 4; ++d) {
+        const uint16_t n = uint16_t((hi >> (4 * d)) & 0xF);
+        if (n != 0 && n != 0xF)
+            return false;
+    }
+    return true;
+}
+// Writes a received identifier's upper halves into a 1.x record (and clears
+// them for an identifier of 2 bytes): the mask's must be whole digits
+// (muxMaskHiByDigits), any digit that is not reads as 0.
+inline void sigSetRxMuxHigh(CanSignalConfig &s, uint16_t idHi, uint16_t maskHi)
+{
+    const auto digit = [maskHi](int d) { return ((maskHi >> (4 * d)) & 0xF) == 0xF; };
+    s.msg_and_flags = uint16_t(s.msg_and_flags
+                               & ~(SIG_FLAG_RX_MUXHI_D4 | SIG_FLAG_RX_MUXHI_D5 | SIG_FLAG_RX_MUXHI_D6));
+    s.bits &= ~SIG_BITS_RX_MUXHI_D7;
+    if (digit(0))
+        s.msg_and_flags |= SIG_FLAG_RX_MUXHI_D4;
+    if (digit(1))
+        s.msg_and_flags |= SIG_FLAG_RX_MUXHI_D5;
+    if (digit(2))
+        s.msg_and_flags |= SIG_FLAG_RX_MUXHI_D6;
+    if (digit(3))
+        s.bits |= SIG_BITS_RX_MUXHI_D7;
+    s.tx_source = maskHi ? idHi : 0;
+}
 
 inline void sigSetHeader(CanSignalConfig &s, uint16_t msgIdx, uint8_t byteOrder, uint8_t isActive)
 {
@@ -2302,6 +2375,10 @@ static_assert(sizeof(RelayConfig) == 29, "must match firmware");
 // 2.0 record one contiguous run of the 1.x one.
 constexpr int V2_MESSAGE_AT = 0, V2_MESSAGE_BYTES = 14;
 constexpr int V2_SIGNAL_AT = 32, V2_SIGNAL_BYTES = 32;
+// And from store v24 (CAPACITY_CAN_SELECTOR_32) the signal record goes on with
+// its compound identifier's and mask's upper halves, u16 each, which ours does
+// not have room for: DeviceTables::signalMuxHigh keeps them beside it.
+constexpr int V2_SIGNAL_HIGH_BYTES = 4;
 constexpr int V2_RELAY_AT = 0, V2_RELAY_BYTES = 11;
 static_assert(offsetof(CanMessageConfig, label) == V2_MESSAGE_AT + V2_MESSAGE_BYTES,
               "the 2.0 message record is the 1.x one up to its label");

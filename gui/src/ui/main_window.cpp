@@ -2134,6 +2134,33 @@ bool MainWindow::checkPackagePolicy(const SecurePackagePolicy &policy, const QSt
                "on."));
         return false;
     }
+    // The channel records: 36 bytes on a CAN Triple 2.0 from firmware 2.0.6,
+    // which ends each with its compound identifier's upper bytes, 32 before.
+    if (verdict.signalFormMismatch) {
+        QMessageBox::critical(
+            this, title,
+            policy.signalRecordsHigh
+                ? tr("This package was built for CAN Triple 2.0 firmware 2.0.6 or later, whose "
+                     "channel records hold compound identifiers of 4 bytes. The connected "
+                     "unit's firmware predates that.\n\nIt has NOT been sent. Update the unit's "
+                     "firmware, or build a package with this unit as its target.")
+                : tr("This package was built for CAN Triple 2.0 firmware before 2.0.6. The "
+                     "connected unit's firmware keeps its channel records in the later form, "
+                     "with compound identifiers of 4 bytes.\n\nIt has NOT been sent. Build a "
+                     "package with this unit as its target."));
+        return false;
+    }
+    // Received compound identifiers of 4 bytes, which a CAN Triple compares
+    // from firmware 1.0.16 and would compare in 2 bytes before.
+    if (verdict.receivedSelectors32Missing) {
+        QMessageBox::critical(
+            this, title,
+            tr("This package receives compound messages whose identifiers are wider than 2 "
+               "bytes. The connected unit's firmware compares only 2 bytes of them (a CAN "
+               "Triple compares 4 on received messages from firmware 1.0.16).\n\nIt has NOT "
+               "been sent. Update the unit's firmware first."));
+        return false;
+    }
     // Built for a CAN Triple 2.0 that sizes each configuration's tables (phase
     // 4), and this one's firmware does not. Asked after the names, so a CAN
     // Triple (1.x) is told it is the wrong kind of unit rather than to update.

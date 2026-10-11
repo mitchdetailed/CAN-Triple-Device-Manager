@@ -119,6 +119,11 @@ const unsigned v2_label_bytes = LABEL_BYTES;
 const unsigned v2_capacity_label_at = offsetof(CapacityExtension, label_bytes);
 const unsigned v2_record_sizes[3] = {sizeof(CanMessageConfig), sizeof(CanSignalConfig),
                                      sizeof(RelayConfig)};
+/* Compound identifiers of 32 bits (store v24): the report's bits, and where
+ * the record's upper halves sit. */
+const unsigned v2_selector32[5] = {CAPACITY_CAN_SELECTOR_32, CAPACITY_CAN_SELECTOR_32_RX,
+                                   sizeof(CanSignalConfig), offsetof(CanSignalConfig, mux_id_hi),
+                                   offsetof(CanSignalConfig, mux_mask_hi)};
 const unsigned v2_message_offsets[9] = {
     offsetof(CanMessageConfig, can_id),         offsetof(CanMessageConfig, flags),
     offsetof(CanMessageConfig, src_bus),        offsetof(CanMessageConfig, route_bus_mask),

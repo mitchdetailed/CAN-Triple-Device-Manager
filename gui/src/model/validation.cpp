@@ -356,6 +356,23 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                             QStringLiteral("identifier offset %1 is outside the %2-byte message "
                                            "— the selector reads zero there")
                                 .arg(ident.byteOffset).arg(s.messageLengthBytes));
+                    else if (ident.idMask != 0
+                             && ident.byteOffset + compoundSelectorBytes(0, ident.idMask)
+                                    > s.messageLengthBytes)
+                        add(ValidationIssue::Warning, iloc,
+                            QStringLiteral("identifier mask %1 reaches byte %2, past the %3-byte "
+                                           "message — the selector reads zero there")
+                                .arg(compoundBytesText(ident.idMask,
+                                                       compoundSelectorBytes(0, ident.idMask)))
+                                .arg(ident.byteOffset + compoundSelectorBytes(0, ident.idMask) - 1)
+                                .arg(s.messageLengthBytes));
+                    // Wider than 2 bytes: whether the target compares it, as the
+                    // mapper asks (checkSelectorWidth).
+                    const SelectorWidthCheck width =
+                        checkSelectorWidth(ident, config.capacity(), s.isTransmit());
+                    if (!width.text.isEmpty())
+                        add(width.error ? ValidationIssue::Error : ValidationIssue::Warning, iloc,
+                            width.text);
                     QList<Occupancy> active;
                     checkRows(ident.rows, QStringLiteral("ID %1").arg(i + 1), &active);
                 }
@@ -457,12 +474,13 @@ QList<ValidationIssue> validateConfiguration(const Configuration &config)
                                 continue;
                             add(ValidationIssue::Error, loc,
                                 QStringLiteral("compound identifiers %1 and %2 both select "
-                                               "0x%3 — the device treats them as ONE variant "
+                                               "%3 — the device treats them as ONE variant "
                                                "and sends a single frame, not one per "
                                                "identifier")
                                     .arg(i + 1)
                                     .arg(j + 1)
-                                    .arg(a.id & a.idMask, 2, 16, QLatin1Char('0')));
+                                    .arg(compoundBytesText(
+                                        a.id & a.idMask, compoundSelectorBytes(a.id, a.idMask))));
                         }
                     }
 

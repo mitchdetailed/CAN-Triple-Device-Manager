@@ -2,6 +2,7 @@
 
 #include <QFileInfo>
 #include <QRandomGenerator>
+#include <QtEndian>
 
 #include "../protocol/config_transfer.h"
 #include "../protocol/device_session.h"
@@ -9,6 +10,7 @@
 #include "../scripting/script_compiler.h"
 #include "access_keys.h"
 #include "configuration.h"
+#include "device_mapper.h" // signalMuxHighOf
 #include "plan_budget.h"
 #include "sealed_stream.h"
 
@@ -158,6 +160,24 @@ PackageBuildResult buildSecurePackage(const PackageBuildRequest &request)
         probe.stage = QStringLiteral("Checking the device firmware");
         frames.append(probe);
     }
+    // Received compound identifiers of 4 bytes in a CAN Triple's records
+    // (1.0.16), which earlier firmware would take and compare in 2 bytes: the
+    // stream asks the unit whether it compares them (the capacity request's
+    // requirement check) before its CLEAR. 1.0.16 answers yes; earlier firmware
+    // refuses any request that carries a payload, so whichever Manager relays
+    // the stream, an older unit stops it with nothing changed.
+    bool receivedSelectors32 = false;
+    if (!mapped.tables.capacity.isCanTriple2())
+        for (int i = 0; i < int(mapped.tables.signalConfigs.size()) && !receivedSelectors32; ++i)
+            receivedSelectors32 = signalMuxHighOf(mapped.tables, i) != 0;
+    if (receivedSelectors32) {
+        PlannedFrame probe;
+        probe.cmd = CMD_GET_CAPACITY;
+        probe.payload = QByteArray(2, '\0');
+        qToLittleEndian<quint16>(CAPACITY_CAN_SELECTOR_32_RX, probe.payload.data());
+        probe.stage = QStringLiteral("Checking the device firmware");
+        frames.append(probe);
+    }
     frames += passwordFrames(request.policy);
     frames += install;
     const QByteArray stream = buildSealedStream(fleetKey, frames, &error);
@@ -191,6 +211,10 @@ PackageBuildResult buildSecurePackage(const PackageBuildRequest &request)
         written.fdWithoutBrs = written.fdWithoutBrs
                                || ((m.flags & MSGFLAG_TRANSMIT) && (m.flags & MSGFLAG_FD)
                                    && (m.tx_trigger_flags & MSGTX_NO_BRS));
+    // The channel records' form: a CAN Triple 2.0 from 2.0.6 (store v24) ends
+    // each with its identifier's upper halves (ConfigTransfer's sliceFor).
+    written.signalRecordsHigh = labelsApart && mapped.tables.capacity.selector32();
+    written.receivedSelectors32 = receivedSelectors32;
     written.references = written.needsPlan ? planReferences(mapped.tables) : -1;
     written.udsBytes = planUdsBytes(mapped.tables);
     // What it writes beside the names (phase 4, step 3b).

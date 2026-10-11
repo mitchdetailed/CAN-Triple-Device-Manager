@@ -98,10 +98,12 @@ private:
     // device drops from the one monitor stream, so the loss is not scoped to
     // the bus of the frame that happened to carry the flag.
     void appendGapRow(const ct::MonitorStreamPayload &frame);
-    // DISPLAY filters: per-bus, "Tx Msgs" for the device's own frames, and the
-    // ID filter. Capture and file export are never filtered, so a hidden frame
-    // is still recorded and re-showing its category restores the history.
-    bool busVisible(quint8 busIdx) const;
+    // The filters: one Show box per bus and direction (CAN 1 Rx to CAN 3 Tx),
+    // which decides what is listed AND what is captured (an unticked box's
+    // frames never reach the buffer, so neither the count nor Save to File has
+    // them), and the ID filter, which only hides rows. Re-showing a category
+    // lists what was captured of it.
+    bool shown(quint8 busIdx, bool tx) const;
     bool frameVisible(const ct::MonitorStreamPayload &frame) const;
     void rebuildTable(); // replay the buffer through the current filters
     void onIdFilterEdited(const QString &text);
@@ -164,11 +166,15 @@ private:
     // message to come round again, and so the counts survive the toggle.
     std::map<OverwriteKey, OverwriteEntry> m_latest;
     bool m_sawGap = false;            // any MONFLAG_GAP since the last Clear
+    // A drop reported on a frame the Show boxes kept out, carried onto the next
+    // frame captured (onMonitorFrame).
+    bool m_pendingGap = false;
     bool m_identifierLimit = false;   // kMaxIdentifiers reached
     QCheckBox *m_pauseCheck;
     QCheckBox *m_autoScrollCheck;
-    QCheckBox *m_busChecks[3]{}; // CAN 1..3 display filters
-    QCheckBox *m_txCheck;        // show the device's own transmitted frames
+    // The Show boxes (Mitch, 2026-10-11), CAN 1 Rx to CAN 3 Tx: [bus][0] the
+    // frames that bus carried in, [bus][1] the frames the device put on it.
+    QCheckBox *m_showChecks[3][2]{};
     QCheckBox *m_overwriteCheck;
     QLabel *m_countLabel;
     QLineEdit *m_idFilterEdit;

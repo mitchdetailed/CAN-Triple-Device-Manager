@@ -4,12 +4,14 @@
 //
 // Two properties carry most of the weight here.
 //
-// The first is that filtering is a VIEW, never a loss. The capture buffer is
-// what Save to File writes, so a filter that quietly dropped frames on their
-// way into it would cost a trace that was already recorded — and the damage
-// would only surface later, in a file, with nothing left to compare against.
-// Every filter test therefore unticks, checks the view shrank, re-ticks, and
-// checks the history came back rather than resuming from that moment.
+// The first is what each filter keeps. The Show boxes decide CAPTURE as well as
+// the list (Mitch, 2026-10-11: "if we don't show them, don't capture them"): a
+// frame of an unticked bus and direction is in neither the list nor the buffer
+// that Save to File writes, while what was captured before a box was unticked
+// stays, and comes back when it is ticked. The ID filter is a VIEW, never a
+// loss: it is typed live, and a half-typed entry must not throw a recorded
+// trace away, so its tests untick, check the view shrank, re-tick, and check
+// the history came back rather than resuming from that moment.
 //
 // The second is that Overwrite Mode's row for an identifier holds its LATEST
 // frame. A stale row in a view whose entire purpose is "what is the value right
@@ -109,14 +111,53 @@ QString view(QTableWidget *t)
 
 // ---------------------------------------------------------------------------
 
-// Tx rows are shown by default — the behaviour every earlier release had, and
-// the half of a gateway's traffic you are usually checking.
-void testTxMessagesAreShownByDefault()
+// The Show box of one bus and direction, "show1Rx" .. "show3Tx".
+QCheckBox *showBox(QWidget *w, int bus, bool tx)
+{
+    return box(w, QStringLiteral("show%1%2").arg(bus).arg(tx ? QStringLiteral("Tx")
+                                                               : QStringLiteral("Rx")));
+}
+
+// The Show boxes are one per bus and direction (Mitch, 2026-10-11): CAN 1 Rx,
+// CAN 1 Tx, CAN 2 Rx, CAN 2 Tx, CAN 3 Rx, CAN 3 Tx, left to right on a row of
+// their own, every one ticked by default. Tx rows are shown, as every earlier
+// release showed them: on a gateway they are usually the half you are
+// checking. The window still opens at its default width.
+void testShowBoxesAllTickedByDefault()
 {
     ct::DeviceLink link;
     ct::CanViewerDialog d(&link);
 
-    CHECK(box(&d, QStringLiteral("txCheck"))->isChecked());
+    QStringList labels;
+    QList<QCheckBox *> boxes;
+    for (int b = 1; b <= 3; ++b)
+        for (bool tx : {false, true}) {
+            QCheckBox *c = showBox(&d, b, tx);
+            CHECK(c->isChecked());
+            labels << c->text();
+            boxes << c;
+        }
+    CHECK(labels
+          == QStringList({QStringLiteral("CAN 1 Rx"), QStringLiteral("CAN 1 Tx"),
+                          QStringLiteral("CAN 2 Rx"), QStringLiteral("CAN 2 Tx"),
+                          QStringLiteral("CAN 3 Rx"), QStringLiteral("CAN 3 Tx")}));
+    // The old boxes are gone, not hidden.
+    CHECK(d.findChild<QCheckBox *>(QStringLiteral("txCheck")) == nullptr
+          && d.findChild<QCheckBox *>(QStringLiteral("busCheck1")) == nullptr);
+    for (QCheckBox *c : d.findChildren<QCheckBox *>())
+        CHECK(c->text() != QStringLiteral("Tx Msgs"));
+
+    // Laid out without being shown: left to right on one row, a row of their
+    // own (not the one Pause is on).
+    d.resize(d.sizeHint());
+    d.layout()->activate();
+    const auto at = [&d](QWidget *w) { return w->mapTo(&d, QPoint(0, 0)); };
+    bool inOrder = true;
+    for (int i = 1; i < boxes.size(); ++i)
+        inOrder = inOrder && at(boxes[i]).x() > at(boxes[i - 1]).x()
+                  && at(boxes[i]).y() == at(boxes[0]).y();
+    CHECK(inOrder);
+    CHECK(at(box(&d, QStringLiteral("pauseCheck"))).y() < at(boxes[0]).y());
 
     emit link.monitorFrame(frame(1, 0, 0x100, {0x11}));
     emit link.monitorFrame(frame(1, 1, 0x200, {0x22}));
@@ -127,40 +168,56 @@ void testTxMessagesAreShownByDefault()
     CHECK(cell(t, 1, ColDir) == QStringLiteral("Tx"));
 }
 
-// Unticking Tx Msgs hides the device's own frames and nothing else; re-ticking
-// brings back the ones that arrived while it was off, because the list is
-// rebuilt from the capture buffer rather than resumed.
-void testTxFilterHidesAndRestores()
+// Unticking CAN 1 Tx hides the device's own frames on CAN 1 and stops their
+// capture, and nothing else: what arrives while it is unticked is not in the
+// buffer (the count Save to File writes), and re-ticking lists the frames
+// captured before it was unticked, not the ones that came while it was.
+void testUntickedFramesAreNotCaptured()
 {
     ct::DeviceLink link;
     ct::CanViewerDialog d(&link);
     QTableWidget *t = table(&d);
+    auto *count = d.findChild<QLabel *>(QStringLiteral("countLabel"));
+    CHECK(count != nullptr);
+    if (!count)
+        return;
 
     emit link.monitorFrame(frame(1, 0, 0x100, {0x11}));
     emit link.monitorFrame(frame(1, 1, 0x200, {0x22}));
-    CHECK(t->rowCount() == 2);
+    CHECK(t->rowCount() == 2 && count->text().startsWith(QStringLiteral("2 frames buffered")));
 
-    box(&d, QStringLiteral("txCheck"))->setChecked(false);
+    showBox(&d, 1, true)->setChecked(false);
     CHECK(t->rowCount() == 1);
     CHECK(cell(t, 0, ColId) == QStringLiteral("0x100"));
+    // What was captured before stays in the buffer.
+    CHECK(count->text().startsWith(QStringLiteral("2 frames buffered")));
 
-    // Frames that arrive while Tx is hidden are still captured...
+    // A frame of the unticked box is not captured; the other is.
     emit link.monitorFrame(frame(1, 1, 0x300, {0x33}));
     emit link.monitorFrame(frame(1, 0, 0x400, {0x44}));
     CHECK(t->rowCount() == 2); // only the Rx one appeared
+    CHECK(count->text().startsWith(QStringLiteral("3 frames buffered")));
 
-    // ...and re-ticking shows them, in their original order.
-    box(&d, QStringLiteral("txCheck"))->setChecked(true);
-    CHECK(t->rowCount() == 4);
-    CHECK(cell(t, 0, ColId) == QStringLiteral("0x100"));
-    CHECK(cell(t, 1, ColId) == QStringLiteral("0x200"));
-    CHECK(cell(t, 2, ColId) == QStringLiteral("0x300"));
-    CHECK(cell(t, 3, ColId) == QStringLiteral("0x400"));
+    // Re-ticking lists what was captured: 0x200 from before, never 0x300.
+    showBox(&d, 1, true)->setChecked(true);
+    CHECK(view(t)
+          == QStringLiteral("CAN 1 Rx 0x100 [11] | CAN 1 Tx 0x200 [22] | CAN 1 Rx 0x400 [44]"));
+    // And from now on it is captured again.
+    emit link.monitorFrame(frame(1, 1, 0x500, {0x55}));
+    CHECK(t->rowCount() == 4 && count->text().startsWith(QStringLiteral("4 frames buffered")));
+
+    // Every box unticked captures nothing at all.
+    for (int b = 1; b <= 3; ++b)
+        for (bool tx : {false, true})
+            showBox(&d, b, tx)->setChecked(false);
+    emit link.monitorFrame(frame(2, 0, 0x600, {0x66}));
+    emit link.monitorFrame(frame(3, 1, 0x700, {0x77}));
+    CHECK(count->text().startsWith(QStringLiteral("4 frames buffered")));
 }
 
-// The bus filter and the Tx filter both apply; neither one substitutes for the
-// other. A Tx frame on a hidden bus stays hidden when Tx is re-shown.
-void testBusAndTxFiltersCompose()
+// The boxes compose: hiding both of a bus's boxes hides the bus, and a bus's
+// Tx alone shows what the device sent there and nothing it received.
+void testRxAndTxBoxesCompose()
 {
     ct::DeviceLink link;
     ct::CanViewerDialog d(&link);
@@ -172,16 +229,53 @@ void testBusAndTxFiltersCompose()
     emit link.monitorFrame(frame(2, 1, 0x201, {0x22}));
     CHECK(t->rowCount() == 4);
 
-    box(&d, QStringLiteral("busCheck2"))->setChecked(false);
+    showBox(&d, 2, false)->setChecked(false);
+    showBox(&d, 2, true)->setChecked(false);
     CHECK(t->rowCount() == 2); // CAN 1 only, both directions
 
-    box(&d, QStringLiteral("txCheck"))->setChecked(false);
+    showBox(&d, 1, true)->setChecked(false);
     CHECK(t->rowCount() == 1);
     CHECK(cell(t, 0, ColId) == QStringLiteral("0x100"));
 
-    box(&d, QStringLiteral("txCheck"))->setChecked(true);
+    showBox(&d, 1, true)->setChecked(true);
     CHECK(t->rowCount() == 2); // CAN 2 is still hidden
     CHECK(view(t) == QStringLiteral("CAN 1 Rx 0x100 [11] | CAN 1 Tx 0x101 [11]"));
+
+    showBox(&d, 2, true)->setChecked(true);
+    CHECK(view(t)
+          == QStringLiteral("CAN 1 Rx 0x100 [11] | CAN 1 Tx 0x101 [11] | CAN 2 Tx 0x201 [22]"));
+}
+
+// Each box hides exactly its own bus and direction: a frame for each of the
+// six; unticking any one box hides that frame alone, and re-ticking brings it
+// back. A frame labelled with a bus this window does not know is never
+// swallowed, whatever is ticked.
+void testEachShowBoxHidesItsOwnFrames()
+{
+    ct::DeviceLink link;
+    ct::CanViewerDialog d(&link);
+    QTableWidget *t = table(&d);
+
+    for (int b = 1; b <= 3; ++b)
+        for (int dir = 0; dir < 2; ++dir)
+            emit link.monitorFrame(frame(quint8(b), quint8(dir), quint32(0x100 * b + dir),
+                                         {quint8(b)}));
+    CHECK(t->rowCount() == 6);
+    for (int b = 1; b <= 3; ++b)
+        for (int dir = 0; dir < 2; ++dir) {
+            const QString id = QStringLiteral("0x%1").arg(0x100 * b + dir, 3, 16, QLatin1Char('0'));
+            showBox(&d, b, dir == 1)->setChecked(false);
+            CHECK(t->rowCount() == 5 && !view(t).contains(id));
+            showBox(&d, b, dir == 1)->setChecked(true);
+            CHECK(t->rowCount() == 6 && view(t).contains(id));
+        }
+
+    for (int b = 1; b <= 3; ++b)
+        for (bool tx : {false, true})
+            showBox(&d, b, tx)->setChecked(false);
+    CHECK(t->rowCount() == 0);
+    emit link.monitorFrame(frame(4, 1, 0x7FF, {0x44}));
+    CHECK(t->rowCount() == 1 && cell(t, 0, ColId) == QStringLiteral("0x7FF"));
 }
 
 // Overwrite Mode collapses a trace to one row per identifier carrying the most
@@ -341,8 +435,9 @@ void testOverwriteModeOpensOnTheCurrentState()
     CHECK(cell(t, 0, ColFrameCount) == QStringLiteral("2"));
 }
 
-// The display filters apply in Overwrite Mode too, and re-ticking restores the
-// row with its full history rather than an empty one waiting to be refilled.
+// The Show boxes apply in Overwrite Mode too: re-ticking restores a row as it
+// was captured, and an identifier of an unticked box is not tracked while it
+// is, so its value and count are those of the frames that were captured.
 void testFiltersApplyInOverwriteMode()
 {
     ct::DeviceLink link;
@@ -355,21 +450,28 @@ void testFiltersApplyInOverwriteMode()
     emit link.monitorFrame(frame(2, 0, 0x300, {0x33}));
     CHECK(t->rowCount() == 3);
 
-    box(&d, QStringLiteral("txCheck"))->setChecked(false);
+    showBox(&d, 1, true)->setChecked(false);
     CHECK(view(t) == QStringLiteral("CAN 1 Rx 0x100 [11] | CAN 2 Rx 0x300 [33]"));
 
-    box(&d, QStringLiteral("busCheck1"))->setChecked(false);
+    showBox(&d, 1, false)->setChecked(false);
     CHECK(view(t) == QStringLiteral("CAN 2 Rx 0x300 [33]"));
 
-    // A hidden identifier keeps counting while it is off screen, so the count
-    // it comes back with is the number of frames, not the number seen.
+    // Frames of the unticked boxes are not captured: 0x200 comes back with the
+    // value and the count it had, and an identifier first seen while its box was
+    // unticked has no row at all.
     emit link.monitorFrame(frame(1, 1, 0x200, {0x2F}));
     emit link.monitorFrame(frame(1, 1, 0x200, {0x2E}));
-    box(&d, QStringLiteral("txCheck"))->setChecked(true);
-    box(&d, QStringLiteral("busCheck1"))->setChecked(true);
+    emit link.monitorFrame(frame(1, 0, 0x150, {0x15}));
+    showBox(&d, 1, true)->setChecked(true);
+    showBox(&d, 1, false)->setChecked(true);
     CHECK(t->rowCount() == 3);
-    CHECK(cell(t, 1, ColData) == QStringLiteral("2E"));
-    CHECK(cell(t, 1, ColFrameCount) == QStringLiteral("3"));
+    CHECK(view(t)
+          == QStringLiteral("CAN 1 Rx 0x100 [11] | CAN 1 Tx 0x200 [22] | CAN 2 Rx 0x300 [33]"));
+    CHECK(cell(t, 1, ColFrameCount) == QStringLiteral("1"));
+
+    // Ticked again, it is tracked again, counting on from what was captured.
+    emit link.monitorFrame(frame(1, 1, 0x200, {0x2D}));
+    CHECK(cell(t, 1, ColData) == QStringLiteral("2D") && cell(t, 1, ColFrameCount) == QStringLiteral("2"));
 }
 
 // Pause stops capture in both modes: a paused viewer that kept updating its
@@ -452,6 +554,53 @@ void testDroppedFramesAreReportedInBothModes()
     box(&d, QStringLiteral("overwriteCheck"))->setChecked(true);
     emit link.monitorFrame(frame(1, 0, 0x100, {0x13}));
     CHECK(label->text().contains(QStringLiteral("dropped"))); // sticky, not per-frame
+}
+
+// A drop reported on a frame whose Show box is unticked is the whole stream's,
+// not that bus's: the frame is not captured, the drop is noted at once, and its
+// marker row stands before the next frame that IS captured.
+void testDropOnAnUncapturedFrameIsKept()
+{
+    ct::DeviceLink link;
+    ct::CanViewerDialog d(&link);
+    QTableWidget *t = table(&d);
+    auto *label = d.findChild<QLabel *>(QStringLiteral("countLabel"));
+    CHECK(label != nullptr);
+    if (!label)
+        return;
+
+    emit link.monitorFrame(frame(1, 0, 0x100, {0x11}));
+    showBox(&d, 2, false)->setChecked(false);
+    emit link.monitorFrame(frame(2, 0, 0x200, {0x22}, ct::MONFLAG_GAP)); // not captured
+    CHECK(label->text().startsWith(QStringLiteral("1 frames buffered"))
+          && label->text().contains(QStringLiteral("dropped")));
+    CHECK(t->rowCount() == 1);
+
+    emit link.monitorFrame(frame(1, 0, 0x101, {0x33}));
+    CHECK(t->rowCount() == 3);
+    CHECK(cell(t, 1, ColBus).contains(QStringLiteral("frames dropped"))
+          && cell(t, 2, ColId) == QStringLiteral("0x101"));
+    // The marker is kept in the capture: a rebuild puts it back in its place.
+    showBox(&d, 2, false)->setChecked(true);
+    CHECK(t->rowCount() == 3 && cell(t, 1, ColBus).contains(QStringLiteral("frames dropped")));
+    // Carried once: the next frame has no marker of its own.
+    emit link.monitorFrame(frame(1, 0, 0x102, {0x44}));
+    CHECK(t->rowCount() == 4);
+
+    // Clear forgets a drop not yet placed: a log begun after it starts clean.
+    showBox(&d, 2, false)->setChecked(false);
+    emit link.monitorFrame(frame(2, 0, 0x201, {0x55}, ct::MONFLAG_GAP)); // not captured
+    QPushButton *clear = nullptr;
+    for (QPushButton *b : d.findChildren<QPushButton *>())
+        if (b->text() == QStringLiteral("Clear"))
+            clear = b;
+    CHECK(clear != nullptr);
+    if (!clear)
+        return;
+    clear->click();
+    emit link.monitorFrame(frame(1, 0, 0x103, {0x66}));
+    CHECK(t->rowCount() == 1 && cell(t, 0, ColId) == QStringLiteral("0x103")
+          && !label->text().contains(QStringLiteral("dropped")));
 }
 
 } // namespace
@@ -652,9 +801,8 @@ void testIdFilterHidesAndRestores()
     CHECK(view(t).contains(QStringLiteral("0x100 [12]")));
 }
 
-// The filter composes with the bus boxes and Tx Msgs — a frame must pass all
-// three — and a bad token is named beside the field while the rest of the entry
-// keeps working.
+// The filter composes with the Show boxes — a frame must pass both — and a bad
+// token is named beside the field while the rest of the entry keeps working.
 void testIdFilterComposesAndNamesBadTokens()
 {
     ct::DeviceLink link;
@@ -672,9 +820,9 @@ void testIdFilterComposesAndNamesBadTokens()
 
     idFilter(&d)->setText(QStringLiteral("100"));
     CHECK(t->rowCount() == 3);
-    box(&d, QStringLiteral("busCheck2"))->setChecked(false);
+    showBox(&d, 2, false)->setChecked(false);
     CHECK(t->rowCount() == 2);
-    box(&d, QStringLiteral("txCheck"))->setChecked(false);
+    showBox(&d, 1, true)->setChecked(false);
     CHECK(t->rowCount() == 1);
     CHECK(view(t) == QStringLiteral("CAN 1 Rx 0x100 [11]"));
 
@@ -721,9 +869,10 @@ int main(int argc, char **argv)
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
 
-    testTxMessagesAreShownByDefault();
-    testTxFilterHidesAndRestores();
-    testBusAndTxFiltersCompose();
+    testShowBoxesAllTickedByDefault();
+    testUntickedFramesAreNotCaptured();
+    testRxAndTxBoxesCompose();
+    testEachShowBoxHidesItsOwnFrames();
     testOverwriteModeKeepsOnlyTheLatestFrame();
     testOverwriteModeSortsByBusThenId();
     testNewIdentifierInsertsInOrderWithoutDisturbingOthers();
@@ -735,6 +884,7 @@ int main(int argc, char **argv)
     testClearResetsOverwriteRows();
     testAutoScrollIsDisabledInOverwriteMode();
     testDroppedFramesAreReportedInBothModes();
+    testDropOnAnUncapturedFrameIsKept();
 
     testIdFilterSyntax();
     testIdFilterHidesAndRestores();

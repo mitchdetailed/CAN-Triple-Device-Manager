@@ -29,6 +29,7 @@
 #include <QVariant>
 
 #include "../model/channel_catalog.h"
+#include "../model/device_mapper.h" // MAX_TX_MUX_IDS: the variants a transmitted message carries
 #include "../model/frame_layout.h"
 #include "../protocol/wire_structs.h" // CRC8_ELEM_*; a rule's elements are the target's
 #include "add_channel_dialog.h"
@@ -127,27 +128,57 @@ public:
         m_offset->setRange(0, qBound(1, messageLenBytes, 64) - 1);
         m_offset->setValue(ident.byteOffset);
         layout->addWidget(m_offset, 0, 1);
+        // Byte by byte, byte 0 first, as a trace shows them (compoundBytesText):
+        // the model keeps what the unit compares, the window read low byte
+        // first, and these two fields are the only place it is typed.
+        const int shown = compoundSelectorBytes(ident.id, ident.idMask);
+        const auto bytesValidator = [this]() {
+            return new QRegularExpressionValidator(
+                QRegularExpression(QStringLiteral("(0[xX])?[0-9A-Fa-f ]{0,11}")), this);
+        };
         layout->addWidget(new QLabel(QObject::tr("Identifier :")), 1, 0);
-        m_id = new QLineEdit(QString::number(ident.id, 16).toUpper());
-        m_id->setValidator(new QRegularExpressionValidator(
-            QRegularExpression(QStringLiteral("[0-9A-Fa-f]{1,8}")), this));
+        m_id = new QLineEdit(compoundBytesText(ident.id, shown));
+        m_id->setValidator(bytesValidator());
         layout->addWidget(m_id, 1, 1);
         layout->addWidget(new QLabel(QObject::tr("Identifier Mask :")), 2, 0);
-        m_mask = new QLineEdit(QString::number(ident.idMask, 16).toUpper());
-        m_mask->setValidator(new QRegularExpressionValidator(
-            QRegularExpression(QStringLiteral("[0-9A-Fa-f]{1,8}")), this));
+        m_mask = new QLineEdit(compoundBytesText(ident.idMask, shown));
+        m_mask->setValidator(bytesValidator());
         layout->addWidget(m_mask, 2, 1);
+        auto *hint = new QLabel(QObject::tr(
+            "Up to 4 bytes from the offset, byte 0 first, as a trace shows them: the mask "
+            "F0 FF FF FF compares the high nibble of the first byte and the three bytes after "
+            "it. A CAN Triple 2.0 compares 4 bytes from firmware 2.0.6; a CAN Triple compares "
+            "4 on received messages from 1.0.16, the last two by whole hex digits, and 2 "
+            "otherwise."));
+        hint->setWordWrap(true);
+        layout->addWidget(hint, 3, 0, 1, 2);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
         QObject::connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
         QObject::connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-        layout->addWidget(buttons, 3, 0, 1, 2);
+        layout->addWidget(buttons, 4, 0, 1, 2);
+    }
+
+    void accept() override
+    {
+        if (!parseCompoundBytes(m_id->text(), nullptr)
+            || !parseCompoundBytes(m_mask->text(), nullptr)) {
+            QMessageBox::warning(this, windowTitle(),
+                                 QObject::tr("Enter the identifier and its mask as up to 4 bytes, "
+                                             "byte 0 first, two hex digits each (for example "
+                                             "F0 FF FF FF)."));
+            return;
+        }
+        QDialog::accept();
     }
 
     void apply(CompoundIdentifier *ident) const
     {
         ident->byteOffset = m_offset->value();
-        ident->id = m_id->text().toUInt(nullptr, 16);
-        ident->idMask = m_mask->text().toUInt(nullptr, 16);
+        quint32 v = 0;
+        if (parseCompoundBytes(m_id->text(), &v))
+            ident->id = v;
+        if (parseCompoundBytes(m_mask->text(), &v))
+            ident->idMask = v;
         // Accepting the dialog claims the slot even at all-default values
         // (offset 0 / ID 0), so the table row populates either way.
         ident->configured = true;
@@ -1861,8 +1892,19 @@ void SectionEditorDialog::buildChannelsTab(QWidget *page)
     m_identClearButton = new QPushButton(tr("Clear"));
     connect(m_identClearButton, &QPushButton::clicked, this,
             &SectionEditorDialog::onClearIdentifier);
+    // More slots than the 16 a compound message starts with (Mitch,
+    // 2026-10-10): a received message any number, each channel carrying its
+    // own identifier; a transmitted one up to MAX_TX_MUX_IDS, the variants its
+    // firmware composes.
+    m_identAddButton = new QPushButton(tr("Add"));
+    connect(m_identAddButton, &QPushButton::clicked, this, &SectionEditorDialog::onAddIdentifier);
+    m_identRemoveButton = new QPushButton(tr("Remove"));
+    connect(m_identRemoveButton, &QPushButton::clicked, this,
+            &SectionEditorDialog::onRemoveIdentifier);
+    identButtons->addWidget(m_identAddButton);
     identButtons->addWidget(m_identChangeButton);
     identButtons->addWidget(m_identClearButton);
+    identButtons->addWidget(m_identRemoveButton);
     identButtons->addStretch();
     compoundLayout->addLayout(identButtons);
     m_typeStack->addWidget(compoundPage);
@@ -2614,9 +2656,11 @@ void SectionEditorDialog::rebuildIdentifierTable()
         item->setData(0, Qt::UserRole, i);
         const bool used = ident.configured || !ident.rows.isEmpty();
         if (used) {
+            // Byte by byte, byte 0 first (compoundBytesText), as the dialog.
+            const int shown = compoundSelectorBytes(ident.id, ident.idMask);
             item->setText(1, QString::number(ident.byteOffset));
-            item->setText(2, QStringLiteral("0x") + QString::number(ident.id, 16).toUpper());
-            item->setText(3, QStringLiteral("0x") + QString::number(ident.idMask, 16).toUpper());
+            item->setText(2, compoundBytesText(ident.id, shown));
+            item->setText(3, compoundBytesText(ident.idMask, shown));
         }
     }
     if (m_identifierTree->topLevelItemCount() > 0)
@@ -2638,6 +2682,48 @@ void SectionEditorDialog::onEditIdentifier()
     // The selector moved, so the reserved bits did. Without this the map keeps
     // shading where the identifier USED to be, which is worse than not shading
     // at all: the user routes around a phantom and into the real one.
+    refreshBitTable();
+}
+
+void SectionEditorDialog::onAddIdentifier()
+{
+    if (!m_section.compound)
+        return;
+    const auto device = SectionDevice(m_deviceCombo->currentData().toInt());
+    const bool transmit =
+        device == SectionDevice::TransmitMessage || device == SectionDevice::TransmitCrc8;
+    if (transmit && m_section.identifiers.size() >= MAX_TX_MUX_IDS)
+        return;
+    m_section.identifiers.append(CompoundIdentifier{});
+    rebuildIdentifierTable();
+    m_identifierTree->setCurrentItem(
+        m_identifierTree->topLevelItem(int(m_section.identifiers.size()) - 1));
+    updateButtons();
+}
+
+void SectionEditorDialog::onRemoveIdentifier()
+{
+    const int role = currentIdentRole();
+    if (role < 0 || role >= m_section.identifiers.size())
+        return;
+    const int channels = int(m_section.identifiers[role].rows.size());
+    if (channels > 0) {
+        const auto answer = QMessageBox::question(
+            this, windowTitle(),
+            tr("Identifier %1 has %2 channel(s). Remove the identifier and its channels?")
+                .arg(role + 1)
+                .arg(channels),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes)
+            return;
+    }
+    m_section.identifiers.removeAt(role);
+    rebuildIdentifierTable();
+    if (!m_section.identifiers.isEmpty())
+        m_identifierTree->setCurrentItem(m_identifierTree->topLevelItem(
+            qMin(role, int(m_section.identifiers.size()) - 1)));
+    rebuildChannelList();
+    updateButtons();
     refreshBitTable();
 }
 
@@ -2768,6 +2854,16 @@ void SectionEditorDialog::updateButtons()
         const bool haveIdent = currentIdentRole() >= 0; // not the always-present row
         m_identChangeButton->setEnabled(haveIdent && editable);
         m_identClearButton->setEnabled(haveIdent && editable);
+        m_identRemoveButton->setEnabled(haveIdent && editable);
+        const auto device = SectionDevice(m_deviceCombo->currentData().toInt());
+        const bool transmit =
+            device == SectionDevice::TransmitMessage || device == SectionDevice::TransmitCrc8;
+        const bool full = transmit && m_section.identifiers.size() >= MAX_TX_MUX_IDS;
+        m_identAddButton->setEnabled(editable && !full);
+        m_identAddButton->setToolTip(
+            full ? tr("A transmitted compound message carries up to %1 identifiers.")
+                       .arg(MAX_TX_MUX_IDS)
+                 : tr("Add an identifier slot. A received compound message takes any number."));
     }
 }
 

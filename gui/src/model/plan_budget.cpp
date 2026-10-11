@@ -54,11 +54,14 @@ int retainedValuesOf(const DeviceTables &tables)
 {
     int n = 0;
     const int channels = int(tables.signalConfigs.size()); // not `signals`: a Qt keyword
+    // The record's bit says "keep this channel" only to a unit that keeps
+    // channels; on a CAN Triple it is a digit of a received identifier's mask.
+    const bool keepsChannels = tables.capacity.retainsChannels();
     const auto flagged = [&](quint16 ch) {
-        return int(ch) < channels && sigRetain(tables.signalConfigs[ch]);
+        return keepsChannels && int(ch) < channels && sigRetain(tables.signalConfigs[ch]);
     };
     for (const CanSignalConfig &s : tables.signalConfigs)
-        if (sigRetain(s))
+        if (keepsChannels && sigRetain(s))
             ++n;
     // A unit that keys its set by channel (it keeps channels) passes over an
     // output past the channels, as there is no channel to keep; one that keys

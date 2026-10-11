@@ -41,6 +41,7 @@
 #include <QPushButton>
 #include <QStringList>
 #include <QTabWidget>
+#include <QTreeWidget>
 #include <QTimer>
 
 #include <cstdio>
@@ -571,6 +572,69 @@ void testTheRoleDecidesAndTheButtonIsNotBuilt()
 
 } // namespace
 
+// The identifiers table of a compound section (Mitch, 2026-10-10): the ID and
+// mask byte by byte, byte 0 first; Add past the 16 slots a compound message
+// starts with and Remove; a transmitted message stops at the 32 identifiers
+// its firmware composes.
+void testCompoundIdentifiers()
+{
+    Configuration config;
+    buildConfig(config);
+    const auto compound = [](SectionDevice device, int count) {
+        CommsSection s = twoRowMessage(device);
+        s.rows.clear();
+        s.compound = true;
+        for (int i = 0; i < count; ++i)
+            s.identifiers.append(CompoundIdentifier{});
+        s.identifiers[0].configured = true;
+        s.identifiers[0].idMask = 0xFFFFFFF0u; // F0 FF FF FF
+        s.identifiers[0].id = 0x30201010u;     // 10 10 20 30
+        return s;
+    };
+    const auto parts = [](SectionEditorDialog &d, QTreeWidget **tree, QPushButton **add,
+                          QPushButton **remove) {
+        *tree = nullptr;
+        for (QTreeWidget *t : d.findChildren<QTreeWidget *>())
+            if (t->headerItem() && t->headerItem()->text(3) == QStringLiteral("ID Mask"))
+                *tree = t;
+        *add = *remove = nullptr;
+        if (!*tree)
+            return;
+        // The identifier buttons sit beside the table, apart from the channel
+        // list's Add…/Remove.
+        for (QPushButton *b : (*tree)->parentWidget()->findChildren<QPushButton *>()) {
+            if (b->text() == QStringLiteral("Add"))
+                *add = b;
+            else if (b->text() == QStringLiteral("Remove"))
+                *remove = b;
+        }
+    };
+
+    SectionEditorDialog dialog(&config, compound(SectionDevice::ReceiveMessage, 16), 0, {}, -1);
+    QTreeWidget *tree = nullptr;
+    QPushButton *add = nullptr, *remove = nullptr;
+    parts(dialog, &tree, &add, &remove);
+    REQUIRE(tree && add && remove);
+    REQUIRE(tree->topLevelItemCount() == 16);
+    CHECK(tree->topLevelItem(0)->text(2) == QStringLiteral("10 10 20 30")
+          && tree->topLevelItem(0)->text(3) == QStringLiteral("F0 FF FF FF"));
+    std::puts("  identifiers table  F0 FF FF FF, byte 0 first");
+    CHECK(add->isEnabled());
+    add->click();
+    CHECK(tree->topLevelItemCount() == 17 && tree->currentItem() == tree->topLevelItem(16));
+    add->click();
+    CHECK(tree->topLevelItemCount() == 18);
+    remove->click(); // the empty slot just added, selected: no question
+    CHECK(tree->topLevelItemCount() == 17);
+    std::puts("  identifiers table  Add past 16, Remove");
+
+    SectionEditorDialog tx(&config, compound(SectionDevice::TransmitMessage, 32), 0, {}, -1);
+    parts(tx, &tree, &add, &remove);
+    REQUIRE(tree && add);
+    CHECK(tree->topLevelItemCount() == 32 && !add->isEnabled());
+    std::puts("  identifiers table  a transmitted message stops at 32");
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -584,6 +648,7 @@ int main(int argc, char **argv)
     testARelayStillDropsItsChannels();
     testBrsFollowsCanFd();
     testUdsRequestControls();
+    testCompoundIdentifiers();
     testATransmitRowCannotInventAChannel();
     testAReceiveRowStillCan();
     testTheCrcChannelPickerStillOffersNew();

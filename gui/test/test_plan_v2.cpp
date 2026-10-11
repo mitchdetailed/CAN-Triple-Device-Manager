@@ -107,8 +107,8 @@ void testReport()
     for (const TableCapacity &t : cap.tables)
         def.append(t.capacity);
     const PlanCostResult d = cap.planCost(def);
-    CHECK(d.fits() && d.costed && d.flashBytes == 94848 && d.arenaBytes == 32863,
-          "its default plan: 94,848 bytes of flash and 32,863 of RAM, as the unit says");
+    CHECK(d.fits() && d.costed && d.flashBytes == 102848 && d.arenaBytes == 32863,
+          "its default plan: 102,848 bytes of flash and 32,863 of RAM, as the unit says");
     // Kept in a document's target.
     DeviceCapacity back;
     CHECK(DeviceCapacity::fromJson(cap.toJson(), &back) && back.plan == cap.plan

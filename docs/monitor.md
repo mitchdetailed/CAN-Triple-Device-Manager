@@ -41,10 +41,10 @@ Choose **Online → CAN Viewer…** or press **F4**. The viewer shows raw frames
 are discarded, not queued.</td></tr>
 <tr><td>Auto scroll</td><td>Keeps the newest frame in view. Not used in
 Overwrite Mode, where the rows hold still.</td></tr>
-<tr><td>Show: CAN 1 / CAN 2 / CAN 3</td><td>Which buses appear in the list. All
-three are ticked by default — see below.</td></tr>
-<tr><td>Show: Tx Msgs</td><td>Whether the frames the device itself transmitted
-appear in the list. Ticked by default — see below.</td></tr>
+<tr><td>Show: CAN 1 Rx … CAN 3 Tx</td><td>Which buses and directions are listed
+and captured: for each bus, what it carried in (Rx) and what the device sent on
+it (Tx). A frame whose box is unticked is not kept, so <b>Save to File…</b> does
+not write it. All six are ticked by default — see below.</td></tr>
 <tr><td>ID filter</td><td>Which arbitration IDs appear in the list — hex IDs,
 ranges and <code>!</code> exclusions; blank shows every ID. See
 <a href="#filtering">Filtering the list</a>.</td></tr>
@@ -71,20 +71,21 @@ In the scrolling view the loss appears as its own row, in orange, at the point i
 
 ### Filtering the list
 
-The **Show:** checkboxes — **CAN 1**, **CAN 2**, **CAN 3** — pick which buses appear in the list. Unticking a busy bus is the quickest way to read a quiet one: on a gateway where one network runs at a few thousand frames a second, the traffic you care about otherwise scrolls past before you can see it.
+The **Show:** checkboxes pick which buses and directions appear in the list, one box for each: **CAN 1 Rx**, **CAN 1 Tx**, **CAN 2 Rx**, **CAN 2 Tx**, **CAN 3 Rx** and **CAN 3 Tx**. All six are ticked by default. Unticking both boxes of a busy bus is the quickest way to read a quiet one: on a gateway where one network runs at a few thousand frames a second, the traffic you care about otherwise scrolls past before you can see it.
 
-**Tx Msgs** is the same idea applied to direction rather than to a bus: it picks whether the frames the *device* sent — the **Tx** rows — appear. That covers every transmit message the engine sends on its own schedule, every frame a relay forwards, and the echo of anything you send from **Inject Frame**. It is ticked by default. Untick it to leave only what the buses carried in, which is the quickest way to tell an incoming message apart from one of the device's own on a bus where both share an ID.
+An **Rx** box shows what that bus carried in. A **Tx** box shows the frames the *device* sent on that bus — the **Tx** rows: every transmit message the engine sends on its own schedule, every frame a relay forwards, and the echo of anything you send from **Inject Frames**. Unticking a bus's Tx box leaves only what that bus carried in, which is the quickest way to tell an incoming message apart from one of the device's own on a bus where both share an ID. Ticking only the Tx boxes shows exactly what the device is putting out, bus by bus.
 
 The **ID filter** field, beside Overwrite Mode, picks messages by arbitration ID. Type the IDs to keep, in hex with or without `0x`, separated by spaces or commas: `7E8, 100`. A range is written with a dash, `100-1FF`. A leading `!` hides an ID or range instead of keeping it, so `!3C0` on its own shows everything but the one message that floods the bus, and `100-1FF !150` keeps a block minus one. An entry that is not a hex ID is named in red beside the field, and the rest of the entry still applies while you fix it. Standard and extended IDs match by their number.
 
-The three filters compose — a frame has to pass all of them: a Tx frame on a hidden bus stays hidden when **Tx Msgs** is re-ticked, because its bus is still unticked, and an ID the filter keeps shows only on the buses that are ticked.
+The Show boxes and the ID filter compose — a frame has to pass both: an ID the filter keeps shows only for the buses and directions that are ticked.
 
-All of these filter the **display only**. Every frame is captured regardless, so:
-- **Save to File…** always writes the whole trace, including buses and transmitted frames that were hidden while it was recording.
-- The "N frames buffered" count is the whole capture, not the visible rows.
-- Re-ticking a box brings its history back rather than starting from that moment — the list is rebuilt from the buffer.
+The two kinds of filter differ in what they keep:
+- The **Show** boxes decide what is **captured** as well as what is listed. A frame whose bus and direction are unticked when it arrives is not kept at all: it is not in the "N frames buffered" count, not in Overwrite Mode's rows or counts, and **Save to File…** does not write it. Untick what you do not want in a log before you record it. Frames captured before you untick a box stay until **Clear**, hidden, and are listed again when you tick it again; nothing of that bus and direction is captured while it is unticked.
+- The **ID filter** changes the **display only**. Every frame it hides is still captured and still written by **Save to File…**, and clearing the filter brings the whole history back, because the list is rebuilt from the buffer. It is a view on purpose: it changes with every character you type, and a half-typed entry must not throw a recording away.
 
-> **Note:** Hiding a bus or the Tx rows is not the same as **Pause**. Pause stops capture altogether and discards what arrives; a filter keeps recording everything and only changes what is on screen.
+If the device reports that it had to drop frames, the "frames dropped" marker is kept even when the frame that carried the report was not captured: it appears before the next frame that is.
+
+> **Note:** Unticking every Show box is not the same as **Pause**. Pause discards everything that arrives; the Show boxes discard only the buses and directions that are unticked.
 
 <a id="overwrite"></a>
 
@@ -102,7 +103,7 @@ A row is one *identifier*, which means all four of:
 - whether that ID is **standard or extended** — 0x100 and 0x00000100 are different frames on the wire and get separate rows;
 - the **direction** — a message the device transmits with an ID it also receives is not the same traffic, so Rx and Tx keep separate rows. The **Dir** column says which is which.
 
-Everything else keeps working as it does in the scrolling view. The bus, **Tx Msgs** and **ID** filters still apply; **Pause** still stops capture; and capture itself is untouched, so **Save to File…** writes the complete trace frame by frame no matter which mode you were watching in. Switching the mode off gives the full history back — it was recorded the whole time.
+Everything else keeps working as it does in the scrolling view. The **Show** boxes and the **ID** filter still apply; **Pause** still stops capture; and the mode does not change what is captured, so **Save to File…** writes the captured trace frame by frame no matter which mode you were watching in. Switching the mode off gives that history back — it was recorded the whole time.
 
 <a id="export"></a>
 

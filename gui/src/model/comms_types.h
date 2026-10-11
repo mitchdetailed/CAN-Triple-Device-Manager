@@ -132,6 +132,22 @@ struct CompoundIdentifier {
     static CompoundIdentifier fromJson(const QJsonObject &o);
 };
 
+// AN IDENTIFIER'S BYTES, as a trace shows them (Mitch, 2026-10-10: "Byte 0 &
+// 0xF0, byte 1 & 0xFF, byte 2 & 0xFF, byte 3 & 0xFF, for the validation
+// 0xF0FFFFFF"). id and idMask hold what the unit compares — the window from
+// byteOffset read low byte first, so the byte at the offset is bits 0..7 —
+// and are written and shown byte by byte, byte 0 first: the mask F0 FF FF FF
+// is 0xFFFFFFF0 here. Files keep the numbers, so they keep their meaning.
+//
+// How many bytes an identifier shows: through the last its mask or identifier
+// names, at least one.
+int compoundSelectorBytes(quint32 id, quint32 mask);
+// `value`'s first `bytes` bytes, byte 0 first: "F0 FF FF FF".
+QString compoundBytesText(quint32 value, int bytes);
+// "F0 FF FF FF", "F0FFFFFF" or "0xF0FFFFFF": up to four bytes, byte 0 first,
+// two hex digits each (a lone digit is one byte). False for anything else.
+bool parseCompoundBytes(const QString &text, quint32 *value, int *bytes = nullptr);
+
 enum class SectionDevice {
     Off,
     ReceiveMessage,

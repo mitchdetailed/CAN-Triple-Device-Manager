@@ -207,6 +207,8 @@ private:
     void onRemoveRow();
     void onEditIdentifier();
     void onClearIdentifier();
+    void onAddIdentifier();
+    void onRemoveIdentifier();
     void updateButtons();
 
     void accept() override;
@@ -322,6 +324,8 @@ private:
     QTreeWidget *m_identifierTree;
     QPushButton *m_identChangeButton;
     QPushButton *m_identClearButton;
+    QPushButton *m_identAddButton;
+    QPushButton *m_identRemoveButton;
     QPushButton *m_addButton;
     QPushButton *m_changeButton;
     QPushButton *m_removeButton;

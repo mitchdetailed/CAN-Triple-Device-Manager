@@ -316,6 +316,82 @@ static void fillLabel(CanSignalConfig &sig, const QString &name, QVector<QByteAr
     keepLabel(labels, idx, clipToLabel(name, budget));
 }
 
+// A 32-bit identifier's upper halves, beside a CAN Triple 2.0's record
+// (DeviceTables::signalMuxHigh); 0 for one of 2 bytes, which clears what an
+// earlier pass may have left at the index.
+static void keepMuxHigh(DeviceTables &t, int idx, quint32 id, quint32 mask)
+{
+    const quint32 maskHi = mask >> 16;
+    const quint32 high = (maskHi << 16) | (maskHi ? (id >> 16) : 0u);
+    if (high == 0 && idx >= t.signalMuxHigh.size())
+        return;
+    if (t.signalMuxHigh.size() <= idx)
+        t.signalMuxHigh.resize(idx + 1);
+    t.signalMuxHigh[idx] = high;
+}
+
+// Whether a channel's record names a message the unit receives.
+static bool onReceivedMessage(const DeviceTables &t, int i)
+{
+    const quint16 m = sigMsgIdx(t.signalConfigs[i], t.capacity.wideMessageIndex());
+    return m != SIG_MSG_NONE && int(m) < int(t.messages.size())
+           && !(t.messages[m].flags & MSGFLAG_TRANSMIT);
+}
+
+quint32 signalMuxHighOf(const DeviceTables &t, int i)
+{
+    if (i < 0 || i >= int(t.signalConfigs.size()))
+        return 0;
+    if (const quint32 high = t.signalMuxHigh.value(i); high != 0)
+        return high;
+    // A CAN Triple's record: a received channel's spare room. On a CAN Triple
+    // 2.0's the same bits are its message index's top bits and the bit that
+    // keeps a channel, and a transmitted channel's tx_source is its source.
+    if (t.capacity.isCanTriple2() || !onReceivedMessage(t, i))
+        return 0;
+    const CanSignalConfig &s = t.signalConfigs[i];
+    const quint16 maskHi = sigRxMuxMaskHi(s);
+    return maskHi ? (quint32(maskHi) << 16) | s.tx_source : 0u;
+}
+
+SelectorWidthCheck checkSelectorWidth(const CompoundIdentifier &ident, const DeviceCapacity &target,
+                                      bool transmit)
+{
+    SelectorWidthCheck c;
+    const quint32 maskHi = ident.idMask >> 16;
+    if (maskHi == 0 || target.selector32())
+        return c;
+    const QString mask =
+        compoundBytesText(ident.idMask, compoundSelectorBytes(ident.id, ident.idMask));
+    c.error = true;
+    if (target.isCanTriple2()) {
+        c.text = QStringLiteral("identifier mask %1 is wider than 2 bytes, which this target "
+                                "firmware does not compare — a CAN Triple 2.0 does from firmware "
+                                "2.0.6 (File > Target Firmware)")
+                     .arg(mask);
+        return c;
+    }
+    if (transmit) {
+        c.text = QStringLiteral("identifier mask %1 is wider than 2 bytes: a CAN Triple transmits "
+                                "identifiers of up to 2 bytes (a CAN Triple 2.0 transmits 4)")
+                     .arg(mask);
+        return c;
+    }
+    if (!muxMaskHiByDigits(quint16(maskHi))) {
+        c.text = QStringLiteral("identifier mask %1: a CAN Triple compares bytes 2 and 3 of a "
+                                "received identifier in whole hex digits, each 0 or F")
+                     .arg(mask);
+        return c;
+    }
+    c.error = false;
+    if (!target.selector32Receive())
+        c.text = QStringLiteral("identifier mask %1 is wider than 2 bytes, which a CAN Triple "
+                                "compares on received messages from firmware 1.0.16 — the Send "
+                                "checks the unit")
+                     .arg(mask);
+    return c;
+}
+
 // The unit of a record's channel, as a CAN Triple 2.0 keeps it beside the name
 // (LABEL_KIND_UNIT; phase 4, step 3b): its catalogue unit, empty for none,
 // clipped to a slot. Kept for every target, like the names.
@@ -909,7 +985,7 @@ MappingResult mapToDevice(const Configuration &config)
                 // composer reads its channel's value slot (unit_type/unit_val)
                 // and, for compound, writes muxId/muxMask into each variant frame.
                 auto emitTxSignal = [&](const CommsChannelRow &row, quint8 muxOffset,
-                                        quint16 muxId, quint16 muxMask) {
+                                        quint32 muxId, quint32 muxMask) {
                     ExtractionFields fields;
                     QString reason;
                     if (!computeExtraction(row, section.alignment, section.messageLengthBytes,
@@ -945,11 +1021,15 @@ MappingResult mapToDevice(const Configuration &config)
                     sig.min_val = float(ch.isValid() ? ch.minValue : -1e9);
                     sig.max_val = float(ch.isValid() ? ch.maxValue : 1e9);
                     sig.default_value = float(row.defaultValue); // preserved so Send→Get round-trips
-                    sig.mux_id = muxId;
-                    sig.mux_mask = muxMask;
+                    sig.mux_id = quint16(muxId);
+                    sig.mux_mask = quint16(muxMask);
                     // The value slot the composer reads to pack this field
                     // ("source index + 1"; 0 would mean this signal's own slot).
                     sig.tx_source = quint16(sourceIdx + 1);
+                    // A 32-bit identifier's upper halves, beside the record on a
+                    // CAN Triple 2.0 (checkSelectorWidth refused one on anything
+                    // that transmits 2 bytes).
+                    keepMuxHigh(r.tables, int(r.tables.signalConfigs.size()), muxId, muxMask);
                     fillLabel(sig, row.channelName, r.tables.signalLabels,
                               int(r.tables.signalConfigs.size()), sigLabelBudget);
                     fillUnit(r.tables.unitLabels, int(r.tables.signalConfigs.size()), ch);
@@ -969,27 +1049,22 @@ MappingResult mapToDevice(const Configuration &config)
                     // silent — variants past it are stored and never appear on
                     // the wire — so exceeding it must be reported here, from
                     // the same count the device will arrive at.
-                    QList<quint64> selectors;
+                    QList<QPair<quint64, quint32>> selectors; // (offset, mask), masked id
                     for (const CompoundIdentifier &ident : section.identifiers) {
-                        if (ident.idMask > 0xFFFFu) {
-                            // v15 narrowed the selector to 16 bits. Truncating
-                            // would zero the mask, and a zero mask means
-                            // "always active" — the signal would silently stop
-                            // being gated rather than fail, so refuse instead.
-                            r.errors.append(QStringLiteral(
-                                "%1: compound identifier mask 0x%2 does not fit the device's "
-                                "16-bit selector window — the multiplexor field must lie within "
-                                "2 bytes of its offset")
-                                    .arg(where)
-                                    .arg(QString::number(ident.idMask, 16).toUpper()));
+                        // Wider than the target compares: refused rather than
+                        // truncated, which would zero the mask's upper half and
+                        // gate on less than was asked.
+                        const SelectorWidthCheck width = checkSelectorWidth(ident, cap, true);
+                        if (width.error) {
+                            r.errors.append(QStringLiteral("%1: %2").arg(where, width.text));
                             continue;
                         }
                         if (ident.idMask == 0) {
                             r.warnings.append(QStringLiteral(
-                                "%1: compound identifier 0x%2 has a zero mask; its %3 channel(s) "
+                                "%1: compound identifier %2 has a zero mask; its %3 channel(s) "
                                 "cannot be transmitted as a distinct variant — skipped")
                                     .arg(where)
-                                    .arg(QString::number(ident.id, 16).toUpper())
+                                    .arg(compoundBytesText(ident.id, compoundSelectorBytes(ident.id, 0)))
                                     .arg(ident.rows.size()));
                             continue;
                         }
@@ -998,9 +1073,9 @@ MappingResult mapToDevice(const Configuration &config)
                             // channel-less identifier now does too — it emits a
                             // selector-only signal below, and the device collects
                             // that exactly like any other.
-                            const quint64 sel = (quint64(quint8(ident.byteOffset)) << 32)
-                                                | (quint64(ident.idMask) << 16)
-                                                | quint64(ident.id & ident.idMask);
+                            const QPair<quint64, quint32> sel{
+                                (quint64(quint8(ident.byteOffset)) << 32) | quint64(ident.idMask),
+                                ident.id & ident.idMask};
                             if (!selectors.contains(sel))
                                 selectors.append(sel);
                         }
@@ -1041,14 +1116,15 @@ MappingResult mapToDevice(const Configuration &config)
                             sel.factor = 1.0f;
                             sel.mux_id = quint16(ident.id);
                             sel.mux_mask = quint16(ident.idMask);
+                            keepMuxHigh(r.tables, int(r.tables.signalConfigs.size()), ident.id,
+                                        ident.idMask);
                             // No label: it names no channel, and Get recognises
                             // it by the flag rather than by anything written here.
                             r.tables.signalConfigs.append(sel);
                             continue;
                         }
                         for (const CommsChannelRow &row : ident.rows)
-                            emitTxSignal(row, quint8(ident.byteOffset), quint16(ident.id),
-                                         quint16(ident.idMask));
+                            emitTxSignal(row, quint8(ident.byteOffset), ident.id, ident.idMask);
                     }
                     if (selectors.size() > MAX_TX_MUX_IDS)
                         r.warnings.append(QStringLiteral(
@@ -1241,7 +1317,7 @@ MappingResult mapToDevice(const Configuration &config)
             // == 0 means always active; otherwise the firmware extracts the
             // signal only while (frame selector & muxMask) == (muxId & muxMask).
             auto emitRxSignal = [&](const CommsChannelRow &row, quint8 muxOffset,
-                                    quint16 muxId, quint16 muxMask) {
+                                    quint32 muxId, quint32 muxMask) {
                 ExtractionFields fields;
                 QString reason;
                 if (!computeExtraction(row, section.alignment, section.messageLengthBytes,
@@ -1298,8 +1374,17 @@ MappingResult mapToDevice(const Configuration &config)
                 sig.max_val = float(ch.isValid() ? ch.maxValue : 1e9);
                 // Physical value the firmware writes to this slot on timeout.
                 sig.default_value = float(row.defaultValue);
-                sig.mux_id = muxId;
-                sig.mux_mask = muxMask;
+                sig.mux_id = quint16(muxId);
+                sig.mux_mask = quint16(muxMask);
+                // A 32-bit identifier's upper halves (checkSelectorWidth has
+                // refused one the target cannot compare): beside the record on
+                // a CAN Triple 2.0, in the record's spare room on a CAN Triple
+                // (1.0.16). Written, or cleared, either way: this slot may be one
+                // an earlier pass gave another identifier.
+                if (cap.isCanTriple2())
+                    keepMuxHigh(r.tables, sigIdx, muxId, muxMask);
+                else
+                    sigSetRxMuxHigh(sig, quint16(muxId >> 16), quint16(muxMask >> 16));
                 fillLabel(sig, row.channelName, r.tables.signalLabels, sigIdx, sigLabelBudget);
                 fillUnit(r.tables.unitLabels, sigIdx, ch);
                 if (!ch.isValid())
@@ -1316,31 +1401,22 @@ MappingResult mapToDevice(const Configuration &config)
                     emitRxSignal(row, 0, 0, 0);
             if (section.compound) {
                 for (const CompoundIdentifier &ident : section.identifiers) {
-                    if (ident.idMask > 0xFFFFu) {
-                        // v15 narrowed the selector to 16 bits. Truncating
-                        // would zero the mask, and a zero mask means
-                        // "always active" — the signal would silently stop
-                        // being gated rather than fail, so refuse instead.
-                        r.errors.append(QStringLiteral(
-                            "%1: compound identifier mask 0x%2 does not fit the device's "
-                            "16-bit selector window — the multiplexor field must lie within "
-                            "2 bytes of its offset")
-                                .arg(where)
-                                .arg(QString::number(ident.idMask, 16).toUpper()));
+                    const SelectorWidthCheck width = checkSelectorWidth(ident, cap, false);
+                    if (width.error) {
+                        r.errors.append(QStringLiteral("%1: %2").arg(where, width.text));
                         continue;
                     }
                     if (ident.idMask == 0) {
                         r.warnings.append(QStringLiteral(
-                            "%1: compound identifier 0x%2 has a zero mask; its %3 channel(s) "
+                            "%1: compound identifier %2 has a zero mask; its %3 channel(s) "
                             "would always match — skipped")
                                 .arg(where)
-                                .arg(QString::number(ident.id, 16).toUpper())
+                                .arg(compoundBytesText(ident.id, compoundSelectorBytes(ident.id, 0)))
                                 .arg(ident.rows.size()));
                         continue;
                     }
                     for (const CommsChannelRow &row : ident.rows)
-                        emitRxSignal(row, quint8(ident.byteOffset), quint16(ident.id),
-                                     quint16(ident.idMask));
+                        emitRxSignal(row, quint8(ident.byteOffset), ident.id, ident.idMask);
                 }
             }
         }
@@ -2330,8 +2406,9 @@ QStringList tablesExceeding(const DeviceTables &tables, const DeviceCapacity &de
     // cut.
     const int preserved = retainedValuesOf(tables);
     bool channels = false;
-    for (const CanSignalConfig &s : tables.signalConfigs)
-        channels = channels || sigRetain(s);
+    if (tables.capacity.retainsChannels()) // on a 1.x the bit is a mask digit
+        for (const CanSignalConfig &s : tables.signalConfigs)
+            channels = channels || sigRetain(s);
     if (preserved > device.retainedLimit())
         out.append(channels
                        ? QStringLiteral("%1 values kept across power cycles (channels, and counters "
@@ -2343,6 +2420,36 @@ QStringList tablesExceeding(const DeviceTables &tables, const DeviceCapacity &de
                                         "but this device keeps %2")
                              .arg(preserved)
                              .arg(device.retainedLimit()));
+    // Compound identifiers of 4 bytes: only a unit that compares them takes
+    // them, whichever form the tables carry them in (signalMuxHighOf;
+    // tablesForUnit moves them into the unit's). A CAN Triple 2.0 from 2.0.6
+    // compares every one; a CAN Triple from 1.0.16 a received one whose mask's
+    // bytes 2 and 3 are whole hex digits. A CAN Triple's 1.0.15 and 1.0.16
+    // share store v20, so nothing else would stop the older one taking a
+    // configuration it reads 2 bytes of.
+    if (!device.selector32()) {
+        const bool digits = !device.isCanTriple2() && device.selector32Receive();
+        bool unread = false;
+        for (int i = 0; i < int(tables.signalConfigs.size()) && !unread; ++i) {
+            const quint32 high = signalMuxHighOf(tables, i);
+            unread = high != 0
+                     && !(digits && onReceivedMessage(tables, i)
+                          && muxMaskHiByDigits(quint16(high >> 16)));
+        }
+        if (unread)
+            out.append(device.isCanTriple2()
+                           ? QStringLiteral("compound identifiers of 4 bytes, which this device's "
+                                            "firmware does not compare (a CAN Triple 2.0 does "
+                                            "from firmware 2.0.6)")
+                       : digits
+                           ? QStringLiteral("compound identifiers of 4 bytes that a CAN Triple "
+                                            "does not compare: it compares them on received "
+                                            "messages only, the mask's bytes 2 and 3 in whole "
+                                            "hex digits")
+                           : QStringLiteral("compound identifiers of 4 bytes, which this device's "
+                                            "firmware does not compare (a CAN Triple compares "
+                                            "received ones from firmware 1.0.16)"));
+    }
     return out;
 }
 
@@ -2358,6 +2465,35 @@ DeviceTables tablesForUnit(const DeviceTables &tables, const DeviceCapacity &dev
     // names the tables carry for every target go to a unit that keeps them.
     out.capacity.labelFlags = device.labelFlags;
     out.capacity.projectBytes = device.projectBytes;
+    // A compound identifier's upper halves in the unit's form (Mitch,
+    // 2026-10-10): beside the record for a CAN Triple 2.0, in a received
+    // channel's spare room for a CAN Triple (1.0.16). Read, and the tables'
+    // own form cleared, before the message index moves below: a CAN Triple's
+    // mask digits sit where a 2.0 keeps its index's top bits. What the unit
+    // cannot compare in its form (a transmitted one on a CAN Triple, a digit
+    // not 0 or F) the fit check, tablesExceeding, has refused by now.
+    const bool fromBeside = tables.capacity.isCanTriple2();
+    const bool toBeside = device.isCanTriple2();
+    QVector<quint32> high;
+    QVector<bool> received;
+    if (fromBeside != toBeside) {
+        const int n = int(tables.signalConfigs.size());
+        high.resize(n);
+        received.resize(n);
+        for (int i = 0; i < n; ++i) {
+            high[i] = signalMuxHighOf(tables, i);
+            received[i] = onReceivedMessage(tables, i);
+            if (high[i] != 0 && !fromBeside)
+                sigSetRxMuxHigh(out.signalConfigs[i], 0, 0);
+        }
+        out.signalMuxHigh.clear();
+    }
+    // The bit that keeps a CAN Triple 2.0's channel, to a unit that keeps
+    // none: on a CAN Triple from 1.0.16 it is a digit of a received
+    // identifier's mask (SIG_BITS_RX_MUXHI_D7), which would gate the channel.
+    if (tables.capacity.retainsChannels() && !device.retainsChannels())
+        for (CanSignalConfig &sig : out.signalConfigs)
+            sigSetRetain(sig, false);
     // The message index in the unit's form, when the tables were mapped for a
     // unit that reads it the other way: every channel bound to the same
     // message, or to none, as the unit reads it. Only a unit that takes a plan
@@ -2368,7 +2504,25 @@ DeviceTables tablesForUnit(const DeviceTables &tables, const DeviceCapacity &dev
     if (tables.capacity.wideMessageIndex() != wide)
         for (CanSignalConfig &sig : out.signalConfigs)
             sigSetMsgIdx(sig, sigMsgIdx(sig, tables.capacity.wideMessageIndex()), wide);
+    if (fromBeside != toBeside) {
+        bool any = false;
+        for (int i = 0; i < int(high.size()); ++i) {
+            if (high[i] == 0)
+                continue;
+            if (toBeside)
+                any = true;
+            else if (received[i])
+                sigSetRxMuxHigh(out.signalConfigs[i], quint16(high[i]), quint16(high[i] >> 16));
+        }
+        if (any)
+            out.signalMuxHigh = high;
+    }
     out.capacity.plan = device.plan;
+    // The signal record's form (sliceFor): a CAN Triple 2.0 from 2.0.6 ends
+    // each with its identifier's upper halves, whatever the tables were mapped
+    // against; and what the unit compares.
+    constexpr int kSelectors = CAPACITY_CAN_SELECTOR_32 | CAPACITY_CAN_SELECTOR_32_RX;
+    out.capacity.canFeatures = (out.capacity.canFeatures & ~kSelectors) | (device.canFeatures & kSelectors);
     // The CRC8 records in the unit's form: one record a rule of up to
     // CRC8_MAX_ELEMENTS, or on a CAN Triple 2.0 whose records hold 8 (store
     // v22, crc8LongRules) the rule's record and its continuations. A rule moves
@@ -2850,8 +3004,10 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
                 name = QStringLiteral("Signal %1").arg(i);
             signalNames.insert(i, name);
             // A channel the unit keeps across power cycles: kept in the
-            // rebuilt document too.
-            if (sigRetain(sig))
+            // rebuilt document too. Asked only of a unit that keeps channels:
+            // on a CAN Triple the bit is a digit of a received identifier's
+            // mask (SIG_BITS_RX_MUXHI_D7).
+            if (tables.capacity.retainsChannels() && sigRetain(sig))
                 config.setRetainedChannel(name, true);
         }
 
@@ -2973,11 +3129,20 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
         // always clear, so this reads true for it, which is what receive does.
         row.clampToRange = !sigTxWrap(sig);
 
+        // The identifier and mask whole: their upper halves beside the record
+        // from a CAN Triple 2.0 (store v24), in a received signal's spare room
+        // from a CAN Triple (1.0.16).
+        quint32 muxId = sig.mux_id, muxMask = sig.mux_mask;
+        if (const quint32 high = signalMuxHighOf(tables, i); high != 0) {
+            muxId |= (high & 0xFFFFu) << 16;
+            muxMask |= (high >> 16) << 16;
+        }
+
         // v8/v10: a signal with a non-zero mux mask is a gated compound
         // sub-message channel (receive OR transmit); group it under an identifier
         // keyed by (offset, id, mask). Ungated signals (mask 0) are the section's
         // always-present rows.
-        if (sig.mux_mask == 0) {
+        if (muxMask == 0) {
             // A selector-only signal with no mask declares nothing — it cannot
             // name a variant — and appending it here would put a channel-less
             // row in the section. Only a foreign or hand-built table can
@@ -2989,16 +3154,16 @@ void mapFromDevice(const DeviceTables &tables, Configuration &config, QStringLis
             section->compound = true;
             CompoundIdentifier *ident = nullptr;
             for (CompoundIdentifier &ci : section->identifiers)
-                if (ci.byteOffset == int(sigMuxByteOffset(sig)) && ci.id == sig.mux_id
-                    && ci.idMask == sig.mux_mask) {
+                if (ci.byteOffset == int(sigMuxByteOffset(sig)) && ci.id == muxId
+                    && ci.idMask == muxMask) {
                     ident = &ci;
                     break;
                 }
             if (!ident) {
                 CompoundIdentifier ci;
                 ci.byteOffset = int(sigMuxByteOffset(sig));
-                ci.id = sig.mux_id;
-                ci.idMask = sig.mux_mask;
+                ci.id = muxId;
+                ci.idMask = muxMask;
                 ci.configured = true;
                 section->identifiers.append(ci);
                 ident = &section->identifiers.last();

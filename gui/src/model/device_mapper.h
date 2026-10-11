@@ -27,6 +27,14 @@ struct DeviceTables {
     DeviceCapacity capacity = DeviceCapacity::builtIn();
     QVector<CanMessageConfig> messages; // receive AND transmit (direction is a flag)
     QVector<CanSignalConfig> signalConfigs;
+    // The upper halves of a signal's compound identifier and mask, one per
+    // record where any is not 0 ((mask >> 16) << 16 | id >> 16): a CAN Triple
+    // 2.0 from 2.0.6 (store v24) compares 32 bits and its record ends with
+    // them, which ours has no room for. A Send writes them as the record's
+    // last 4 bytes, a Get reads them back here. Empty past the last record
+    // that has any; never filled for a 1.x, whose record keeps a RECEIVED
+    // identifier's in its spare room (sigSetRxMuxHigh).
+    QVector<quint32> signalMuxHigh;
     // The NAMES of those records and of `relays`, one per record, as a CAN
     // Triple 2.0 keeps them in its label store: up to capacity.labelBytes of
     // UTF-8, empty for none. mapToDevice fills them for every target, clipped
@@ -193,6 +201,25 @@ QVector<int> tableCountsOf(const DeviceTables &tables);
 // (capacity.h) over tableCountsOf().
 QStringList tablesExceeding(const DeviceTables &tables, const DeviceCapacity &device);
 
+// A compound identifier wider than 2 bytes, on `target`, of a message going
+// `transmit`: the text empty when the target compares it; otherwise why not,
+// and whether that refuses the configuration (error) or only needs a unit that
+// compares it — a CAN Triple from 1.0.16, which the Send asks (warning).
+// Validation and the mapper both ask this, so they cannot disagree.
+struct SelectorWidthCheck {
+    QString text;
+    bool error = false;
+};
+SelectorWidthCheck checkSelectorWidth(const CompoundIdentifier &ident, const DeviceCapacity &target,
+                                      bool transmit);
+
+// A channel's compound identifier's upper halves, (mask << 16) | id, 0 for an
+// identifier of 2 bytes, from whichever form the tables carry them in: beside
+// the record (signalMuxHigh) for a CAN Triple 2.0, in a received channel's
+// spare room for a CAN Triple (1.0.16; wire_structs.h, SIG_FLAG_RX_MUXHI_*),
+// where the same bits on a 2.0's record mean other things.
+quint32 signalMuxHighOf(const DeviceTables &tables, int signal);
+
 // The tables in the record form of the unit they are about to be sent to: to a
 // CAN Triple 2.0 that keeps its names apart (DeviceCapacity::labelsApart) the
 // message, signal and relay records go without their names and the names
@@ -205,7 +232,10 @@ QStringList tablesExceeding(const DeviceTables &tables, const DeviceCapacity &de
 // capacity report, or builtIn() for firmware without one. It carries one more
 // fact about the unit, whether it keeps a stored project
 // (DeviceCapacity::projectBytes), because that decides how long its CLEAR may
-// take.
+// take. A compound identifier's upper halves move into the unit's form too
+// (signalMuxHighOf), and the bit that keeps a CAN Triple 2.0's channel goes to
+// no unit that keeps none: on a CAN Triple from 1.0.16 it is a digit of a
+// received identifier's mask.
 DeviceTables tablesForUnit(const DeviceTables &tables, const DeviceCapacity &device);
 
 // ---- The device script, as an image ---------------------------------------
