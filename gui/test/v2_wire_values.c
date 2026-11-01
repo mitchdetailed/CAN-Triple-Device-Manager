@@ -152,6 +152,16 @@ const unsigned v2_settings_offsets[3] = {
     offsetof(DeviceSettings, format), offsetof(DeviceSettings, led_brightness),
     offsetof(DeviceSettings, reserved),
 };
+/* Which USB device the unit is: the commands, the modes, the fallback's flag,
+ * the vendor request back, and the state, field by field. */
+const unsigned v2_usb_mode_cmds[2] = {CMD_SET_USB_MODE, CMD_GET_USB_MODE};
+const unsigned v2_usb_modes[2] = {USB_MODE_MANAGER, USB_MODE_GS_USB};
+const unsigned v2_usb_mode_fell_back = USB_MODE_FELL_BACK;
+const unsigned v2_usb_req[2] = {CT_USB_REQ_SET_MODE, CT_USB_REQ_STORE};
+const unsigned v2_usb_mode_size = sizeof(UsbModeState);
+const unsigned v2_usb_mode_offsets[3] = {
+    offsetof(UsbModeState, current), offsetof(UsbModeState, stored), offsetof(UsbModeState, flags),
+};
 /* Transmit CRC8 on the 2.0 line: the element spellings, the features the
  * report states, and how many rules the unit holds. */
 const unsigned v2_crc8_features =

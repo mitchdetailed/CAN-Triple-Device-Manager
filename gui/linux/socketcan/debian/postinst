@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    if [ -e /etc/udev/rules.d/70-cantriple-gs-usb.rules ]; then
+        echo "cantriple-socketcan: /etc/udev/rules.d/70-cantriple-gs-usb.rules overrides this" \
+             "package's rule of the same name; remove it to use the packaged one." >&2
+    fi
+    udevadm control --reload-rules 2>/dev/null || true
+    # A unit already plugged in, in either mode: the rules see it now.
+    udevadm trigger --action=add --subsystem-match=usb \
+        --attr-match=idVendor=0483 --attr-match=idProduct=5740 2>/dev/null || true
+fi
+exit 0

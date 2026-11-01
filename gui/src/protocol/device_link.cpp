@@ -115,6 +115,10 @@ bool DeviceLink::isReadResponse(quint8 cmd)
     // Send's declaration is answered with an ACK, and the Manager never sends
     // the ask, whose reply is data.
     case CMD_GET_USAGE:
+    // The CAN Triple 2.0's USB mode (firmware 2.0.10): fixed shape, no echo.
+    // Listed with the command, here and in test_roundtrip's lists.
+    // CMD_SET_USB_MODE is NOT here: it is answered with an ACK.
+    case CMD_GET_USB_MODE:
         return true;
     default:
         return false;

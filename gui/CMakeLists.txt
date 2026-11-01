@@ -55,7 +55,7 @@ cmake_minimum_required(VERSION 3.21)
 #
 # The two store constants are a firmware value and the GUI's mirror of it;
 # they must agree, and test_firmware_link asserts exactly that.
-project(CANTripleDeviceManager VERSION 1.2.9 LANGUAGES C CXX RC)
+project(CANTripleDeviceManager VERSION 1.2.10 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # windres cannot live in a path with a space in it
@@ -279,6 +279,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/protocol/access_state.h
     src/protocol/device_session.cpp
     src/protocol/device_session.h
+    src/protocol/usb_adapter.cpp
+    src/protocol/usb_adapter.h
     src/protocol/capacity.cpp
     src/protocol/hardware.cpp
     src/protocol/capacity.h
@@ -403,6 +405,8 @@ qt_add_executable(CANTripleDeviceManager WIN32
     src/ui/firmware_license_dialog.h
     src/ui/led_brightness_dialog.cpp
     src/ui/led_brightness_dialog.h
+    src/ui/usb_mode_dialog.cpp
+    src/ui/usb_mode_dialog.h
     # Tools → Theme: the palettes and the switch. The colours with a meaning
     # are inline in theme.h, so the dialogs' test programs need nothing more.
     src/ui/theme.cpp
@@ -968,6 +972,27 @@ qt_add_executable(test_led_brightness
 )
 target_include_directories(test_led_brightness PRIVATE ${FIRMWARE_DIR}/include)
 target_link_libraries(test_led_brightness
+    PRIVATE Qt6::Widgets Qt6::SerialPort Qt6::Core Qt6::Network ct_device_core)
+
+# Online → USB Mode… and the way back from a SocketCAN adapter: the session
+# helpers, the dialog's choices against a fake link (what each sends, and that
+# OK on what is offered never surprises), and finding adapters in a fake sysfs.
+qt_add_executable(test_usb_mode
+    test/test_usb_mode.cpp
+    test/fake_device_link.h
+    src/ui/usb_mode_dialog.cpp
+    src/protocol/usb_adapter.cpp
+    src/protocol/device_link.cpp
+    src/protocol/device_session.cpp
+    src/protocol/capacity.cpp
+    src/protocol/hardware.cpp
+    src/protocol/framer.cpp
+    src/protocol/cobs.cpp
+    src/model/config_lock.cpp
+    src/model/access_keys.cpp
+)
+target_include_directories(test_usb_mode PRIVATE ${FIRMWARE_DIR}/include)
+target_link_libraries(test_usb_mode
     PRIVATE Qt6::Widgets Qt6::SerialPort Qt6::Core Qt6::Network ct_device_core)
 
 # Tools → Theme: the four palettes read the way a customer reads them (WCAG

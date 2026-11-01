@@ -1,0 +1,418 @@
+.\" ctriple(1), cantriple-socketcan
+.TH CTRIPLE 1 "October 2026" "cantriple-socketcan 1.0.0" "User Commands"
+.SH NAME
+ctriple \- switch, inspect and bring up a CAN Triple 2.0 as a SocketCAN adapter
+.SH SYNOPSIS
+.B ctriple
+.RB [ status ]
+.RB [ \-\-unit
+.IR ID ]
+.PP
+.B ctriple socketcan
+.RB [ \-\-persist ]
+.RB [ \-\-unit
+.IR ID ]
+.RB [ \-\-password
+.IR PASSWORD ]
+.PP
+.B ctriple manager
+.RB [ \-\-persist ]
+.RB [ \-\-unit
+.IR ID ]
+.RB [ \-\-password
+.IR PASSWORD ]
+.PP
+.B ctriple up
+.RB [ \-\-bitrate
+.IR N ]
+.RB [ \-\-dbitrate
+.IR N ]
+.RB [ \-\-listen\-only ]
+.RB [ \-\-loopback ]
+.RB [ \-\-berr\-reporting ]
+.RB [ \-\-bus
+.IR LIST ]
+.RB [ \-\-unit
+.IR ID ]
+.PP
+.B ctriple down
+.RB [ \-\-bus
+.IR LIST ]
+.RB [ \-\-unit
+.IR ID ]
+.PP
+.B ctriple
+.BR \-\-version " | " \-h
+.SH DESCRIPTION
+A CAN Triple 2.0 is one of two USB devices at a time:
+.TP
+.B the Device Manager's port
+a USB serial port
+.RI ( /dev/ttyACM N )
+speaking the Device Manager's protocol, used to configure the unit, update its
+firmware and watch it. Every unit starts as this unless told otherwise.
+.TP
+.B the SocketCAN adapter
+a gs_usb CAN adapter, which the Linux kernel's own
+.B gs_usb
+driver turns into three SocketCAN network interfaces, one per bus. This
+package's udev rule names them
+.BI ct UNIT \-can1\fR,
+.BI ct UNIT \-can2
+and
+.BI ct UNIT \-can3
+for the unit's CAN1, CAN2 and CAN3, where
+.I UNIT
+is the last six characters of the unit's serial number in lower case (the
+serial number is the MCU ID the Device Manager shows, e.g.
+.B 2035344746325012004F002B
+gives
+.BR ct4f002b\-can1 ).
+.PP
+.B ctriple
+moves a unit between the two, says which each unit is, and brings the
+interfaces up and down. The interfaces are ordinary SocketCAN interfaces:
+anything
+.B ctriple up
+does can also be done with
+.BR ip\-link (8),
+and every SocketCAN program (candump, cansend, python\-can, SavvyCAN) uses
+them as it uses any other. See
+.BR cantriple\-socketcan (7)
+for the setup, what the unit supports, and how it behaves.
+.SH COMMANDS
+.TP
+.B status
+The default. One line for every unit plugged in (or for the one
+.B \-\-unit
+names):
+.RS
+.TP
+in SocketCAN mode
+each bus, its interface, and whether the interface is up
+.RB ( "ip link set up" ,
+not whether a bus is connected). "no interfaces: gs_usb has not taken it"
+means the kernel has not bound
+.B gs_usb
+to the unit: the udev rule is missing or masked, or the
+.B gs_usb
+module is unavailable.
+.TP
+on the Device Manager's port
+the serial port, the firmware version, and the mode the unit starts in at
+every power-up. "fell back from the SocketCAN adapter" means the unit was the
+adapter, set to start as it or asked to be it elsewhere, and gave this PC the
+Manager's port because nothing here used the adapter (see
+.B FALLBACK
+in
+.BR cantriple\-socketcan (7)).
+"without SocketCAN mode, or before 2.0.10" means the firmware cannot say which
+mode it starts in: before 2.0.7 it has no SocketCAN mode at all; 2.0.7 to 2.0.9
+have it but cannot keep it across power-ups.
+.RE
+.TP
+.B socketcan
+Turn a unit on the Device Manager's port into the SocketCAN adapter. The unit
+acknowledges, leaves the USB bus for a quarter of a second and comes back as
+the adapter; the serial port disappears, and with it any Device Manager
+session. Waits up to six seconds for the interfaces, then prints them. With
+.BR \-\-persist ,
+the unit also starts as the adapter at every power-up from now on. Asks for
+the CAN Viewer password if the unit has one (see
+.BR \-\-password ).
+Needs firmware 2.0.7 or later (2.0.10 for
+.BR \-\-persist ).
+.TP
+.B manager
+Turn a unit in SocketCAN mode back into the Device Manager's port. Its
+interfaces disappear (the kernel removes them as the unit leaves the bus); the
+buses go back to the unit's own configuration. Waits up to six seconds for the
+serial port. Sent as a USB control request, so the unit's
+.I /dev/bus/usb
+node must be writable (the udev rule gives that to the user at the seat;
+otherwise use sudo). With
+.BR \-\-persist ,
+the unit also starts as the Manager's port from now on. On a unit already on
+the Manager's port,
+.B manager \-\-persist
+changes only the mode it starts in, and does not re-enumerate it.
+.TP
+.B up
+Bring the unit's interfaces up: each is taken down, given its bit rates and
+modes, and brought up. Needs root
+.RB ( CAP_NET_ADMIN ).
+Acts on every unit in SocketCAN mode, or the one
+.B \-\-unit
+names, and on every bus, or those
+.B \-\-bus
+names. The bit rates are, in order of preference:
+.BR \-\-bitrate " / " \-\-dbitrate ,
+then
+.BR CAN \fIn\fB_BITRATE " / " CAN \fIn\fB_DBITRATE
+for that bus in
+.IR /etc/default/cantriple\-socketcan ,
+then
+.BR BITRATE " / " DBITRATE
+there. A data rate makes the bus CAN FD. The
+.B OPTIONS
+in that file are added to every bus. A bus with no bit rate anywhere is an
+error.
+.TP
+.B down
+Take the unit's interfaces down
+.RB ( "ip link set down" ),
+every bus or those
+.B \-\-bus
+names. Needs root. A bus taken down goes back to the unit's own configuration
+at once.
+.SH OPTIONS
+.TP
+.BI \-\-unit " ID"
+Act on the unit whose serial number ends with
+.I ID
+(any length, upper or lower case;
+the six characters in the interface names are enough). Needed by
+.BR socketcan " and " manager
+when more than one unit is in the mode they act on; without it,
+.BR status ", " up " and " down
+act on every unit.
+.TP
+.B \-\-persist
+With
+.BR socketcan " or " manager :
+also keep the mode as the one the unit starts in at every power-up (kept in
+the unit's FRAM; firmware 2.0.10 or later). Without it, a mode lasts until the
+unit restarts.
+.TP
+.BI \-\-password " PASSWORD"
+The unit's CAN Viewer password. SocketCAN mode reads and writes the buses raw,
+as the Device Manager's CAN Viewer does, so the same password guards it. Only
+used if the unit refuses without it; when it is not given,
+.B ctriple
+asks for it on the terminal, or takes it from
+.BR CTRIPLE_PASSWORD .
+A password proved stays proved until the unit leaves the USB bus. The unit
+learns nothing of the password but a challenge's answer.
+.TP
+.BI \-\-bitrate " N"
+.RB ( up )
+The nominal (arbitration) bit rate, in bit/s, for every bus chosen. Linux works
+out the timing from the unit's limits, with its usual sample point (87.5 %
+up to 500 kbit/s, 80 % above, 75 % above 800 kbit/s).
+.TP
+.BI \-\-dbitrate " N"
+.RB ( up )
+The CAN FD data phase's bit rate, in bit/s, which turns CAN FD on. 1 to 8
+Mbit/s; the unit's transceivers are rated to 5 Mbit/s, and 8 works on short
+buses with few nodes.
+.TP
+.B \-\-listen\-only
+.RB ( up )
+Receive only: the unit never acknowledges a frame, never transmits, never
+sends an error frame. Safe on a bus whose bit rate is not known.
+.TP
+.B \-\-loopback
+.RB ( up )
+Loop back inside the unit's CAN controller: frames sent come back as received
+frames, and nothing reaches the pins. A test of the USB path and the
+controller with nothing wired.
+.TP
+.B \-\-berr\-reporting
+.RB ( up )
+Report each bus error (a stuff, form, acknowledgement, bit or CRC error) as an
+error frame, the latest one at most every millisecond a bus. The changes of
+bus state (warning, passive, bus-off) are reported whether or not this is on.
+.TP
+.BI \-\-bus " LIST"
+.RB ( up ", " down )
+The buses to act on, by the unit's own numbering: a comma-separated list of 1,
+2 and 3. All three by default.
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.BR \-h ", " \-\-help
+Print a summary of the options and exit.
+.SH EXIT STATUS
+.TP
+.B 0
+Done. For
+.BR status :
+at least one unit was found.
+.TP
+.B 1
+It could not be done; the reason is on standard error (see
+.BR DIAGNOSTICS ).
+For
+.BR status :
+no unit was found.
+.TP
+.B 2
+The command line was not understood.
+.SH ENVIRONMENT
+.TP
+.B CTRIPLE_PASSWORD
+The CAN Viewer password, when
+.B \-\-password
+is not given.
+.SH FILES
+.TP
+.I /etc/default/cantriple\-socketcan
+The bit rates
+.B ctriple up
+falls back on, and the automatic bring-up's settings; see
+.BR cantriple\-socketcan (7).
+.TP
+.I /usr/lib/udev/rules.d/70\-cantriple\-gs\-usb.rules
+Binds
+.B gs_usb
+to the unit, names its interfaces, and runs the automatic bring-up.
+.TP
+.I /dev/ttyACM*
+The Device Manager's port: readable and writable by the
+.B dialout
+group, which
+.B status
+and
+.B socketcan
+need.
+.TP
+.I /dev/bus/usb/*/*
+The unit in SocketCAN mode, which
+.B manager
+writes its request to.
+.SH DIAGNOSTICS
+.TP
+.B no CAN Triple 2.0 found
+No unit is plugged in, or none matches
+.BR \-\-unit .
+A CAN Triple (1.x) is not a CAN Triple 2.0 and cannot be an adapter.
+.TP
+.BI "is already the SocketCAN adapter" " / " "is already the Manager port"
+The unit is in the mode asked for.
+.TP
+.BI "N units ...: choose one with \-\-unit"
+More than one unit could be meant; the message lists their IDs.
+.TP
+.B this firmware has no SocketCAN mode
+The unit's firmware is older than 2.0.7. Update it with the Device Manager.
+.TP
+.B this firmware cannot keep the mode
+.B \-\-persist
+on firmware older than 2.0.10.
+.TP
+.B the unit could not keep the mode
+The unit could not write its FRAM. Nothing was changed.
+.TP
+.BR "the unit has a CAN Viewer password" ", " "wrong CAN Viewer password"
+Give the password with
+.BR \-\-password ,
+.BR CTRIPLE_PASSWORD ,
+or at the prompt (only offered on a terminal).
+.TP
+.BI "no access to " /dev/bus/usb/...
+.B manager
+cannot write the unit's USB node: run it with sudo, or install the package's
+udev rule, which gives the node to the user at the seat.
+.TP
+.B gs_usb has not taken it
+The unit became the adapter but no interfaces appeared: the udev rule is not
+installed, or another file of the same name in
+.I /etc/udev/rules.d
+masks it.
+.TP
+.B pyserial is missing
+Install
+.BR python3\-serial .
+.TP
+.IB port ": could not open port"
+Another program (the Device Manager, a terminal, a script) has the serial
+port open.
+.TP
+.B bringing an interface up needs root
+Run
+.BR up " or " down
+with sudo.
+.TP
+.BI "no bit rate for " interface
+.B up
+found no bit rate on the command line or in the configuration file.
+.TP
+.BI "ip link set " "...: error"
+.BR ip (8)
+refused; its own message follows. "Invalid argument" with a bit rate the
+unit's controller cannot make, or with a data rate and
+.B fd
+not offered by this kernel.
+.SH EXAMPLES
+What is plugged in:
+.PP
+.nf
+.RS
+$ ctriple
+4f002b: the Device Manager's port /dev/ttyACM0, firmware 2.0.10; starts as the Manager port
+.RE
+.fi
+.PP
+The adapter, every power-up, all three buses at 500 kbit/s:
+.PP
+.nf
+.RS
+$ ctriple socketcan \-\-persist
+$ sudo ctriple up \-\-bitrate 500000
+$ candump ct4f002b\-can1
+.RE
+.fi
+.PP
+CAN2 as CAN FD at 500 kbit/s and 2 Mbit/s, CAN3 only listening at 250 kbit/s:
+.PP
+.nf
+.RS
+$ sudo ctriple up \-\-bus 2 \-\-bitrate 500000 \-\-dbitrate 2000000
+$ sudo ctriple up \-\-bus 3 \-\-bitrate 250000 \-\-listen\-only
+.RE
+.fi
+.PP
+The same with
+.BR ip (8),
+and an exact sample point:
+.PP
+.nf
+.RS
+$ sudo ip link set ct4f002b\-can2 down
+$ sudo ip link set ct4f002b\-can2 type can bitrate 500000 sample\-point 0.8 \e
+      dbitrate 2000000 dsample\-point 0.75 fd on
+$ sudo ip link set ct4f002b\-can2 up
+.RE
+.fi
+.PP
+A test with nothing wired:
+.PP
+.nf
+.RS
+$ sudo ctriple up \-\-bitrate 500000 \-\-loopback
+$ candump ct4f002b\-can1 & cansend ct4f002b\-can1 123#DEADBEEF
+.RE
+.fi
+.PP
+Two units, one of them chosen:
+.PP
+.nf
+.RS
+$ ctriple socketcan \-\-unit 4f002b
+.RE
+.fi
+.PP
+Back to the Device Manager, and stay there:
+.PP
+.nf
+.RS
+$ ctriple manager \-\-persist
+.RE
+.fi
+.SH SEE ALSO
+.BR cantriple\-socketcan (7),
+.BR ip\-link (8),
+.BR candump (1),
+.BR cansend (1),
+.BR cangen (1)

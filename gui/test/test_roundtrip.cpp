@@ -10312,6 +10312,9 @@ static void testDeviceLinkReadCommands()
         CMD_READ_PROJECT,
         // The CAN Triple 2.0's usage report (phase 4), in the edit that added it.
         CMD_GET_USAGE,
+        // The CAN Triple 2.0's USB mode (firmware 2.0.10), in the edit that added
+        // the Manager's side of it.
+        CMD_GET_USB_MODE,
     };
     for (quint8 cmd : reads)
         CHECK(DeviceLink::isReadResponse(cmd));
@@ -10329,6 +10332,8 @@ static void testDeviceLinkReadCommands()
         // A Send's plan is answered with an ACK (the ask, whose reply is data,
         // is never sent by the Manager).
         CMD_STAGE_PLAN,
+        // A change of USB device is answered with an ACK, and then the port goes.
+        CMD_SET_USB_MODE,
     };
     for (quint8 cmd : nonReads)
         CHECK(!DeviceLink::isReadResponse(cmd));
@@ -10367,7 +10372,8 @@ static void testDeviceLinkReadCommands()
                        CMD_READ_ACCESS_KEYS, CMD_ACCESS_CHALLENGE,
                        CMD_READ_CONFIG_VERSION, CMD_READ_CAN_SETUP, CMD_READ_DEVICE_CHANNELS,
                        CMD_GET_DEVICE_INFO, CMD_GET_CAPACITY, CMD_GET_HARDWARE,
-                       CMD_READ_DEVICE_CHANNELS_EXT, CMD_READ_DEVICE_SETTINGS, CMD_GET_USAGE}) {
+                       CMD_READ_DEVICE_CHANNELS_EXT, CMD_READ_DEVICE_SETTINGS, CMD_GET_USAGE,
+                       CMD_GET_USB_MODE}) {
         CHECK(DeviceLink::isReadResponse(cmd));
         CHECK(!DeviceLink::echoesRequestRange(cmd));
     }

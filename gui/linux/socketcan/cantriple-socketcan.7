@@ -1,0 +1,452 @@
+'\" t
+.\" cantriple-socketcan(7)
+.TH CANTRIPLE\-SOCKETCAN 7 "October 2026" "cantriple-socketcan 1.0.0" "Miscellaneous"
+.SH NAME
+cantriple\-socketcan \- the CAN Triple 2.0 as a SocketCAN adapter: setup, settings and behaviour
+.SH DESCRIPTION
+The CAN Triple 2.0 can present itself to a PC as a gs_usb CAN adapter, the
+protocol of the Linux kernel's own
+.B gs_usb
+driver. Its three buses then become SocketCAN network interfaces with no
+driver to build or install; the unit applies the bit timing Linux computes,
+reports its bus state and errors as SocketCAN expects, timestamps every frame
+in hardware, and confirms each frame it sends only once the frame is on the
+wire. This package adds the glue: a udev rule that binds
+.B gs_usb
+to the unit and names its interfaces, an optional bring-up at set bit rates,
+and
+.BR ctriple (1).
+.SH REQUIREMENTS
+.SS The unit
+A CAN Triple 2.0. Its firmware decides what is there:
+.TP
+.B 2.0.7
+SocketCAN mode: classic CAN at any bit rate, normal, listen-only and loopback,
+frames both ways, echoes after transmission.
+.TP
+.B 2.0.8
+Hardware timestamps, bus state and error counters, bus-off reporting and
+recovery, bus-error reports, the standard's fault confinement.
+.TP
+.B 2.0.9
+CAN FD, data phase to 8 Mbit/s.
+.TP
+.B 2.0.10
+The mode kept across power-ups, the fallback to the Device Manager's port, and
+the mode's report
+.RB ( "ctriple status" ).
+.PP
+Update the unit with the Device Manager's
+.BR "Update Firmware" .
+.SS The PC
+Linux with
+.BR gs_usb ,
+udev,
+.BR ip (8)
+and Python 3 with
+.BR python3\-serial .
+.B gs_usb
+in Linux 6.2 or later uses everything the unit offers; 6.6 (a long-term
+release) or later is recommended. 5.18 to 6.1 have the three channels, CAN FD
+and hardware timestamps, but no error counters in
+.B "ip \-details"
+and no bus-error reports. Before 5.18 the driver cannot use the unit.
+.B can\-utils
+(candump, cansend, cangen, canbusload) is recommended.
+.SH QUICK START
+.nf
+.RS
+sudo apt install ./cantriple\-socketcan_1.0.0_all.deb
+ctriple socketcan
+sudo ctriple up \-\-bitrate 500000
+candump ct4f002b\-can1
+cansend ct4f002b\-can1 123#DEADBEEF
+ctriple manager
+.RE
+.fi
+.PP
+.B ctriple socketcan
+prints the unit's interface names; ct4f002b is the unit of this example.
+.SH THE TWO MODES
+A unit is the Device Manager's port or the SocketCAN adapter, never both at
+once.
+.TP
+.B The Device Manager's port
+A USB serial port (0483:5740, product "CAN Triple 2.0"), the Device Manager's
+protocol on it. The unit runs its stored configuration; every Device Manager
+function works.
+.TP
+.B The SocketCAN adapter
+One vendor-class USB interface (0483:5740, product "CAN Triple 2.0
+SocketCAN") with two bulk endpoints, which
+.B gs_usb
+takes. There is no serial port: the Device Manager cannot see the unit until
+it is the Manager's port again.
+.PP
+.B ctriple socketcan
+and
+.B ctriple manager
+switch; each switch takes the unit off the USB bus for a quarter of a second,
+and the PC then finds the other device. The unit's own configuration runs on
+through a switch, in both modes; nothing about a switch is a restart.
+.SS Kept across power-ups
+With
+.BR \-\-persist ,
+the mode is also the one the unit starts in at every power-up, kept in its
+FRAM beside (not in) its device settings, so a Device Manager that knows
+nothing of it cannot clear it. Without it, a unit always starts as the
+Manager's port. The kept mode is reported by
+.BR "ctriple status" .
+.SS FALLBACK
+An adapter needs a PC that can use one, and the Device Manager must always be
+able to reach the unit. So while the unit is the adapter, whether it started
+as one or was asked to be one, it watches each PC that enumerates it, from the
+PC's first request:
+.IP \(bu 2
+not configured within 5 seconds (as Windows leaves a device it has no driver
+for), or
+.IP \(bu 2
+configured, but not claimed by a
+.B gs_usb
+driver's first request within 60 seconds of that (a Linux PC without this
+package's rule, or with a driver bound to the ID that is not
+.BR gs_usb ;
+the 60 seconds are for a PC whose udev runs late in its boot):
+.PP
+and the unit becomes the Manager's port for that PC.
+.B ctriple status
+then says "fell back from the SocketCAN adapter". When the USB cable comes
+out, the next PC finds the adapter again.
+.PP
+The PC a mode was chosen on
+.RB ( "ctriple socketcan" " or " manager ,
+or the Device Manager's
+.BR "Online \(-> USB Mode" )
+is not watched until the cable comes out: it chose. A choice made on a unit
+that fell back replaces the fallback, so a unit told there to keep the
+Manager's port stays it when the cable comes out. Firmware before 2.0.11
+watches only a unit that started as the adapter, and a host's choice there
+ends the watch until the next power-up: a unit made the adapter on one PC and
+carried, still powered, to one that cannot use it stays the adapter until its
+power is cycled.
+.SH INTERFACES
+.SS Names
+The udev rule names a unit's interfaces
+.BI ct UNIT \-can1\fR,
+.BI \-can2
+and
+.BI \-can3
+after its CAN1, CAN2 and CAN3:
+.I UNIT
+is the last six characters of its serial number (its MCU ID) in lower case. The
+same unit has the same names on every PC and every plug-in, and two units never
+share them. The bus is also the interface's
+.I dev_port
+(0 to 2) in
+.IR /sys/class/net/ .
+Without the rule the kernel names them
+.BR can0 ,
+.BR can1 ,
+\&... in the order it finds them.
+.SS Bit timing
+The unit offers the kernel its CAN controller's ranges and applies whatever
+timing the kernel then computes, both phases, as given:
+.PP
+.TS
+l l l.
+	nominal	data
+clock	80 MHz	80 MHz
+tseg1	2 to 256	1 to 32
+tseg2	2 to 128	1 to 16
+sjw	1 to 128	1 to 16
+brp	1 to 512	1 to 32
+.TE
+.PP
+tseg1 is prop-seg plus phase-seg1 and tseg2 is phase-seg2, in time quanta; brp
+is the clock's divider to one quantum; sjw can be no more than tseg2.
+.PP
+Every
+.BR ip\-link (8)
+form of a timing works:
+.BR bitrate " and " sample\-point ,
+or
+.BR tq ", " prop\-seg ", " phase\-seg1 ", " phase\-seg2 " and " sjw ,
+and for the data phase
+.BR dbitrate " and " dsample\-point ,
+or
+.BR dtq ", " dprop\-seg ", " dphase\-seg1 ", " dphase\-seg2 " and " dsjw .
+A bit rate can only be changed while the interface is down. The unit sets its
+transmitter delay compensation itself from the data phase; Linux has no setting for it on this driver.
+.SS Modes
+.TP
+.B fd on
+ISO CAN FD (with a
+.BR dbitrate ).
+Each frame says whether it switches bit rate
+.RB ( CANFD_BRS ).
+Classic frames still work on an FD bus.
+.TP
+.B listen\-only on
+Receive only: never acknowledge, transmit or send an error frame.
+.TP
+.B loopback on
+Inside the controller: frames sent come back as received ones and the pins
+stay recessive.
+.TP
+.B berr\-reporting on
+Bus errors as error frames (see
+.BR ERRORS ).
+.PP
+Not supported, and refused when asked for:
+.BR one\-shot ,
+.BR triple\-sampling ,
+.BR fd\-non\-iso ,
+.BR presume\-ack ,
+.BR cc\-len8\-dlc .
+.B termination
+is not offered: board revision 2.00 cannot switch its 120 \(*W resistors at all
+(fit them externally), and switching them from Linux on later boards is still
+to come. Do not use
+.B restart
+or
+.BR restart\-ms :
+the unit recovers from bus-off itself, and
+.B gs_usb
+has no restart of its own (some kernels refuse it, some mishandle it).
+.SS While Linux has a bus
+A bus brought up from Linux runs Linux's bit rates and mode, in place of the
+setup in the unit's configuration. The configuration keeps running: its
+transmit messages still go out, among Linux's frames (Linux's go first), and
+its receive messages are still decoded. When the interface goes down, or the
+PC goes (the cable comes out, the PC re-enumerates the unit, or it sleeps or
+shuts down with its port still powered), or the unit becomes the Manager's
+port again, the bus returns to the
+configuration's setup at once. Nothing set from Linux is stored on the unit.
+The termination stays as the configuration sets it.
+.SS Frames
+.IP \(bu 2
+Classic and CAN FD data frames both ways, 11- and 29-bit identifiers, every
+length (0 to 8, 12, 16, 20, 24, 32, 48, 64 bytes). Remote frames can be sent;
+the unit does not deliver received remote frames.
+.IP \(bu 2
+A frame sent is confirmed to its sender (the SocketCAN echo, and what
+.B candump
+on the same interface shows as sent) only once the controller has transmitted
+it. A frame nothing acknowledges is retried by the controller until something
+does or the interface goes down; ten frames a bus can wait at once, after which
+the interface's queue stops, as with any adapter on a bus nobody acknowledges.
+.IP \(bu 2
+Frames are timestamped in hardware: see
+.BR TIMESTAMPS .
+.SH TIMESTAMPS
+The unit stamps every frame from its own 1 MHz clock (from its crystal): a
+received frame in the interrupt that takes it from the controller, a sent frame
+in the interrupt that sees it go, an error frame when it is made. The kernel
+reads the clock to tie it to its own and offers the stamps as hardware
+timestamps
+.RB ( SO_TIMESTAMPING ;
+.B "ethtool \-T"
+lists hardware transmit and receive).
+.B "candump \-H"
+shows them. Against an independent analyser on the same bus, the gaps between
+the unit's stamps of the same frames agree to about a microsecond.
+.SH ERRORS
+.SS State
+The unit's state (error-active, warning, passive, bus-off) and its error
+counters are what
+.B "ip \-details link show"
+reports, and each change is an error frame
+.RB ( "candump \-e" ):
+.BR CAN_ERR_CRTL
+with
+.B TX_WARNING / RX_WARNING / TX_PASSIVE / RX_PASSIVE / ACTIVE
+and the counters, or
+.BR CAN_ERR_BUSOFF ,
+or
+.B CAN_ERR_RESTARTED
+when a bus that was off is back.
+.B "ip \-details \-statistics"
+counts them under
+.BR error\-warn ", " error\-pass ", " bus\-off " and " re\-started .
+.SS Fault confinement
+On a bus Linux has, the unit keeps the standard's: a node nothing acknowledges
+goes error passive (transmit counter 128) and stays there, retrying, as every
+other adapter does. Bus-off is the controller's, and the unit brings the bus
+back itself a second later, which Linux sees as restarted. The error counters
+survive taking an interface down and up (the controller keeps them); a bus-off
+recovery clears them.
+.SS Bus errors
+With
+.BR "berr\-reporting on" ,
+each kind of protocol error is an error frame as the kernel's own m_can driver
+makes it
+.RB ( CAN_ERR_PROT " | " CAN_ERR_BUSERROR ,
+stuff, form, bit 0, bit 1 in data[2], CRC in data[3],
+.B CAN_ERR_ACK
+for an acknowledgement error), the latest one at most every millisecond a bus,
+with the counters.
+.SS Lost frames
+A received frame the unit cannot pass to the PC in time is dropped, never
+silently: the next frame delivered says frames were lost, which the kernel
+counts as
+.B overrun
+.RB ( "ip \-s \-s link show" )
+and reports as a
+.B CAN_ERR_CRTL_RX_OVERFLOW
+error frame. A frame sent is never dropped.
+.SH THROUGHPUT
+The unit is a full-speed USB device and the gs_usb protocol carries one frame
+per USB transfer, so the three buses and the confirmations of sent frames
+share about 13,000 to 14,000 transfers a second, whatever the bit rates. On
+the bench, at 500 kbit/s with all three buses at full load in both directions
+at once, about 3 % of received frames were dropped (and reported, see
+.BR "Lost frames" );
+below the limit every frame is carried. A bus's share of it is its frame rate,
+not its bit rate: short frames at a high bit rate reach it soonest.
+.SH CONFIGURATION
+.I /etc/default/cantriple\-socketcan
+is read by
+.B "ctriple up"
+when it is given no bit rate, and by the automatic bring-up. It is a shell
+fragment of
+.IB NAME = value
+lines:
+.TP
+.BR AUTO_UP= no | yes
+.B yes
+brings every bus that has a bit rate up by itself whenever the unit appears in
+SocketCAN mode (at a switch, a plug-in, or a power-up that starts as the
+adapter). Off by default: a bus brought up at the wrong bit rate puts error
+frames on everything connected to it.
+.TP
+.BI BITRATE= N
+Every bus's nominal bit rate, in bit/s.
+.TP
+.BI DBITRATE= N
+Every bus's CAN FD data phase bit rate; empty for classic CAN.
+.TP
+.BI CAN1_BITRATE= N "\fR, " CAN1_DBITRATE= N "\fR, " CAN2_... "\fR, " CAN3_...
+The same for one bus, in place of the two above. A bus left without a bit rate
+is left down.
+.TP
+.BI OPTIONS= words
+More
+.B "ip link set \fIinterface\fP type can"
+words for every bus, e.g.
+.B
+listen\-only on
+or
+.BR "berr\-reporting on" .
+.PP
+The file is a configuration file of the package: an upgrade keeps your edits.
+.SH UDEV RULES
+.I /usr/lib/udev/rules.d/70\-cantriple\-gs\-usb.rules
+(a file of the same name in
+.I /etc/udev/rules.d
+replaces it):
+.IP \(bu 2
+loads
+.B gs_usb
+and gives it the unit's USB ID, once, when the unit appears as the adapter
+(matching only a vendor-class interface of 0483:5740 whose manufacturer is
+"Minton Performance"; the kernel then binds every later plug-in itself);
+.IP \(bu 2
+names each interface after the unit and the bus, then runs
+.I /usr/lib/cantriple\-socketcan/ctriple\-ifup
+for it, which does nothing unless
+.BR AUTO_UP=yes ;
+.IP \(bu 2
+gives the user at the seat write access to the unit's USB node
+.RB ( uaccess ),
+for
+.BR "ctriple manager" ;
+.IP \(bu 2
+tells ModemManager to leave the Device Manager's port alone.
+.PP
+The unit shares ST's USB ID 0483:5740 with other STM32 serial ports for now,
+which is why the kernel has to be told the ID and why every match also checks
+the manufacturer. With an ID of its own, the kernel's
+.B gs_usb
+table will name the unit and only the names will be left to the rule.
+.SH THE CAN VIEWER PASSWORD
+A unit with a CAN Viewer password (set in the Device Manager) does not become
+the adapter until it is proved:
+.B ctriple
+asks for it, or takes
+.B \-\-password
+or
+.BR CTRIPLE_PASSWORD .
+The proof is a challenge and response; the password never crosses the cable.
+Going back to the Manager's port needs no password: it only ever gives the
+buses back.
+.SH OTHER SYSTEMS
+Windows and macOS have no gs_usb driver for the adapter; the fallback gives
+such a PC the Device Manager's port.
+.SH TROUBLESHOOTING
+.TP
+.B "No interfaces after ctriple socketcan"
+The rule is not installed, or a file of the same name in
+.I /etc/udev/rules.d
+masks it;
+.B "lsmod | grep gs_usb"
+and
+.B dmesg
+show whether the driver bound
+("gs_usb ...: Configuring for 3 interfaces").
+.TP
+.BR "Interfaces named can" N
+The rule did not name them: check as above.
+.TP
+.B "RTNETLINK answers: Device or resource busy"
+A bit rate cannot be changed while the interface is up: take it down first
+.RB ( "ctriple up"
+does).
+.TP
+.B "ERROR-PASSIVE, transmit counter 128, nothing received"
+Nothing on the bus acknowledges: no other node, a node at another bit rate, or
+the wiring (CAN_H, CAN_L and ground; 120 \(*W at each end of the bus).
+.TP
+.B "The unit came up as the Manager's port"
+It was not kept as the adapter, or it fell back
+.RB ( "ctriple status"
+says which): this PC did not configure it, or
+.B gs_usb
+did not claim it, in time. Unplug and plug in again once the rule is in place.
+.TP
+.B "Back to the Device Manager from Windows"
+Plug the unit in: Windows has no driver for the adapter, so within a few
+seconds the unit gives it the Manager's port (firmware 2.0.11 for a unit made
+the adapter without
+.BR \-\-persist ).
+Then in the Device Manager,
+.B "Online \(-> USB Mode"
+and the Device Manager's port, to keep it so.
+.TP
+.B "The Device Manager cannot find the unit"
+The unit is the adapter:
+.BR "ctriple manager" .
+.TP
+.B "Frames dropped under heavy load"
+See
+.BR THROUGHPUT ;
+each drop is reported as an overrun.
+.SH FILES
+.TP
+.I /usr/bin/ctriple
+The command.
+.TP
+.I /etc/default/cantriple\-socketcan
+The bit rates and the automatic bring-up.
+.TP
+.I /usr/lib/udev/rules.d/70\-cantriple\-gs\-usb.rules
+The binding, the names, the bring-up, the permissions.
+.TP
+.I /usr/lib/cantriple\-socketcan/ctriple\-ifup
+The automatic bring-up, run by udev for each interface.
+.SH SEE ALSO
+.BR ctriple (1),
+.BR ip\-link (8),
+.BR candump (1),
+.BR cansend (1),
+.BR cangen (1),
+.BR udev (7)

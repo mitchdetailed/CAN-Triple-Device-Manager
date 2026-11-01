@@ -1,0 +1,26 @@
+# cantriple-socketcan: the CAN Triple 2.0 as a SocketCAN adapter.
+#
+# Bring the unit's buses up by themselves whenever it appears in SocketCAN mode
+# (ctriple socketcan; --persist to make that every power-up). Off unless set
+# to yes: a bus brought up at the wrong bit rate puts error frames on
+# everything connected to it. Without it, bring them up with
+#   sudo ctriple up --bitrate 500000
+# which also reads the bit rates below when given none.
+AUTO_UP=no
+
+# Every bus's bit rate, in bit/s.
+BITRATE=500000
+
+# CAN FD: the data phase's bit rate. Empty for classic CAN.
+DBITRATE=
+
+# Per bus, in place of the two above: the unit's CAN1, CAN2 and CAN3.
+#CAN1_BITRATE=500000
+#CAN1_DBITRATE=2000000
+#CAN2_BITRATE=1000000
+#CAN3_BITRATE=250000
+
+# More `ip link set <if> type can` words for every bus, e.g. "listen-only on"
+# to watch a bus without ever acknowledging or transmitting on it, or
+# "berr-reporting on".
+OPTIONS=

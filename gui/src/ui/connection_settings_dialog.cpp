@@ -3,12 +3,15 @@
 #include "connection_settings_dialog.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
+#include <QElapsedTimer>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSerialPortInfo>
+#include <QThread>
 #include <QVBoxLayout>
 #include <QFormLayout>
 
@@ -25,6 +28,11 @@ const qint32 kBaudRates[] = { 7372800, 3686400, 1843200, 921600, 460800, 230400,
 
 // A port's item carries whether it is a CAN Triple 2.0 (usb_port.h).
 constexpr int kUsbUnitRole = Qt::UserRole + 1;
+// A unit that is a SocketCAN adapter now: its index in m_adapters.
+constexpr int kAdapterRole = Qt::UserRole + 2;
+// How long a unit switched back from the adapter has to show its port: it
+// leaves the bus for a quarter of a second, and the PC then sets up a port.
+constexpr int kPortBackMs = 8000;
 
 } // namespace
 
@@ -147,11 +155,32 @@ void ConnectionSettingsDialog::refreshPorts()
                 highestUsbNumber = number;
                 highestUsbIndex = idx;
             }
+        } else if (usbUnit && highestUsbIndex < 0) {
+            // Not a COM port (Linux names it ttyACMn): the first one is the unit.
+            highestUsbIndex = idx;
         }
+    }
+
+    // Units that are SocketCAN adapters now, after the ports: no port of their
+    // own, but they are CAN Triples all the same, and Connect brings one back.
+    m_adapters = usb_adapter::adapterUnits();
+    int firstAdapterIndex = -1;
+    for (int i = 0; i < m_adapters.size(); ++i) {
+        m_portCombo->addItem(tr("CAN Triple 2.0 %1 — SocketCAN adapter now (Connect switches "
+                                "it back)")
+                                 .arg(m_adapters[i].shortId().toUpper()),
+                             QString());
+        const int idx = m_portCombo->count() - 1;
+        m_portCombo->setItemData(idx, true, kUsbUnitRole);
+        m_portCombo->setItemData(idx, i, kAdapterRole);
+        if (firstAdapterIndex < 0)
+            firstAdapterIndex = idx;
     }
 
     if (preselect < 0)
         preselect = highestUsbIndex;
+    if (preselect < 0)
+        preselect = firstAdapterIndex;
     if (preselect < 0)
         preselect = highestStlinkIndex;
     if (preselect < 0)
@@ -173,6 +202,12 @@ void ConnectionSettingsDialog::onConnectClicked()
     if (m_portCombo->currentIndex() < 0) {
         QMessageBox::warning(this, tr("Connection Settings"),
                              tr("No serial port selected."));
+        return;
+    }
+
+    const QVariant adapter = m_portCombo->currentData(kAdapterRole);
+    if (adapter.isValid()) {
+        connectAdapter(m_adapters.value(adapter.toInt()));
         return;
     }
 
@@ -216,6 +251,80 @@ void ConnectionSettingsDialog::onConnectClicked()
     updateUi();
     // Opened to get a link, and there is one: done. The status bar says what
     // answered, which is where the eye goes next.
+    if (opened && m_closeOnConnect)
+        accept();
+}
+
+void ConnectionSettingsDialog::connectAdapter(const usb_adapter::AdapterUnit &unit)
+{
+    const QString title = tr("Connection Settings");
+    QMessageBox ask(QMessageBox::Question, title,
+                    tr("CAN Triple 2.0 %1 is a SocketCAN adapter now, with no port for the "
+                       "Device Manager.\n\nSwitch it back to the Device Manager's port? Its "
+                       "SocketCAN interfaces (ct%2-can1 to -can3) go away, and its buses go "
+                       "back to its own configuration.")
+                        .arg(unit.shortId().toUpper(), unit.shortId()),
+                    QMessageBox::Cancel, this);
+    QPushButton *switchBack = ask.addButton(tr("Switch Back"), QMessageBox::AcceptRole);
+    // Back to normal is what this is usually for, so it is offered ticked; a
+    // unit kept as the adapter on purpose can be left so by unticking it.
+    auto *keep = new QCheckBox(tr("And start as the Device Manager's port at every power-up"),
+                               &ask);
+    keep->setChecked(true);
+    ask.setCheckBox(keep);
+    ask.setDefaultButton(switchBack);
+    ask.exec();
+    if (ask.clickedButton() != switchBack)
+        return;
+
+    QString err;
+    if (!usb_adapter::switchToManager(unit, keep->isChecked(), &err)) {
+        QMessageBox::warning(this, title, err);
+        refreshPorts();
+        return;
+    }
+
+    // Its port, by its serial number, once the PC has set it up.
+    QString port;
+    {
+        QApplication::setOverrideCursor(Qt::BusyCursor);
+        m_statusLabel->setText(tr("Waiting for the unit's port…"));
+        m_statusLabel->repaint();
+        QElapsedTimer waited;
+        waited.start();
+        while (port.isEmpty() && waited.elapsed() < kPortBackMs) {
+            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+            QThread::msleep(100);
+            for (const QSerialPortInfo &info : QSerialPortInfo::availablePorts()) {
+                if (isCanTriple2Port(info)
+                    && info.serialNumber().compare(unit.serial, Qt::CaseInsensitive) == 0)
+                    port = info.portName();
+            }
+        }
+        QApplication::restoreOverrideCursor();
+    }
+    refreshPorts();
+    if (port.isEmpty()) {
+        updateUi();
+        QMessageBox::warning(this, title,
+                             tr("The unit took the request, but its port has not appeared "
+                                "yet. Press Refresh in a moment."));
+        return;
+    }
+    const int idx = m_portCombo->findData(port);
+    if (idx >= 0)
+        m_portCombo->setCurrentIndex(idx);
+    // A port just set up can refuse an open for a moment (udev is still
+    // giving it its permissions): a few tries.
+    bool opened = false;
+    for (int attempt = 0; attempt < 10 && !opened; ++attempt) {
+        if (attempt > 0)
+            QThread::msleep(200);
+        opened = m_link->open(port, kBaudRates[0], &err);
+    }
+    if (!opened)
+        QMessageBox::warning(this, title, tr("Failed to open %1:\n%2").arg(port, err));
+    updateUi();
     if (opened && m_closeOnConnect)
         accept();
 }

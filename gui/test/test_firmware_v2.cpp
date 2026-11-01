@@ -81,6 +81,12 @@ extern const unsigned v2_settings_format;
 extern const unsigned v2_led_brightness_range[2];
 extern const unsigned v2_settings_size;
 extern const unsigned v2_settings_offsets[3];
+extern const unsigned v2_usb_mode_cmds[2];
+extern const unsigned v2_usb_modes[2];
+extern const unsigned v2_usb_mode_fell_back;
+extern const unsigned v2_usb_req[2];
+extern const unsigned v2_usb_mode_size;
+extern const unsigned v2_usb_mode_offsets[3];
 extern const unsigned v2_crc8_features;
 extern const unsigned v2_crc8_whole_id;
 extern const unsigned v2_crc8_data_runs;
@@ -539,6 +545,23 @@ void testDeviceSettings()
               && unsigned(offsetof(ct::DeviceSettings, led_brightness)) == v2_settings_offsets[1]
               && unsigned(offsetof(ct::DeviceSettings, reserved)) == v2_settings_offsets[2],
           "DeviceSettings, field by field");
+}
+
+void testUsbMode()
+{
+    std::printf("which USB device the unit is: commands, modes, flag, request, state\n");
+    CHECK(ct::CMD_SET_USB_MODE == v2_usb_mode_cmds[0] && ct::CMD_GET_USB_MODE == v2_usb_mode_cmds[1],
+          "CMD_SET_USB_MODE / CMD_GET_USB_MODE");
+    CHECK(ct::USB_MODE_MANAGER == v2_usb_modes[0] && ct::USB_MODE_GS_USB == v2_usb_modes[1],
+          "USB_MODE_MANAGER / USB_MODE_GS_USB");
+    CHECK(ct::USB_MODE_FELL_BACK == v2_usb_mode_fell_back, "USB_MODE_FELL_BACK");
+    CHECK(ct::CT_USB_REQ_SET_MODE == v2_usb_req[0] && ct::CT_USB_REQ_STORE == v2_usb_req[1],
+          "the vendor request back and its keep bit");
+    CHECK(unsigned(sizeof(ct::UsbModeState)) == v2_usb_mode_size
+              && unsigned(offsetof(ct::UsbModeState, current)) == v2_usb_mode_offsets[0]
+              && unsigned(offsetof(ct::UsbModeState, stored)) == v2_usb_mode_offsets[1]
+              && unsigned(offsetof(ct::UsbModeState, flags)) == v2_usb_mode_offsets[2],
+          "UsbModeState, field by field");
 }
 
 void testLabelStore()
@@ -1022,6 +1045,7 @@ int main(int argc, char **argv)
     testCanFeatures();
     testLabelStore();
     testDeviceSettings();
+    testUsbMode();
     testStoredProject();
     testBuildFlags();
     testPlanMirror();

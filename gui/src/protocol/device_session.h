@@ -311,6 +311,32 @@ bool readDeviceSettings(DeviceLink *link, DeviceSettingsState *out, QString *err
 bool writeDeviceSettings(DeviceLink *link, const DeviceSettings &settings, bool store,
                          QString *error, quint8 *errCode = nullptr);
 
+// Which USB device a CAN Triple 2.0 is and starts as (CMD_GET_USB_MODE,
+// firmware 2.0.10). `supported` is false on firmware that cannot say, every
+// CAN Triple 1.x among it, and the read still succeeds.
+struct UsbModeInfo {
+    bool supported = false;
+    quint8 current = USB_MODE_MANAGER;
+    quint8 stored = USB_MODE_MANAGER;
+    // Set to start as the SocketCAN adapter, or asked to be one, but no
+    // program on this PC used the adapter, so it gave this PC the Manager's
+    // port; it is the adapter again for the next PC, once the cable comes out.
+    bool fellBack = false;
+    bool startsAsAdapter() const { return supported && stored == USB_MODE_GS_USB; }
+};
+// Exactly sizeof(UsbModeState), with modes this build knows.
+bool parseUsbMode(const QByteArray &payload, UsbModeInfo *out);
+bool readUsbMode(DeviceLink *link, UsbModeInfo *out, QString *error);
+// Become `mode` (USB_MODE_*) and, with `store`, keep it as the start mode.
+// Becoming the adapter ends this link a moment after the ACK; the Manager's
+// port with `store` only changes the start mode. False with *error on a
+// refusal, and *errCode, when given, says which: ERR_LOCKED wants the CAN
+// Viewer password, ERR_FLASH_WRITE could not keep it (nothing changed),
+// ERR_OUT_OF_BOUNDS cannot keep it at all (firmware before 2.0.10),
+// ERR_INVALID_CMD has no SocketCAN mode (before 2.0.7).
+bool setUsbMode(DeviceLink *link, quint8 mode, bool store, QString *error,
+                quint8 *errCode = nullptr);
+
 // There is deliberately no writeDeviceInfo(). OTP has no erase: a double-word
 // spent is spent for the life of the part, so a wire command able to write one
 // would be a way to destroy a field permanently by accident — over a serial

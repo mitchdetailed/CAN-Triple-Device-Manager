@@ -432,6 +432,30 @@ constexpr uint8_t USAGE_REFS_OVERFLOW    = 0x01; // the references did not fit: 
 constexpr uint8_t USAGE_SEND_OPEN        = 0x02; // a Send is in progress, with a plan of its own
 constexpr uint8_t USAGE_NAMES_KEPT       = 0x04; // the unit keeps names
 
+// Which USB device a CAN Triple 2.0 is (its protocol.h, "Which USB device the
+// unit is"): the Manager's serial port, or a gs_usb CAN adapter that Linux's
+// own gs_usb driver makes three SocketCAN interfaces of, with no serial port at
+// all. SET (firmware 2.0.7): u8 mode, u8 store -> ACK, then the unit
+// re-enumerates as that device a moment later and this link ends with the
+// port; store 1 (2.0.10) also keeps it as the device every start begins in,
+// and the Manager's port with store 1 from the Manager's port changes only
+// that. ERR_LOCKED: the adapter is behind the CAN Viewer password (the
+// Manager's port was too before 2.0.11); ERR_FLASH_WRITE: it could not be kept
+// and nothing changed; ERR_OUT_OF_BOUNDS: store 1 on firmware that cannot
+// keep it. GET (2.0.10, empty) -> UsbModeState, ungated. In adapter mode the
+// way back is not this protocol but a USB vendor request to the device
+// (usb_adapter.h). The CAN Triple 1.x answers either command ERR_INVALID_CMD.
+constexpr uint8_t CMD_SET_USB_MODE       = 0x63;
+constexpr uint8_t CMD_GET_USB_MODE       = 0x64;
+constexpr uint8_t USB_MODE_MANAGER       = 0;
+constexpr uint8_t USB_MODE_GS_USB        = 1;
+constexpr uint8_t USB_MODE_FELL_BACK     = 0x01; // UsbModeState.flags: no PC here used the adapter
+// The vendor request back to the Manager's port: bmRequestType 0x40 (OUT,
+// vendor, device), bRequest CT_USB_REQ_SET_MODE, wValue the mode, wIndex
+// CT_USB_REQ_STORE to keep it as the start mode too, no data. Unguarded.
+constexpr uint8_t CT_USB_REQ_SET_MODE    = 0x63;
+constexpr uint16_t CT_USB_REQ_STORE      = 0x0001;
+
 #pragma pack(push, 1)
 struct DeviceSettings {
     uint8_t format;         // DEVICE_SETTINGS_FORMAT
@@ -440,6 +464,15 @@ struct DeviceSettings {
 };
 #pragma pack(pop)
 static_assert(sizeof(DeviceSettings) == 8, "DeviceSettings is 8 bytes on the wire");
+
+#pragma pack(push, 1)
+struct UsbModeState {
+    uint8_t current; // USB_MODE_*: the device the unit is now
+    uint8_t stored;  // USB_MODE_*: the one every start begins in
+    uint8_t flags;   // USB_MODE_FELL_BACK
+};
+#pragma pack(pop)
+static_assert(sizeof(UsbModeState) == 3, "UsbModeState is 3 bytes on the wire");
 
 // Device scripts. The bytecode rides in the configuration as an ordinary table
 // of 64-byte chunks, so WRITE/READ_SCRIPT are plain range commands and Send,

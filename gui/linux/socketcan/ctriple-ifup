@@ -1,0 +1,38 @@
+#!/bin/sh
+# cantriple-socketcan: bring a CAN Triple's interface up as it appears, when
+# /etc/default/cantriple-socketcan asks for it (AUTO_UP=yes). Run by udev
+# (70-cantriple-gs-usb.rules) once the interface has its name:
+#
+#   ctriple-ifup <interface>
+#
+# The bus is the interface's dev_port + 1 (the unit's CAN1..CAN3); its bit
+# rates are CANn_BITRATE / CANn_DBITRATE if set, else BITRATE / DBITRATE. A
+# bus with no bit rate is left down.
+set -u
+IF=${1:?interface}
+CONF=/etc/default/cantriple-socketcan
+AUTO_UP=no
+BITRATE=
+DBITRATE=
+OPTIONS=
+CAN1_BITRATE= CAN1_DBITRATE= CAN2_BITRATE= CAN2_DBITRATE= CAN3_BITRATE= CAN3_DBITRATE=
+[ -r "$CONF" ] && . "$CONF"
+[ "$AUTO_UP" = yes ] || exit 0
+
+port=$(cat "/sys/class/net/$IF/dev_port" 2>/dev/null) || exit 0
+case "$port" in
+0) rate=${CAN1_BITRATE:-$BITRATE} drate=${CAN1_DBITRATE:-$DBITRATE} ;;
+1) rate=${CAN2_BITRATE:-$BITRATE} drate=${CAN2_DBITRATE:-$DBITRATE} ;;
+2) rate=${CAN3_BITRATE:-$BITRATE} drate=${CAN3_DBITRATE:-$DBITRATE} ;;
+*) exit 0 ;;
+esac
+[ -n "$rate" ] || exit 0
+
+if [ -n "$drate" ]; then
+    # shellcheck disable=SC2086 # OPTIONS is a list of ip-link words
+    ip link set "$IF" type can bitrate "$rate" dbitrate "$drate" fd on $OPTIONS || exit 1
+else
+    # shellcheck disable=SC2086
+    ip link set "$IF" type can bitrate "$rate" $OPTIONS || exit 1
+fi
+ip link set "$IF" up

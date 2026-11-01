@@ -1,0 +1,23 @@
+Package: cantriple-socketcan
+Version: @VERSION@
+Architecture: all
+Maintainer: Minton Performance <mitchminton@gmail.com>
+Installed-Size: @SIZE@
+Depends: python3, python3-serial, iproute2, udev
+Recommends: can-utils
+Section: net
+Priority: optional
+Homepage: https://github.com/mitchdetailed/CAN-Triple-Device-Manager
+Description: CAN Triple 2.0 as a SocketCAN adapter
+ The CAN Triple 2.0 can present itself to a PC as a gs_usb CAN adapter, the
+ protocol of the Linux kernel's own gs_usb driver, so its three buses become
+ SocketCAN interfaces with no driver to build: candump, cansend, python-can,
+ SavvyCAN and every other SocketCAN program use them as they are.
+ .
+ This package binds gs_usb to the unit, names the interfaces after it and the
+ bus (ct<unit>-can1 to -can3), optionally brings them up at set bit rates,
+ and provides ctriple, which switches the unit between SocketCAN mode and the
+ Device Manager's serial port, keeps the mode across power-ups, and brings the
+ interfaces up and down.
+ .
+ Needs CAN Triple 2.0 firmware 2.0.7 or later (2.0.10 to keep the mode).

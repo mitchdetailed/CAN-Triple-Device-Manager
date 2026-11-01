@@ -916,6 +916,66 @@ bool writeDeviceSettings(DeviceLink *link, const DeviceSettings &settings, bool 
     return ok;
 }
 
+bool parseUsbMode(const QByteArray &payload, UsbModeInfo *out)
+{
+    if (payload.size() != int(sizeof(UsbModeState)))
+        return false;
+    UsbModeState s{};
+    std::memcpy(&s, payload.constData(), sizeof(s));
+    const auto known = [](quint8 mode) {
+        return mode == USB_MODE_MANAGER || mode == USB_MODE_GS_USB;
+    };
+    if (!known(s.current) || !known(s.stored))
+        return false;
+    out->current = s.current;
+    out->stored = s.stored;
+    out->fellBack = (s.flags & USB_MODE_FELL_BACK) != 0;
+    return true;
+}
+
+bool readUsbMode(DeviceLink *link, UsbModeInfo *out, QString *error)
+{
+    if (!link || !out)
+        return false;
+    *out = UsbModeInfo{};
+    QByteArray resp;
+    quint8 code = 0;
+    if (!link->requestSync(CMD_GET_USB_MODE, QByteArray(), &resp, error,
+                           DeviceLink::kDefaultTimeoutMs, DeviceLink::kDefaultRetries, &code)) {
+        if (unsupported(code)) {
+            if (error)
+                error->clear();
+            return true; // no USB mode to report: not an error
+        }
+        return false;
+    }
+    if (!parseUsbMode(resp, out)) {
+        if (error)
+            *error = QStringLiteral("The unit's USB mode is in a form this Device Manager "
+                                    "does not read. A newer Device Manager is needed.");
+        return false;
+    }
+    out->supported = true;
+    return true;
+}
+
+bool setUsbMode(DeviceLink *link, quint8 mode, bool store, QString *error, quint8 *errCode)
+{
+    if (!link)
+        return false;
+    QByteArray payload;
+    payload.append(char(mode));
+    payload.append(char(store ? 1 : 0));
+    quint8 code = 0;
+    // One try: the unit leaves the bus a moment after it ACKs a change of
+    // device, so a retry after a lost ACK would land on a port that is going.
+    const bool ok = link->requestSync(CMD_SET_USB_MODE, payload, nullptr, error,
+                                      DeviceLink::kDefaultTimeoutMs, 1, &code);
+    if (errCode)
+        *errCode = ok ? quint8(ERR_OK) : code;
+    return ok;
+}
+
 bool writeBinding(DeviceLink *link, const QByteArray &uid, QString *error)
 {
     if (!link)

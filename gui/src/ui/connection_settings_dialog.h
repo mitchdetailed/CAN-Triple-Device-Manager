@@ -4,8 +4,10 @@
 #pragma once
 
 #include <QDialog>
+#include <QList>
 
 #include "../protocol/device_link.h"
+#include "../protocol/usb_adapter.h"
 
 class QComboBox;
 class QLabel;
@@ -27,6 +29,11 @@ public:
 private:
     void refreshPorts();
     void onConnectClicked();
+    // A CAN Triple 2.0 that is a SocketCAN adapter now has no port: listed all
+    // the same (Linux), and Connect on it switches it back and opens the port
+    // it comes back with.
+    void connectAdapter(const usb_adapter::AdapterUnit &unit);
+    QList<usb_adapter::AdapterUnit> m_adapters;
     bool m_closeOnConnect = false;
     void onTestClicked();
     void updateUi();

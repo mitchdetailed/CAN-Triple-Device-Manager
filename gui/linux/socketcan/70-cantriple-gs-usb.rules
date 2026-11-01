@@ -1,0 +1,51 @@
+# CAN Triple 2.0 in SocketCAN mode (cantriple-socketcan): Linux's own gs_usb
+# driver takes the unit's vendor interface, and its three buses appear as
+# SocketCAN interfaces named after the unit and the bus. No driver of ours:
+# this tells gs_usb the unit's USB ID, names what it makes, and, if
+# /etc/default/cantriple-socketcan says so, brings it up.
+#
+# The ID is ST's shared 0483:5740 for now, the same as the Device Manager's
+# serial port, so every match is narrowed to the unit's manufacturer string,
+# and the binding to a vendor-class interface (class ff), which the serial port
+# does not have.
+#
+# Numbered under 80 so the names are set before systemd's net naming looks.
+
+# Ask gs_usb to take vendor-class interfaces of 0483:5740, once: the kernel
+# keeps every ID written there, duplicates too, and probes the unit as soon as
+# it has it. Once it does, it binds every later plug-in itself.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", \
+  ATTR{bInterfaceClass}=="ff", \
+  ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", ATTRS{manufacturer}=="Minton Performance", \
+  RUN+="/bin/sh -c '/sbin/modprobe gs_usb; grep -qi \"^0483 5740\" /sys/bus/usb/drivers/gs_usb/new_id || echo 0483 5740 ff > /sys/bus/usb/drivers/gs_usb/new_id'"
+
+# The interfaces: ct<the last six of the unit's serial number, its MCU ID>-can1
+# to -can3, the unit's own CAN1 to CAN3 (gs_usb's dev_port 0 to 2). The same
+# unit gets the same names on every PC and every plug-in, and two units never
+# share them: ct4f002b-can1, ct4f002b-can2, ct4f002b-can3. Then the optional
+# bring-up (/usr/lib/cantriple-socketcan/ctriple-ifup), which does nothing
+# unless AUTO_UP=yes in /etc/default/cantriple-socketcan.
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="can*", \
+  ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", ATTRS{manufacturer}=="Minton Performance", \
+  ATTR{dev_port}=="0", PROGRAM="/bin/sh -c 'echo %s{serial} | tail -c 7 | tr A-F a-f'", \
+  NAME="ct%c-can1", RUN+="/usr/lib/cantriple-socketcan/ctriple-ifup $name"
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="can*", \
+  ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", ATTRS{manufacturer}=="Minton Performance", \
+  ATTR{dev_port}=="1", PROGRAM="/bin/sh -c 'echo %s{serial} | tail -c 7 | tr A-F a-f'", \
+  NAME="ct%c-can2", RUN+="/usr/lib/cantriple-socketcan/ctriple-ifup $name"
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="can*", \
+  ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", ATTRS{manufacturer}=="Minton Performance", \
+  ATTR{dev_port}=="2", PROGRAM="/bin/sh -c 'echo %s{serial} | tail -c 7 | tr A-F a-f'", \
+  NAME="ct%c-can3", RUN+="/usr/lib/cantriple-socketcan/ctriple-ifup $name"
+
+# The vendor request that turns the unit back into the Manager's port
+# (ctriple manager) goes through usbfs: let the person at the seat send it.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", \
+  ATTR{idVendor}=="0483", ATTR{idProduct}=="5740", ATTR{manufacturer}=="Minton Performance", \
+  TAG+="uaccess"
+
+# The Manager's serial port is not a modem: ModemManager would otherwise probe
+# it with AT commands whenever it appears, in the middle of the Device
+# Manager's or ctriple's first exchange.
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", \
+  ATTRS{manufacturer}=="Minton Performance", ENV{ID_MM_DEVICE_IGNORE}="1"

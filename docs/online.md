@@ -21,6 +21,7 @@ running its configuration; the live windows simply stop updating.</td></tr>
 <tr><td>Device Status…</td><td></td><td>Uptime, bus counters, which board it is, identity, passwords and fleet information.</td></tr>
 <tr><td>Get Device Info…</td><td></td><td>The manufacturing record burned into the unit at build: maker, product, hardware version, serial and date, plus the chip's MCU ID.</td></tr>
 <tr><td>LED Brightness…</td><td></td><td>A CAN Triple 2.0's LED brightness, 5 % to 100 % of standard, kept by the unit — see <a href="#brightness">LED Brightness…</a>.</td></tr>
+<tr><td>USB Mode…</td><td></td><td>Whether a CAN Triple 2.0 is the Device Manager's port or a SocketCAN adapter for Linux, now and at power-up; the way back from the adapter — see <a href="#usb-mode">USB Mode…</a>.</td></tr>
 <tr><td>Set Access Passwords…</td><td></td><td>Device-held function passwords — see <a href="licensing.md">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 <tr><td>Firmware License Manager…</td><td></td><td>Writes the unit's licence: manufacturer, model, version, Firmware Key and FW Updater Password — see <a href="licensing.md">Firmware Licensing &amp; Access Keys</a>.</td></tr>
 </table>
@@ -151,6 +152,23 @@ Sets how bright a [CAN Triple 2.0](can-triple-2.md)'s lights are, from **100 %**
 - Changing it needs the unit's **Send a Configuration** password, when one is set; the window asks for it first.
 - A CAN Triple has no brightness setting, and the command says so.
 - While the unit installs a firmware update, its bootloader shows the update's colours at the standard brightness.
+
+<a id="usb-mode"></a>
+
+## USB Mode…
+
+A [CAN Triple 2.0](can-triple-2.md) is one of two USB devices at a time: the **Device Manager's port**, the serial port everything in this application uses, or a **SocketCAN adapter**, which Linux's own `gs_usb` driver makes three CAN network interfaces of, one for each bus (the `cantriple-socketcan` package for Linux sets that up). As the adapter the unit has no serial port, so the Device Manager cannot reach it until it is the Device Manager's port again.
+
+The window says which the unit is and which it starts as at power-up, and offers three choices:
+- **The Device Manager's port, now and at every power-up** — the normal mode, and the way back for a unit that was set to start as the adapter. The unit stays connected.
+- **A SocketCAN adapter until it restarts**, then the Device Manager's port again.
+- **A SocketCAN adapter, now and at every power-up.**
+
+Choosing the adapter ends the connection at once: the unit leaves the USB bus for a moment and comes back as the adapter. It asks for the unit's **CAN Viewer** password first, when one is set, since the adapter reads and writes the buses as the CAN Viewer does. Going back to the Device Manager's port never needs a password. While the unit is the adapter, its own configuration keeps running.
+
+**Getting back from the adapter.** A PC that cannot use the adapter (Windows, or Linux without the package) gets the Device Manager's port by itself: plug the unit in and, within a few seconds on Windows or a minute on Linux, its port appears and Connect finds it. The status bar then says **fell back from SocketCAN**; choose the Device Manager's port here to keep it so, or the unit is the adapter again for the next computer once the cable comes out. A unit made the adapter until it restarts does the same from firmware 2.0.11, on every computer but the one that chose it. On Linux, **Online → Connect** also lists a unit that is the adapter now, as **CAN Triple 2.0 *ID* — SocketCAN adapter now**, and connecting to it switches it back (Linux's `ctriple manager` does the same).
+
+The status bar also notes a unit that **starts as SocketCAN**, so it does not surprise anyone at its next power-up. The mode is the unit's own setting, kept beside its configuration: a Send leaves it alone, and a Get does not read it. It needs CAN Triple 2.0 firmware 2.0.10 or later.
 
 ## After a firmware update
 

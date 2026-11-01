@@ -11,6 +11,8 @@ The CAN Triple 2.0 is its own USB device: connect its USB port straight to the c
 
 The CAN Triple 2.0's USB port is isolated from the rest of the unit, so a laptop on the bench and the vehicle's ground never meet through it.
 
+It can also be a **SocketCAN adapter** for Linux instead of the Device Manager's port, and then has no COM port: see [USB Mode…](online.md#usb-mode) for setting that, and for the way back.
+
 ## Restarts
 
 Because the unit is the USB device, its COM port disappears whenever it restarts and comes back when it is running again, usually within a second. After a restart this program asked for, it waits for the port and connects again by itself:

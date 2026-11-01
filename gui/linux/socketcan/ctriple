@@ -1,0 +1,504 @@
+#!/usr/bin/python3
+"""ctriple: the CAN Triple 2.0 on Linux, as a SocketCAN adapter.
+
+The unit is one of two USB devices at a time: the Device Manager's serial port,
+or a gs_usb CAN adapter that Linux's own gs_usb driver turns into three
+SocketCAN interfaces, one per bus (named ct<unit>-can1..3 by the package's
+udev rule). This switches between them, says which each unit is, and brings
+the interfaces up.
+
+  ctriple [status]                     every unit, in either mode
+  ctriple socketcan [--persist]        become the SocketCAN adapter
+  ctriple manager [--persist]          become the Device Manager's port again
+  sudo ctriple up [--bitrate N] [--dbitrate N] [--listen-only] [--loopback]
+                  [--berr-reporting] [--bus 1,2,3]
+  sudo ctriple down [--bus 1,2,3]
+
+  --unit ID        which unit, when more than one is plugged in: the end of its
+                   serial number (MCU ID), e.g. 4f002b
+  --persist        keep the mode as the one the unit starts in at every power-up
+  --password       prove the unit's CAN Viewer password (asked for if needed;
+                   or set CTRIPLE_PASSWORD)
+
+SocketCAN mode needs CAN Triple 2.0 firmware 2.0.7 or later; --persist needs
+2.0.10. Without --bitrate, up takes the bit rates from
+/etc/default/cantriple-socketcan.
+"""
+import argparse
+import errno
+import fcntl
+import getpass
+import glob
+import hashlib
+import hmac
+import os
+import struct
+import subprocess
+import sys
+import time
+
+VERSION = "1.0.0"
+VID, PID = 0x0483, 0x5740
+MANUFACTURER = "Minton Performance"
+CONFIG = "/etc/default/cantriple-socketcan"
+
+# The Device Manager's protocol (gui/src/protocol/wire_structs.h).
+START_MARKER = 0x55
+CMD_GET_STATUS = 0x01
+CMD_ACCESS_CHALLENGE = 0x2D
+CMD_ACCESS_RESPONSE = 0x2E
+CMD_GET_HARDWARE = 0x54
+CMD_SET_USB_MODE = 0x63
+CMD_GET_USB_MODE = 0x64
+CMD_ACK, CMD_NACK = 0x80, 0x81
+STREAMS = (0x82, 0x83, 0x90)
+ERR_INVALID_CMD, ERR_OUT_OF_BOUNDS, ERR_FLASH_WRITE, ERR_LOCKED = 0x01, 0x04, 0x05, 0x07
+ACCESS_FN_CAN_VIEWER = 3
+USB_MODE_MANAGER, USB_MODE_GS_USB = 0, 1
+USB_MODE_FELL_BACK = 0x01
+
+# The vendor request back to the Manager's port (gs_usb mode has no serial port).
+CT_USB_REQ_SET_MODE = 0x63
+CT_USB_REQ_STORE = 0x0001
+
+# The CAN Viewer password's key: PBKDF2 over the application's fixed salt
+# (gui/src/model/access_keys.cpp), folded to four bytes.
+ACCESS_KEY_SALT = bytes([0x9d, 0x4c, 0x1f, 0xa7, 0x63, 0x0e, 0xb8, 0x52,
+                         0x27, 0xd1, 0x6a, 0xf4, 0x08, 0x9b, 0x3e, 0xc5])
+ACCESS_KEY_ITERATIONS = 210000
+
+# linux/usbdevice_fs.h: struct usbdevfs_ctrltransfer, and _IOWR('U', 0, it).
+CTRL_FMT = "@BBHHHIP"
+USBDEVFS_CONTROL = (3 << 30) | (struct.calcsize(CTRL_FMT) << 16) | (ord("U") << 8) | 0
+
+
+class Failure(Exception):
+    pass
+
+
+# ---- The serial link ------------------------------------------------------
+
+def crc16(data):
+    """CRC16-CCITT-FALSE, as the firmware's compute_crc16."""
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def cobs_encode(src):
+    out = bytearray([0])
+    code_at, code = 0, 1
+    for b in src:
+        if b == 0:
+            out[code_at] = code
+            code_at, code = len(out), 1
+            out.append(0)
+        else:
+            out.append(b)
+            code += 1
+            if code == 0xFF:
+                out[code_at] = code
+                code_at, code = len(out), 1
+                out.append(0)
+    out[code_at] = code
+    return bytes(out)
+
+
+def cobs_decode(src):
+    out, i = bytearray(), 0
+    while i < len(src):
+        code = src[i]
+        if code == 0 or (i + code > len(src) and code != 1):
+            return None
+        i += 1
+        for _ in range(1, code):
+            out.append(src[i])
+            i += 1
+        if code != 0xFF and i != len(src):
+            out.append(0)
+    return bytes(out)
+
+
+class Link:
+    """One packet out, the answer back: [0x55][cmd][len LE][payload][crc BE], COBS-framed."""
+
+    def __init__(self, port):
+        try:
+            import serial  # python3-serial
+        except ImportError:
+            raise Failure("pyserial is missing: sudo apt install python3-serial")
+        try:
+            self.ser = serial.Serial(port, 115200, timeout=0.02)
+        except serial.SerialException as e:
+            raise Failure(f"{port}: {e}")
+        self.buf = bytearray()
+        self.ser.reset_input_buffer()
+
+    def close(self):
+        self.ser.close()
+
+    def _packets(self):
+        self.buf += self.ser.read(4096)
+        while 0 in self.buf:
+            i = self.buf.index(0)
+            chunk, self.buf = bytes(self.buf[:i]), self.buf[i + 1:]
+            raw = cobs_decode(chunk) if chunk else None
+            if (not raw or len(raw) < 6 or raw[0] != START_MARKER
+                    or crc16(raw[:-2]) != struct.unpack(">H", raw[-2:])[0]
+                    or struct.unpack_from("<H", raw, 2)[0] + 6 != len(raw)):
+                continue
+            yield raw[1], raw[4:-2]
+
+    def transact(self, cmd, payload=b"", timeout=1.5):
+        """(kind, data): ('ack', b''), ('nack', code) or ('data', payload)."""
+        raw = bytes([START_MARKER, cmd]) + struct.pack("<H", len(payload)) + payload
+        self.ser.write(b"\0" + cobs_encode(raw + struct.pack(">H", crc16(raw))) + b"\0")
+        end = time.time() + timeout
+        while time.time() < end:
+            for rcmd, data in self._packets():
+                if rcmd in STREAMS:
+                    continue
+                if rcmd == CMD_ACK:
+                    return "ack", b""
+                if rcmd == CMD_NACK:
+                    return "nack", data[0] if data else 0
+                if rcmd == cmd:
+                    return "data", data
+        return "timeout", None
+
+    def prove_viewer(self, password):
+        """The CAN Viewer password, by challenge and response. True if accepted."""
+        key = int.from_bytes(hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                                 ACCESS_KEY_SALT, ACCESS_KEY_ITERATIONS, 4), "big")
+        key_bytes = (key or 1).to_bytes(4, "big")
+        # Twice: a late challenge reply can leave a stale nonce in hand, which
+        # fails a correct password once (device_session.cpp, proveAccess).
+        for _ in range(2):
+            kind, nonce = self.transact(CMD_ACCESS_CHALLENGE)
+            if kind != "data" or len(nonce) != 16:
+                raise Failure("the unit gave no challenge for the password")
+            answer = hmac.new(key_bytes, nonce, hashlib.sha256).digest()
+            kind, code = self.transact(CMD_ACCESS_RESPONSE, bytes([ACCESS_FN_CAN_VIEWER]) + answer)
+            if kind == "ack":
+                return True
+            if kind != "nack" or code != ERR_LOCKED:
+                raise Failure("the unit did not answer the password")
+        return False
+
+
+# ---- Finding units ----------------------------------------------------------
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+class Unit:
+    def __init__(self, serial, mode, sysdev, port=None):
+        self.serial, self.mode, self.sysdev, self.port = serial, mode, sysdev, port
+
+    @property
+    def short(self):
+        return self.serial[-6:].lower()
+
+    @property
+    def usb_node(self):
+        return "/dev/bus/usb/%03d/%03d" % (int(_read(self.sysdev + "/busnum")),
+                                           int(_read(self.sysdev + "/devnum")))
+
+    def interfaces(self):
+        """(bus 1..3, interface name) of a unit in SocketCAN mode, by bus."""
+        found = []
+        real = os.path.realpath(self.sysdev)
+        for net in glob.glob("/sys/class/net/*"):
+            dev = os.path.realpath(net + "/device")
+            if os.path.dirname(dev) == real and _read(net + "/type") == "280":  # ARPHRD_CAN
+                found.append((int(_read(net + "/dev_port") or 0) + 1, os.path.basename(net)))
+        return sorted(found)
+
+
+def units():
+    found = []
+    for dev in sorted(glob.glob("/sys/bus/usb/devices/*")):
+        if (_read(dev + "/idVendor") != "%04x" % VID or _read(dev + "/idProduct") != "%04x" % PID
+                or _read(dev + "/manufacturer") != MANUFACTURER):
+            continue
+        serial = _read(dev + "/serial")
+        classes = [_read(i + "/bInterfaceClass") for i in glob.glob(dev + "/*:*")]
+        if "ff" in classes:
+            found.append(Unit(serial, USB_MODE_GS_USB, dev))
+            continue
+        ttys = glob.glob(dev + "/*:1.0/tty/tty*")
+        port = "/dev/" + os.path.basename(ttys[0]) if ttys else None
+        found.append(Unit(serial, USB_MODE_MANAGER, dev, port))
+    return found
+
+
+def pick(args, mode=None):
+    all_units = units()
+    if args.unit:
+        all_units = [u for u in all_units if u.serial.lower().endswith(args.unit.lower())]
+    if mode is not None:
+        all_units = [u for u in all_units if u.mode == mode]
+    return all_units
+
+
+def one(args, mode, what):
+    found = pick(args, mode)
+    if not found:
+        others = pick(args)
+        if others:
+            raise Failure(f"{others[0].short} is already {'the SocketCAN adapter' if others[0].mode else 'the Manager port'}")
+        raise Failure("no CAN Triple 2.0 found" + (f" matching {args.unit}" if args.unit else ""))
+    if len(found) > 1:
+        raise Failure(f"{len(found)} units {what}: choose one with --unit "
+                      + ", ".join(u.short for u in found))
+    return found[0]
+
+
+# ---- Commands ---------------------------------------------------------------
+
+def manager_state(unit):
+    """(firmware version text, UsbModeState or None) of a unit on its serial port."""
+    if unit.port is None:
+        return "?", None
+    link = Link(unit.port)
+    try:
+        kind, hw = link.transact(CMD_GET_HARDWARE)
+        version = "%d.%d.%d" % struct.unpack_from("<HHH", hw, 28) if kind == "data" and len(hw) >= 34 else "?"
+        kind, mode = link.transact(CMD_GET_USB_MODE)
+        return version, (tuple(mode[:3]) if kind == "data" and len(mode) >= 3 else None)
+    finally:
+        link.close()
+
+
+def cmd_status(args):
+    found = pick(args)
+    if not found:
+        print("no CAN Triple 2.0 found")
+        return 1
+    for u in found:
+        if u.mode == USB_MODE_GS_USB:
+            names = u.interfaces()
+            if names:
+                # Up as ip link set it (IFF_UP), not operstate, which lags the
+                # carrier for a moment after every bring-up.
+                def updown(name):
+                    flags = int(_read(f"/sys/class/net/{name}/flags") or "0", 16)
+                    return "up" if flags & 0x1 else "down"
+                line = ", ".join(f"CAN{bus} {name} ({updown(name)})" for bus, name in names)
+            else:
+                line = "no interfaces: gs_usb has not taken it (is the udev rule installed?)"
+            print(f"{u.short}: the SocketCAN adapter; {line}")
+            continue
+        try:
+            version, state = manager_state(u)
+        except Failure as e:  # pyserial missing, or the port held by a program
+            print(f"{u.short}: the Device Manager's port {u.port} ({e})")
+            continue
+        if state is None:
+            print(f"{u.short}: the Device Manager's port {u.port}, firmware {version} "
+                  "(without SocketCAN mode, or before 2.0.10)")
+            continue
+        cur, stored, flags = state
+        extra = ("; fell back from the SocketCAN adapter, as no program here used it"
+                 if flags & USB_MODE_FELL_BACK else "")
+        print(f"{u.short}: the Device Manager's port {u.port}, firmware {version}; starts as "
+              f"{'the SocketCAN adapter' if stored == USB_MODE_GS_USB else 'the Manager port'}{extra}")
+    return 0
+
+
+def _set_mode(link, mode, persist, args):
+    kind, code = link.transact(CMD_SET_USB_MODE, bytes([mode, 1 if persist else 0]), timeout=3.0)
+    if kind == "nack" and code == ERR_LOCKED:
+        password = args.password or os.environ.get("CTRIPLE_PASSWORD")
+        if not password and sys.stdin.isatty():
+            password = getpass.getpass("The unit's CAN Viewer password: ")
+        if not password:
+            raise Failure("the unit has a CAN Viewer password: give it with --password")
+        if not link.prove_viewer(password):
+            raise Failure("wrong CAN Viewer password")
+        kind, code = link.transact(CMD_SET_USB_MODE, bytes([mode, 1 if persist else 0]), timeout=3.0)
+    if kind == "ack":
+        return
+    if kind == "nack" and code == ERR_INVALID_CMD:
+        raise Failure("this firmware has no SocketCAN mode: CAN Triple 2.0 firmware 2.0.7 or later")
+    if kind == "nack" and code == ERR_OUT_OF_BOUNDS and persist:
+        raise Failure("this firmware cannot keep the mode: --persist needs 2.0.10 or later")
+    if kind == "nack" and code == ERR_FLASH_WRITE:
+        raise Failure("the unit could not keep the mode")
+    raise Failure(f"the unit refused ({kind}{'' if code is None else ' 0x%02X' % code})")
+
+
+def cmd_socketcan(args):
+    u = one(args, USB_MODE_MANAGER, "on their Manager port")
+    if u.port is None:
+        raise Failure(f"{u.short}: no serial port for it")
+    link = Link(u.port)
+    try:
+        _set_mode(link, USB_MODE_GS_USB, args.persist, args)
+    finally:
+        link.close()
+    end = time.time() + 6.0
+    while time.time() < end:
+        gs = [x for x in units() if x.serial == u.serial and x.mode == USB_MODE_GS_USB]
+        if gs and (len(gs[0].interfaces()) == 3 or time.time() > end - 3.0):
+            # The interfaces exist as canN first; udev names them a moment later.
+            subprocess.run(["udevadm", "settle", "--timeout=5"], capture_output=True)
+            names = gs[0].interfaces()
+            print(f"{u.short}: the SocketCAN adapter" + (" from now on" if args.persist else ""))
+            if names:
+                for bus, name in names:
+                    print(f"  CAN{bus}: {name}")
+                print(f"  bring them up: sudo ctriple up --bitrate 500000"
+                      + (f" --unit {u.short}" if args.unit else ""))
+            else:
+                print("  gs_usb has not taken it: is cantriple-socketcan's udev rule installed?")
+            return 0
+        time.sleep(0.1)
+    raise Failure("the unit acknowledged, but did not come back as the adapter")
+
+
+def cmd_manager(args):
+    found = pick(args, USB_MODE_GS_USB)
+    if not found and args.persist:
+        # Already the Manager's port: only the start mode changes.
+        u = one(args, USB_MODE_MANAGER, "on their Manager port")
+        link = Link(u.port)
+        try:
+            _set_mode(link, USB_MODE_MANAGER, True, args)
+        finally:
+            link.close()
+        print(f"{u.short}: starts as the Manager port from now on")
+        return 0
+    u = one(args, USB_MODE_GS_USB, "in SocketCAN mode")
+    req = struct.pack(CTRL_FMT, 0x40, CT_USB_REQ_SET_MODE, USB_MODE_MANAGER,
+                      CT_USB_REQ_STORE if args.persist else 0, 0, 1000, 0)
+    try:
+        with open(u.usb_node, "wb", buffering=0) as f:
+            fcntl.ioctl(f, USBDEVFS_CONTROL, bytearray(req))
+    except PermissionError:
+        raise Failure(f"no access to {u.usb_node}: use sudo, or install cantriple-socketcan's udev rule")
+    except OSError as e:
+        if e.errno == errno.EPIPE:
+            raise Failure("the unit refused the request (firmware before 2.0.10 with --persist?)")
+        raise
+    end = time.time() + 6.0
+    while time.time() < end:
+        back = [x for x in units() if x.serial == u.serial and x.mode == USB_MODE_MANAGER and x.port]
+        if back:
+            print(f"{u.short}: the Device Manager's port {back[0].port}"
+                  + (" from now on" if args.persist else ""))
+            return 0
+        time.sleep(0.1)
+    raise Failure("the unit did not come back as the Manager port")
+
+
+def read_config():
+    conf = {}
+    try:
+        with open(CONFIG) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    conf[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return conf
+
+
+def buses(args):
+    if not args.bus:
+        return {1, 2, 3}
+    try:
+        chosen = {int(b) for b in args.bus.replace(" ", "").split(",") if b}
+    except ValueError:
+        raise Failure("--bus takes 1, 2 and 3, e.g. --bus 1,3")
+    if not chosen <= {1, 2, 3}:
+        raise Failure("--bus takes 1, 2 and 3")
+    return chosen
+
+
+def ip(*argv):
+    r = subprocess.run(["ip", "link", "set"] + list(argv), capture_output=True, text=True)
+    if r.returncode != 0:
+        raise Failure(f"ip link set {' '.join(argv)}: {r.stderr.strip()}")
+
+
+def cmd_up(args):
+    if os.geteuid() != 0:
+        raise Failure("bringing an interface up needs root: sudo ctriple up ...")
+    conf = read_config()
+    targets = [u for u in pick(args, USB_MODE_GS_USB)]
+    if not targets:
+        raise Failure("no unit in SocketCAN mode: ctriple socketcan first")
+    chosen = buses(args)
+    for u in targets:
+        for bus, name in u.interfaces():
+            if bus not in chosen:
+                continue
+            rate = str(args.bitrate or conf.get(f"CAN{bus}_BITRATE") or conf.get("BITRATE") or "")
+            drate = str(args.dbitrate or conf.get(f"CAN{bus}_DBITRATE") or conf.get("DBITRATE") or "")
+            if not rate:
+                raise Failure(f"no bit rate for {name}: --bitrate, or BITRATE in {CONFIG}")
+            opts = ["bitrate", rate]
+            if drate:
+                opts += ["dbitrate", drate, "fd", "on"]
+            for flag, word in ((args.listen_only, "listen-only"), (args.loopback, "loopback"),
+                               (args.berr_reporting, "berr-reporting")):
+                if flag:
+                    opts += [word, "on"]
+            opts += conf.get("OPTIONS", "").split()  # as ctriple-ifup applies them
+            ip(name, "down")
+            ip(name, "type", "can", *opts)
+            ip(name, "up")
+            print(f"{name} (CAN{bus}): up, {rate} bit/s" + (f", FD data {drate}" if drate else ""))
+    return 0
+
+
+def cmd_down(args):
+    if os.geteuid() != 0:
+        raise Failure("taking an interface down needs root: sudo ctriple down")
+    chosen = buses(args)
+    for u in pick(args, USB_MODE_GS_USB):
+        for bus, name in u.interfaces():
+            if bus in chosen:
+                ip(name, "down")
+                print(f"{name} (CAN{bus}): down")
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(prog="ctriple", description=__doc__.split("\n\n")[1],
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                epilog="\n\n".join(__doc__.split("\n\n")[2:]))
+    p.add_argument("command", nargs="?", default="status",
+                   choices=["status", "socketcan", "manager", "up", "down"])
+    p.add_argument("--unit", help="the end of the unit's serial number (MCU ID)")
+    p.add_argument("--persist", action="store_true", help="keep the mode for every power-up")
+    p.add_argument("--password", help="the unit's CAN Viewer password")
+    p.add_argument("--bitrate", type=int)
+    p.add_argument("--dbitrate", type=int, help="CAN FD data phase bit rate (turns FD on)")
+    p.add_argument("--listen-only", action="store_true")
+    p.add_argument("--loopback", action="store_true", help="inside the controller: nothing reaches the bus")
+    p.add_argument("--berr-reporting", action="store_true")
+    p.add_argument("--bus", help="which buses, e.g. 1,3 (default all three)")
+    p.add_argument("--version", action="version", version=f"ctriple {VERSION}")
+    args = p.parse_args()
+    try:
+        return {"status": cmd_status, "socketcan": cmd_socketcan, "manager": cmd_manager,
+                "up": cmd_up, "down": cmd_down}[args.command](args)
+    except Failure as e:
+        print(f"ctriple: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

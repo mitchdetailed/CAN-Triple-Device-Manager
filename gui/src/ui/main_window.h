@@ -10,6 +10,7 @@
 #include "../model/configuration.h"
 #include "../model/secure_file.h"
 #include "../protocol/device_link.h"
+#include "../protocol/device_session.h"
 #include "../protocol/hardware.h"
 
 class QLabel;
@@ -110,6 +111,7 @@ private:
     void onGetDeviceInfo();
     void onUpdateFirmware();
     void onLedBrightness();
+    void onUsbMode();
     // Open the manual at one page — context help for dialogs that emit
     // helpRequested(). See HelpWindow::showPage.
     void showHelpPage(const QString &pageFileName);
@@ -253,6 +255,10 @@ private:
     // connection was made (identifyConnectedUnit). Empty while disconnected,
     // and when the unit did not answer.
     std::optional<DeviceHardware> m_deviceHardware;
+    // A CAN Triple 2.0's USB mode as it answered on connecting, for the status
+    // bar's note on a unit that starts as the SocketCAN adapter or fell back
+    // from it. Empty while disconnected and on units that cannot say.
+    std::optional<device_session::UsbModeInfo> m_usbMode;
     // Monitor Channels asked for with no document open: the user agreed to
     // read the device's configuration first, and the monitor opens when that
     // Get finishes (onMonitorChannels; runGetTransfer's finished handler).

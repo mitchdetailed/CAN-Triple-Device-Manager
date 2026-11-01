@@ -68,6 +68,7 @@
 #include "firmware_update_dialog.h"
 #include "firmware_license_dialog.h"
 #include "led_brightness_dialog.h"
+#include "usb_mode_dialog.h"
 #include "theme.h"
 #include "options_dialog.h"
 #include "secure_builder_dialog.h"
@@ -422,6 +423,10 @@ void MainWindow::buildMenus()
     // A setting of the UNIT, like the firmware above it: a Send leaves it alone
     // and a Get does not read it (a CAN Triple 2.0 keeps it itself).
     onlineMenu->addAction(tr("LED &Brightness…"), this, &MainWindow::onLedBrightness);
+    // Also the UNIT's: which USB device a CAN Triple 2.0 is — the Manager's
+    // port or a SocketCAN adapter — and which it starts as. This is where a
+    // unit set to start as the adapter is told to be the Manager's port again.
+    onlineMenu->addAction(tr("USB M&ode…"), this, &MainWindow::onUsbMode);
     onlineMenu->addSeparator();
     // Set Access Passwords writes into the DEVICE, which is why it is here
     // rather than under File. The Firmware License Manager beside it is the
@@ -963,6 +968,13 @@ void MainWindow::updateConnectionStatus()
         // take different firmware.
         if (m_deviceHardware)
             text += QStringLiteral(" — ") + m_deviceHardware->summary();
+        // A unit that is only the Manager's port because nothing here used the
+        // adapter, or that will be the adapter at its next power-up, should
+        // not surprise anyone the next time it is plugged in.
+        if (m_usbMode && m_usbMode->fellBack)
+            text += tr(" — fell back from SocketCAN (Online > USB Mode)");
+        else if (m_usbMode && m_usbMode->startsAsAdapter())
+            text += tr(" — starts as SocketCAN (Online > USB Mode)");
         m_connectionLabel->setText(text);
         // Kept for Online > Connect while Tools > Options says to remember the
         // last connection; otherwise the port is chosen fresh every time.
@@ -972,6 +984,7 @@ void MainWindow::updateConnectionStatus()
         // What was learned about the unit belongs to that connection.
         m_deviceHardware.reset();
         m_unitCapacity.reset();
+        m_usbMode.reset();
         m_connectionLabel->setText(tr("Not connected"));
     }
     // Null-guarded: the first call happens while the window is still being
@@ -1139,6 +1152,18 @@ void MainWindow::identifyConnectedUnit()
             capacity.label = tr("device on %1").arg(m_link.portName()); // as a Get names it
             m_unitCapacity = capacity;
         }
+    }
+    m_usbMode.reset();
+    if (ok && hardware.family == BoardFamily::CanTriple2) {
+        device_session::UsbModeInfo usbMode;
+        QString ignored;
+        bool read = false;
+        {
+            BusyScope busy(this);
+            read = device_session::readUsbMode(&m_link, &usbMode, &ignored);
+        }
+        if (read && usbMode.supported)
+            m_usbMode = usbMode;
     }
     updateConnectionStatus();
     adoptUnitTarget(false);
@@ -3703,6 +3728,56 @@ void MainWindow::onLedBrightness()
         return;
     LedBrightnessDialog dialog(&m_link, state.settings, this);
     dialog.exec();
+}
+
+void MainWindow::onUsbMode()
+{
+    if (!ensureConnected())
+        return;
+    const QString title = tr("USB Mode");
+    device_session::UsbModeInfo info;
+    QString error;
+    bool ok = false;
+    {
+        BusyScope busy(this); // sync round trip on the main thread; block re-entry
+        ok = device_session::readUsbMode(&m_link, &info, &error);
+    }
+    if (!ok) {
+        QMessageBox::warning(this, title, error.isEmpty() ? tr("Unexpected response") : error);
+        return;
+    }
+    if (!info.supported) {
+        QMessageBox::information(
+            this, title,
+            tr("This unit cannot say which USB device it is. A CAN Triple 2.0 can be a "
+               "SocketCAN adapter as well as the Device Manager's port, from firmware 2.0.10; "
+               "update its firmware to set it here."));
+        return;
+    }
+    UsbModeDialog dialog(
+        &m_link, info,
+        [this](QWidget *parent) {
+            return AccessPasswordsDialog::promptAndProve(&m_link, AccessFunction::CanViewer,
+                                                         parent);
+        },
+        this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    if (dialog.unitLeft()) {
+        // The unit acknowledged and is leaving the bus: its port goes with it.
+        m_link.close();
+        updateConnectionStatus();
+        return;
+    }
+    // Still here: what it starts as may have changed, and the status bar says.
+    device_session::UsbModeInfo now;
+    QString ignored;
+    {
+        BusyScope busy(this);
+        if (device_session::readUsbMode(&m_link, &now, &ignored) && now.supported)
+            m_usbMode = now;
+    }
+    updateConnectionStatus();
 }
 
 void MainWindow::onGetDeviceInfo()
